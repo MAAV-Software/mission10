@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sim_truth_ev</name>
+  <version>0.0.0</version>
+  <description>Convert gz/ROS ground-truth odometry into PX4 vehicle_visual_odometry.</description>
+  <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
+  <license>MPL-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>px4_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

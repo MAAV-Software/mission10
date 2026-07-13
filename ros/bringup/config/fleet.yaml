@@ -1,0 +1,18 @@
+# PX4 SITL fleet for gz Harmonic.
+# pose is PX4_GZ_MODEL_POSE: "east,north,z,roll,pitch,yaw" (metres, radians).
+world: default
+model: x500            # ground-truth pose comes from the world PosePublisher (split per drone), feeding EV + UWB range
+autostart: 4023        # 4023_gz_x500_ev: EKF2 fuses external vision, GPS velocity-only (set 4001 for a GPS-only baseline)
+agent_port: 8888
+home_gps:
+  lat: 42.2658783
+  lon: -83.7487304
+  alt_m: 0.0
+vehicles:
+  # spawn on the hover spots: 3 m apart on the line (rules: 10 ft separation).
+  # each drone's launch-relative orbit is identical (center 4.6 m downrange),
+  # differing only by phase; spawn offsets reconstruct the world phased orbits.
+  - {namespace: px4_0, pose: "0,0,0,0,0,0"}
+  - {namespace: px4_1, pose: "3,0,0,0,0,0"}
+  - {namespace: px4_2, pose: "6,0,0,0,0,0"}
+  - {namespace: px4_3, pose: "9,0,0,0,0,0"}

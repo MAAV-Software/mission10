@@ -1,0 +1,46 @@
+# Single-drone phased-orbit in the M-Air netted cage (world: mair, fleet
+# fleet_mair.yaml). Same circle the real maneuver flies (radius/speed/altitude),
+# narrowed to one drone and re-centered on the takeoff pad so it stays clear of
+# the net: orbit_center_n_m 0 puts the orbit center on the spawn (the concrete
+# pad at the net center), giving >= 7.6 m to the nearest wall and 9.2 m below the
+# top net. Purpose: confirm the orbit path never reaches the net.
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 10
+    wait_for_start: true
+    force_arm: true
+    takeoff_altitude_m: 6.0
+    takeoff_acceptance_m: 0.5
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    drone_count: 1
+    orbit_center_e_m: 0.0
+    orbit_center_n_m: 0.0      # orbit the takeoff pad (was 4.6 = downrange offset)
+    orbit_radius_m: 4.6
+    orbit_speed_mps: 2.0
+    orbit_revolutions: 10.0
+    phase_step_deg: 90.0
+    phase0_deg: -90.0
+    # Single drone: no inter-drone deconfliction to do, so steady orbit (zero amp).
+    # Both lists must be length drone_count (=1).
+    orbit_mod_amp: [0.0]
+    orbit_mod_phase_deg: [0.0]
+    insertion_spin_deg: 235.0
+    to_center_time_s: 3.0
+    spiral_time_s: 10.0
+    peel_lead_in_s: 0.5
+    peel_stagger_s: 3.0
+    peel_duration_s: 4.0
+    peel_spin_deg: 90.0
+    peel_order: ""
+    orbit_auto_start: false
+    yaw_mode: tangent
+    # BVC safety net no-ops with no peers (mission self-disables on empty peer set).
+    bvc_enabled: true
+    bvc_safety_radius_m: 0.75
+    bvc_lookahead_m: 0.3
+    # EKF global origin = M-Air net center (the pad), so AUTO.RTL/Land return there.
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
+    origin_alt: 0.0

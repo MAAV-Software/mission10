@@ -1,0 +1,18 @@
+{
+  "schema": "assets-lock/1",
+  "assets": [
+    {
+      "name": "grass-scene",
+      "archive": "grass(1).zip",
+      "sha256": "747e7dcdca4a9e1b2473d31800addc4cc3be53f4678affb80a18900ad89f90c6",
+      "url": "TODO: upload to a mission10 GitHub Release and pin the asset URL here",
+      "extract_to": "models/yolo/assets/",
+      "contents": [
+        "Grass.blend — current grass scene, saved by Blender 5.0 (2026-04)",
+        "pfm1-mine-grass.blend — PFM-1 mine + grass, Blender 4.3 (2025-12)",
+        "grass.PNG / grass1.jpg / grass2.jpg — terrain textures"
+      ],
+      "note": "176 MB extracted; never enters git. Fetch script lands with the first weights.lock plumbing."
+    }
+  ]
+}

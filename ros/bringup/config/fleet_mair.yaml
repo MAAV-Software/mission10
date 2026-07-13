@@ -1,0 +1,21 @@
+# Single-drone PX4 SITL fleet for the M-Air netted cage (world: mair).
+# One x500 on the EV airframe (4023), unchanged from the 4-drone fleet — this
+# only narrows it to one vehicle and georeferences home to the real M-Air pad so
+# RTL/origin land back on the concrete square at the net center.
+world: mair
+model: x500            # unchanged: EV + UWB truth from the world PosePublisher
+autostart: 4023        # 4023_gz_x500_ev (external vision, GPS velocity-only)
+agent_port: 8888
+home_gps:
+  lat: 42.294438798326105   # M-Air net center (the ~1 m concrete pad)
+  lon: -83.7104553367608
+  alt_m: 0.0
+vehicles:
+  # Spawn 1.5 m east of the pad (world origin), NOT on it: world_truth_to_odom
+  # rejects any transform within origin_clear_m (0.8) of the world origin in XY
+  # to tell model poses from link poses, so a drone spawned at the origin gets
+  # filtered out of the truth feed and EV never flows. The orbit center is set
+  # to the spawn (phased_orbits_mair.yaml: orbit_center_n_m 0), so it takes
+  # off, orbits, and lands at the spawn — still clearing every net wall by
+  # >= 6.1 m. Put it back on the pad once the splitter keys on entity names.
+  - {namespace: px4_0, pose: "1.5,0,0,0,0,0"}

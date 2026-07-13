@@ -1,0 +1,57 @@
+# Single-drone phased-orbit for the REAL drone at M-Air (no sim).
+#
+# Same node and trajectory as the SITL config (phased_orbits_mair.yaml) — that is
+# the sim2real point: PX4 consumes the identical 20 Hz OFFBOARD setpoint stream
+# whether it comes from the sim companion or the real Pi. Only the environment
+# around the node changes:
+#   - force_arm false           -> real preflight checks + safety pilot on RC
+#   - set_global_origin_on_link false -> real GPS gives the EKF origin; do NOT
+#                                  send SET_GPS_GLOBAL_ORIGIN (it can shove the
+#                                  local frame mid-air). (SITL needed it because
+#                                  the EV-only estimate had no global anchor.)
+#   - bvc_enabled false         -> single drone, no peers to deconflict
+# Flight controller side (NOT set here — set on the Pixhawk): a GPS airframe (not
+# the EV airframe 4023), real RC/datalink/battery failsafes, and a geofence
+# (cap alt < ~12 m + tight radius) as the net backstop.
+#
+# Capture for offline cyclops is a separate recorder (bag /camera/image_raw +
+# PX4 IMU); this node only flies the orbit.
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 10
+    wait_for_start: true
+    force_arm: false           # REAL: preflight checks on, no force-arm bypass
+    takeoff_altitude_m: 5.0    # matches the proven 5 m square; M-Air net is 15.2 m
+    takeoff_acceptance_m: 0.5
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    drone_count: 1
+    orbit_center_e_m: 0.0
+    orbit_center_n_m: 0.0      # orbit the takeoff point (EKF local origin)
+    orbit_radius_m: 4.6        # sim-verified to clear the net by >=7.3 m
+    orbit_speed_mps: 2.0
+    orbit_revolutions: 6.0     # ~87 s of capture; sim used 10 (raise once trusted)
+    phase_step_deg: 90.0
+    phase0_deg: -90.0
+    orbit_mod_amp: [0.0]
+    orbit_mod_phase_deg: [0.0]
+    insertion_spin_deg: 235.0
+    to_center_time_s: 3.0
+    spiral_time_s: 10.0
+    peel_lead_in_s: 0.5
+    peel_stagger_s: 3.0
+    peel_duration_s: 4.0
+    peel_spin_deg: 90.0
+    peel_order: ""
+    orbit_auto_start: false
+    yaw_mode: tangent
+    bvc_enabled: false         # REAL single drone: no peers
+    bvc_safety_radius_m: 0.75
+    bvc_lookahead_m: 0.3
+    set_global_origin_on_link: false   # REAL: GPS provides the EKF origin
+    # Ignored while set_global_origin_on_link=false; kept for documentation (the
+    # M-Air pad) and as the fallback if ever flown on an EV/GPS-denied estimate.
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
+    origin_alt: 0.0

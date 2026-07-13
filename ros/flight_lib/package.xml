@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>flight_lib</name>
+  <version>0.0.0</version>
+  <description>Pure-math flight geometry: pinwheel orbit + hover/land profiles. No ROS, no PX4 — consumed by the flight_* mission packages.</description>
+  <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
+  <license>MPL-2.0</license>
+
+  <depend>python3-numpy</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

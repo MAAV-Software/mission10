@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+
+build/
+install/
+log/
+
+# assets + datasets
+models/*/assets/
+models/*/out/
+
+.DS_Store

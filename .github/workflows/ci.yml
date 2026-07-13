@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest numpy
+      - name: flight_lib tests (pure algorithms, no ROS)
+        run: |
+          set -euo pipefail
+          PYTHONPATH="ros/flight_lib" python3 -m pytest ros/flight_lib/test -q
+      # models/yolo datagen tests return here once ros/mission_engine exists
+      # (datagen consumes mission_engine.core for camera geometry; see
+      # models/yolo/README.md):
+      #   (cd models/yolo && python3 -m unittest discover -s test -t .)

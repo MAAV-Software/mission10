@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>sim_uwb</name>
+  <version>0.0.0</version>
+  <description>gz-truth pairwise UWB range sensor (ground-truth geometry + noise).</description>
+  <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
+  <license>MPL-2.0</license>
+  <depend>rclpy</depend>
+  <depend>nav_msgs</depend>
+  <depend>flight_interfaces</depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

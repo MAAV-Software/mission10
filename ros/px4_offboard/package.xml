@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>px4_offboard</name>
+  <version>0.0.0</version>
+  <description>Reusable PX4 offboard plumbing: namespacing, the offboard handshake, state tracking, and the mission gate. Mission logic lives in the flight_* packages.</description>
+  <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
+  <license>MPL-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>px4_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
