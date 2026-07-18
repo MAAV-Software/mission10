@@ -16,8 +16,8 @@ use mission10_uwb_protocol::{
 use crate::Irqs;
 use crate::board::{
     FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, OWN_INDEX,
-    PEER_ADDRESS, PEER_INDEX, REPLY_DELAY_US, RadioHardware, RadioWait, diagnostic,
-    finish_receiving, finish_sending, prepare_rx, prepare_tx, radio_config,
+    PEER_ADDRESS, PEER_INDEX, REPLY_DELAY_US, RESPONSE_TIMEOUT_US, RadioHardware, RadioWait,
+    diagnostic, finish_receiving, finish_sending, prepare_rx, prepare_tx, radio_config,
     recoverable_receive_error, reset_after_radio_failure, wait_receive, wait_send,
 };
 use crate::host::{publish, transport_counters, update_radio_counters};
@@ -231,7 +231,7 @@ pub async fn run(hw: RadioHardware) {
             };
             radio = finish_sending(sending, &mut wait).await;
 
-            if let Err(error) = prepare_rx(&mut radio).await {
+            if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
                 recover_exchange(error, &mut wait, &mut spi_errors_since_range);
                 Timer::after_millis(10).await;
                 continue 'transaction;
@@ -307,7 +307,7 @@ pub async fn run(hw: RadioHardware) {
             };
             radio = finish_sending(sending, &mut wait).await;
 
-            if let Err(error) = prepare_rx(&mut radio).await {
+            if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
                 recover_exchange(error, &mut wait, &mut spi_errors_since_range);
                 Timer::after_millis(10).await;
                 continue 'transaction;
@@ -364,7 +364,7 @@ pub async fn run(hw: RadioHardware) {
     }
 
     'responder: loop {
-        if let Err(error) = prepare_rx(&mut radio).await {
+        if let Err(error) = prepare_rx(&mut radio, None).await {
             recover_exchange(error, &mut wait, &mut spi_errors_since_range);
             Timer::after_millis(10).await;
             continue 'responder;
@@ -436,7 +436,7 @@ pub async fn run(hw: RadioHardware) {
         };
         radio = finish_sending(sending, &mut wait).await;
 
-        if let Err(error) = prepare_rx(&mut radio).await {
+        if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
             recover_exchange(error, &mut wait, &mut spi_errors_since_range);
             Timer::after_millis(10).await;
             continue 'responder;
@@ -445,22 +445,17 @@ pub async fn run(hw: RadioHardware) {
             Ok(receiving) => receiving,
             Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
-        let (length, range_rx) = loop {
-            match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
-                Ok(message) => break message,
-                Err(error) if recoverable_receive_error(error) => {
-                    warn!("recovering RANGE receive error");
-                    publish_error(error);
-                    wait.recovered();
-                    if receiving.fast_cmd(FastCommand::CMD_CLR_IRQS).await.is_err()
-                        || receiving.fast_cmd(FastCommand::CMD_RX).await.is_err()
-                    {
-                        reset_after_radio_failure(Diagnostic::Spi);
-                    }
-                }
-                Err(error) => {
-                    reset_after_radio_failure(error);
-                }
+        let (length, range_rx) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
+            Ok(message) => message,
+            Err(error) if recoverable_receive_error(error) => {
+                warn!("restarting exchange after RANGE receive error");
+                publish_error(error);
+                wait.recovered();
+                radio = finish_receiving(receiving, &mut wait).await;
+                continue 'responder;
+            }
+            Err(error) => {
+                reset_after_radio_failure(error);
             }
         };
         radio = finish_receiving(receiving, &mut wait).await;

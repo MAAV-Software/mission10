@@ -612,7 +612,10 @@ mod tests {
     fn render_committed_fixture() -> String {
         use std::fmt::Write;
         let mut text = String::from(FIXTURE_HEADER);
-        for (name, bytes) in radio_fixture_frames().into_iter().chain(host_fixture_frames()) {
+        for (name, bytes) in radio_fixture_frames()
+            .into_iter()
+            .chain(host_fixture_frames())
+        {
             text.push_str(name);
             text.push('=');
             for byte in bytes {
@@ -630,7 +633,10 @@ mod tests {
     fn committed_fixture_matches_the_encoders() {
         let rendered = render_committed_fixture();
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/host_protocol_v3.frames");
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/testdata/host_protocol_v3.frames"
+            );
             std::fs::write(path, &rendered).expect("write golden fixture");
             return;
         }
@@ -663,5 +669,4 @@ mod tests {
             validity: crate::StateValidity(0x800d),
         }
     }
-
 }

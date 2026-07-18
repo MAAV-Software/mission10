@@ -20,8 +20,9 @@ COBS( Hubpack(HostToRadioEnvelope | RadioToHostEnvelope) || CRC-32/ISO-HDLC ) ||
 
 The same envelopes are intended for J20 USB CDC and the later UART adapter. The
 temporary 18-byte over-the-air format is deliberately separate and selected by
-the default `dw1000-bench` build feature. It exists only to range against the
-DW1000 bench node on `bigrpi5` while the second DWM3001CDK is unavailable.
+the default `dw1000-bench` build feature. It began as the compatibility path for
+the DW1000 bench node on `bigrpi5` and remains only for radio bring-up while the
+native fleet FSM is implemented.
 
 ## Build and test
 
@@ -48,9 +49,10 @@ bump):
 UPDATE_GOLDEN=1 cargo test -p mission10-uwb-protocol committed_fixture
 ```
 
-The default build is the `A1:C1` responder used with the DW1000
-initiator and waits on the DW3110's active-high IRQ at nRF `P1.02`.
-`--features initiator` builds the reverse-role `A0:C0` diagnostic.
+The default build is the `A1:C1` responder used by both the DW1000 bench
+initiator and the second DWM3001CDK diagnostic. It waits on the DW3110's
+active-high IRQ at nRF `P1.02`; `--features initiator` builds the reverse-role
+`A0:C0` diagnostic.
 `engineering-sample` must only be enabled for a module physically marked E1.0.
 Build the role you intend to flash last; both variants use the same ELF path.
 
@@ -97,9 +99,9 @@ queues keep range and peer-state delivery ahead of discardable diagnostics.
 
 Native air frames use PAN `0x4d10` and IEEE 802.15.4 short source/destination
 addresses. Drone addresses are `0..4`; bench/development addresses occupy
-`0x8000..0x80ff`. The native four-message ranging FSM remains gated until a
-second DWM3001CDK is available, but its codec and shared timestamp arithmetic
-are covered by workstation tests now.
+`0x8000..0x80ff`. The native four-message ranging FSM remains gated while the
+bench-compatible path is characterized on the two available DWM3001CDKs, but
+its codec and shared timestamp arithmetic are covered by workstation tests.
 
 Runtime PHY/timing failures abandon only the active exchange. Finish-state and
 SPI preparation failures receive bounded retries; an error from a consuming
@@ -130,14 +132,16 @@ measurements, reported typed Hubpack ranges over J20, timed out visibly when the
 DW1000 process stopped, and resumed after only the peer process restarted.
 
 These are bring-up observations, not calibration results. Surveyed-distance,
-orientation, signal-level, warm-up, and two-DWM3001CDK testing remain required.
+orientation, signal-level, warm-up, and fleet-scheduling tests remain required.
 
 ## IRQ bench result (2026-07-18)
 
 The radio wait path uses a race-safe `status -> wait_for_high/deadline -> status`
 loop. The driver interrupt masks are changed in `Ready` before each TX or RX;
-the retained one-second deadline diagnoses a missing interrupt rather than
-acting as the normal progress mechanism.
+the retained one-second deadline diagnoses a missing interrupt. Bounded
+response legs additionally use the DW3110 receive-frame-wait timer, so a lost
+packet ends the active exchange in hardware rather than leaving both peers in
+RX until noise happens to raise an SFD/PHY error.
 
 The IRQ responder sustained 341 ranges in 41.3 seconds (8.2 Hz), reported IRQ
 wakes with zero spurious wakes, and resumed after its DW1000 initiator was
@@ -170,3 +174,40 @@ J20 independently tracked the active 50 Hz and 100 Hz regimes without invalid
 host frames. The 5 ms result is a stress observation, not the fleet operating
 point: Mission 10 should schedule close pairs at 50 Hz, selectively promote an
 urgent pair toward 100 Hz, and retain airtime for the other five possible pairs.
+
+## Two-DWM3001CDK bench result (2026-07-18)
+
+The `drone2` initiator and `bigrpi5` responder completed DS-TWR in both radios
+using the temporary bench air codec. With no hardware frame-wait timeout, one
+lost packet could leave both peers receiving indefinitely; random RF activity
+eventually produced SFD/PHY flags and accidentally restarted the exchange. A
+30-second baseline completed only about 52 ranges before this failure mode
+dominated.
+
+The IEEE short-SFD timeout is now the recommended 129 symbols for the
+128-symbol preamble, standard 8-symbol SFD, and PAC8. PollAck, Range, and
+RangeReport reception use a 10 ms DW3110 `RX_FWTO` deadline; the responder's
+idle wait for Poll remains unbounded. The initiator's one-second missing-IRQ
+counter stayed at zero after this change, and frame-wait expirations recovered
+the transaction deterministically.
+
+The corrected responder reported 5,267 ranges in 60 seconds (87.8 Hz), 114
+recoverable diagnostics, and zero invalid host frames. An upstream USB hub on
+`drone2` re-enumerated J-Link, J20, Ethernet, and video together during the
+soak; ranging continued, distinguishing that host USB event from a radio reset.
+The unsurveyed range was roughly 5.3--5.8 m and is not a calibration result.
+
+A subsequent DW3000 manual audit confirmed that `dw3000-ng` performs the
+mandatory PGF/RX calibration during configuration. It also found the documented
+delayed-transmit corner where neither HPDWARN nor TXFRS is asserted. TX
+completion is bounded and checks `PMSC_STATE` plus `TX_STATE` to identify that
+silent failure before aborting the exchange. The initial 20 ms guard produced
+3,019 responder and 3,029 initiator ranges in 35 seconds (86.4--86.7 Hz) with
+zero invalid host frames.
+
+Reducing the guard to 10 ms produced 3,034 responder and 3,038 initiator ranges
+in the same interval (86.8--87.0 Hz). Neither run produced a TX-completion or
+radio-state failure, and the initiator software-timeout counter remained zero.
+The 10 ms capture encountered one partial host frame immediately after opening
+an already-streaming CDC endpoint and none in a warm follow-up. Recoverable
+radio errors remained RX frame-wait, PHY, Reed-Solomon, and SFD failures.

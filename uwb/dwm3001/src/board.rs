@@ -12,7 +12,7 @@ use embassy_futures::select::{Either, select};
 use embassy_nrf::gpio::{Input, Pull};
 use embassy_nrf::wdt::WatchdogHandle;
 use embassy_nrf::{Peri, pac, peripherals};
-use embassy_time::Timer;
+use embassy_time::{Duration, Instant as EmbassyInstant, Timer};
 use embedded_hal_async::spi::SpiDevice;
 use mission10_uwb_protocol::host::{Diagnostic, HealthCounters};
 
@@ -35,9 +35,26 @@ pub const FALLBACK_ANTENNA_DELAY: u16 = 16_390;
 // DW1000 peer we can lower it toward the few-hundred-microsecond hardware limit.
 pub const REPLY_DELAY_US: u32 = 2_000;
 
+// Every response in the bench exchange is scheduled within 2 ms. Give USB and
+// executor activity ample margin, but do not let a lost packet leave both
+// peers receiving forever.
+pub const RESPONSE_TIMEOUT_US: u32 = 10_000;
+
 // Avoid monopolizing the channel in the one-pair diagnostic. Together with the
 // two delayed legs this targets roughly 100 ranging exchanges per second.
 pub const INITIATOR_INTER_EXCHANGE_GUARD_MS: u64 = 5;
+
+// IEEE short SFD timeout: preamble symbols + 1 + SFD symbols - PAC symbols.
+// The 128-symbol preamble selects PAC8, and the standard SFD is 8 symbols.
+const SFD_TIMEOUT_SYMBOLS: u32 = 128 + 1 + 8 - 8;
+
+// A normal frame, including either 2 ms delayed leg, finishes comfortably
+// inside this deadline. The bound is also how we detect the DW3000 delayed-TX
+// corner where neither HPDWARN nor TXFRS is raised.
+// TODO: Measure command-to-TXFRS latency under full host/UART load, then lower
+// this toward 5 ms if the observed maximum retains adequate scheduling margin.
+const TX_COMPLETION_TIMEOUT: Duration = Duration::from_millis(10);
+const RX_IRQ_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct RadioHardware {
     pub spi: Peri<'static, peripherals::SPI3>,
@@ -63,7 +80,7 @@ pub fn radio_config() -> RadioConfig {
         frame_filtering: false,
         ranging_enable: true,
         sts_mode: StsMode::StsModeOff,
-        sfd_timeout: 121,
+        sfd_timeout: SFD_TIMEOUT_SYMBOLS,
         tx_preamble_code: Some(10),
         rx_preamble_code: Some(10),
         phr_mode: PhrMode::Standard,
@@ -104,6 +121,12 @@ pub struct RadioWait<'d> {
     woke_on_irq: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitWake {
+    Irq,
+    Deadline,
+}
+
 impl<'d> RadioWait<'d> {
     pub fn new(irq: Peri<'d, impl embassy_nrf::gpio::Pin>, mut watchdog: WatchdogHandle) -> Self {
         watchdog.pet();
@@ -115,10 +138,18 @@ impl<'d> RadioWait<'d> {
         }
     }
 
-    pub async fn pending(&mut self) {
+    async fn pending_until(&mut self, deadline: EmbassyInstant) -> WaitWake {
         self.watchdog.pet();
         if self.woke_on_irq {
             self.counters.spurious_irq_wakes = self.counters.spurious_irq_wakes.wrapping_add(1);
+        }
+
+        // Check the operation-wide deadline before the level-sensitive IRQ. A
+        // stuck-high line must not repeatedly bypass the timeout path.
+        if EmbassyInstant::now() >= deadline {
+            self.counters.wait_timeouts = self.counters.wait_timeouts.wrapping_add(1);
+            self.woke_on_irq = false;
+            return WaitWake::Deadline;
         }
 
         if self.irq.is_high() {
@@ -126,20 +157,23 @@ impl<'d> RadioWait<'d> {
             self.woke_on_irq = true;
             // A high line without a status bit should not become a tight SPI loop.
             Timer::after_micros(50).await;
-            return;
+            return WaitWake::Irq;
         }
 
-        match select(self.irq.wait_for_high(), Timer::after_secs(1)).await {
+        let wake = match select(self.irq.wait_for_high(), Timer::at(deadline)).await {
             Either::First(()) => {
                 self.counters.irq_wakes = self.counters.irq_wakes.wrapping_add(1);
                 self.woke_on_irq = true;
+                WaitWake::Irq
             }
             Either::Second(()) => {
                 self.counters.wait_timeouts = self.counters.wait_timeouts.wrapping_add(1);
                 self.woke_on_irq = false;
+                WaitWake::Deadline
             }
-        }
+        };
         self.watchdog.pet();
+        wake
     }
 
     pub fn completed(&mut self) {
@@ -180,7 +214,10 @@ where
     Ok(())
 }
 
-pub async fn prepare_rx<SPI>(radio: &mut DW3000<SPI, Ready>) -> Result<(), Diagnostic>
+pub async fn prepare_rx<SPI>(
+    radio: &mut DW3000<SPI, Ready>,
+    frame_wait_timeout_us: Option<u32>,
+) -> Result<(), Diagnostic>
 where
     SPI: SpiDevice<u8>,
 {
@@ -192,6 +229,30 @@ where
         .fast_cmd(FastCommand::CMD_CLR_IRQS)
         .await
         .map_err(|_| Diagnostic::Spi)?;
+    if let Some(microseconds) = frame_wait_timeout_us {
+        // RX_FWTO ticks are approximately 1.0256 us. Round up so the hardware
+        // deadline is never shorter than the requested interval.
+        let ticks = ((u64::from(microseconds) * 10_000 + 10_255) / 10_256) as u32;
+        radio
+            .ll()
+            .rx_fwto()
+            .write(|w| w.value(ticks))
+            .await
+            .map_err(|_| Diagnostic::Spi)?;
+        radio
+            .ll()
+            .sys_cfg()
+            .modify(|_, w| w.rxwtoe(1))
+            .await
+            .map_err(|_| Diagnostic::Spi)?;
+    } else {
+        radio
+            .ll()
+            .sys_cfg()
+            .modify(|_, w| w.rxwtoe(0))
+            .await
+            .map_err(|_| Diagnostic::Spi)?;
+    }
     radio
         .enable_rx_interrupts()
         .await
@@ -206,13 +267,31 @@ pub async fn wait_send<SPI>(
 where
     SPI: SpiDevice<u8>,
 {
+    let deadline = EmbassyInstant::now() + TX_COMPLETION_TIMEOUT;
     loop {
         match sending.s_wait().await {
             Ok(timestamp) => {
                 wait.completed();
                 return Ok(timestamp);
             }
-            Err(nb::Error::WouldBlock) => wait.pending().await,
+            Err(nb::Error::WouldBlock) => {
+                if wait.pending_until(deadline).await == WaitWake::Deadline {
+                    // DW3000 user manual, delayed-TX erratum: in this state the
+                    // requested frame is never sent and neither HPDWARN nor
+                    // TXFRS is asserted. `dw3000-ng::s_wait` cannot otherwise
+                    // distinguish it from a transmission still in progress.
+                    let state = sending.ll().sys_state().read().await;
+                    wait.completed();
+                    let state = state.map_err(|_| Diagnostic::Spi)?;
+                    return Err(
+                        if (0x08..=0x0f).contains(&state.pmsc_state()) && state.tx_state() == 0 {
+                            Diagnostic::DelayedSendPowerUpWarning
+                        } else {
+                            Diagnostic::RadioState
+                        },
+                    );
+                }
+            }
             Err(nb::Error::Other(error)) => {
                 wait.completed();
                 return Err(diagnostic(&error));
@@ -235,7 +314,13 @@ where
                 wait.completed();
                 return Ok((length, timestamp));
             }
-            Err(nb::Error::WouldBlock) => wait.pending().await,
+            Err(nb::Error::WouldBlock) => {
+                // An unbounded responder RX is expected when there is no peer.
+                // Bounded exchange legs terminate through RX_FWTO; this longer
+                // wake remains only an IRQ/watchdog diagnostic interval.
+                wait.pending_until(EmbassyInstant::now() + RX_IRQ_DIAGNOSTIC_INTERVAL)
+                    .await;
+            }
             Err(nb::Error::Other(error)) => {
                 wait.completed();
                 return Err(diagnostic(&error));
