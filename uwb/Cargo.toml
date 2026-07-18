@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["protocol", "dwm3001"]
+
+[profile.dev]
+codegen-units = 1
+debug = 2
+incremental = false
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+

@@ -1,0 +1,34 @@
+[package]
+name = "mission10-dwm3001"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+# The E1.0 module marking cannot be derived reliably from DW3000 OTP. Enable
+# this only for a board physically marked DWM3001C(DK)E1.0.
+engineering-sample = []
+initiator = []
+smoke = []
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+dw3000-ng = { version = "1.0.2", default-features = false, features = ["async", "defmt"] }
+embassy-executor = { version = "0.10.0", features = ["defmt", "executor-thread", "platform-cortex-m"] }
+embassy-futures = "0.1.2"
+embassy-nrf = { version = "0.11.0", features = ["defmt", "gpiote", "nrf52833", "time", "time-driver-rtc1", "unstable-pac"] }
+embassy-sync = { version = "0.8.0", features = ["defmt"] }
+embassy-time = { version = "0.5.1", features = ["defmt"] }
+embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt"] }
+embedded-hal-bus = { version = "0.3.0", features = ["async"] }
+embedded-hal-async = "1.0.0"
+heapless = "0.9.3"
+# dw3000-ng permits any fixed 1.x; 1.31 requires a not-yet-stable compiler.
+fixed = "=1.30.0"
+mission10-uwb-protocol = { path = "../protocol" }
+nb = "1.1.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }

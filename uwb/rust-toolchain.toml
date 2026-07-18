@@ -1,0 +1,6 @@
+[toolchain]
+channel = "1.92.0"
+components = ["llvm-tools-preview", "rust-src"]
+profile = "minimal"
+targets = ["thumbv7em-none-eabihf"]
+

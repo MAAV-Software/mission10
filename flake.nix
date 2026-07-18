@@ -4,14 +4,23 @@
   inputs = {
     nix-ros-overlay.url = "github:lopsided98/nix-ros-overlay/master";
     nixpkgs.follows = "nix-ros-overlay/nixpkgs"; # Remeber to be in lockstep with the overlay!
+    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
-  outputs = { self, nix-ros-overlay, nixpkgs }:
+  outputs = { self, nix-ros-overlay, nixpkgs, rust-overlay }:
     nix-ros-overlay.inputs.flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ nix-ros-overlay.overlays.default ];
+          overlays = [
+            nix-ros-overlay.overlays.default
+            rust-overlay.overlays.default
+          ];
+        };
+
+        uwbRust = pkgs.rust-bin.stable."1.92.0".default.override {
+          targets = [ "thumbv7em-none-eabihf" ];
+          extensions = [ "rust-src" "llvm-tools-preview" ];
         };
 
         # PX4<->ROS2 uXRCE-DDS bridge. Not in nixpkgs; pinned to the
@@ -32,6 +41,18 @@
               pkgs.python3
               pkgs.vcstool
               pkgs.uv
+            ];
+          };
+
+          # DWM3001CDK software is always built on a workstation. The Pis only
+          # receive the resulting ELF and run probe-rs/serial tooling.
+          uwb = pkgs.mkShell {
+            name = "mission10-uwb";
+            packages = [
+              uwbRust
+              pkgs.cargo-binutils
+              pkgs.flip-link
+              pkgs.probe-rs-tools
             ];
           };
         } // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -65,7 +86,7 @@
                   ros-gz-bridge
                   # px4_msgs is deliberately NOT here: pinned in
                   # externals.repos, colcon-built in the workspace so it
-                  # always matches deployed firmware.
+                  # always matches deployed PX4 firmware.
                 ];
               })
             ];

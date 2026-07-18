@@ -15,6 +15,7 @@ Software stack for IARC Mission 10. This workspace contains mission nodes, launc
 | `ros/sim_truth_ev` | Sim twin: gz ground truth → PX4 external vision, with fault injection. |
 | `ros/sim_uwb` | Sim twin: pairwise UWB ranges from gz truth + noise/dropout. |
 | `ros/uwb` | Real-hardware UWB: DW1000 driver, ranging core, ROS range node. |
+| `uwb/` | DWM3001CDK software, typed host protocol, and bring-up tools. |
 | `ros/ros_gz_marker_bridge` | ROS → gz visual marker bridge (visualization only). |
 | `models/yolo` | PFM-1 mine detector pipeline: synthetic datagen → training → Hailo export. |
 | `operator/` | Operator phone webapp. |
