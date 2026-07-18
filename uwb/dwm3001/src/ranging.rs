@@ -7,18 +7,20 @@ use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Delay, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
+use mission10_uwb_protocol::dw1000_bench::{FRAME_LEN, Frame, MessageKind};
+use mission10_uwb_protocol::host::{Diagnostic, OperatingMode, RadioToHost};
 use mission10_uwb_protocol::{
-    Diagnostic, FRAME_LEN, Frame, MessageKind, RadioToHost, ResponderTimestamps, TIMESTAMP_MASK,
-    delayed_tx_time, distance_metres,
+    ResponderTimestamps, TIMESTAMP_MASK, delayed_tx_time, distance_metres,
 };
 
 use crate::Irqs;
 use crate::board::{
-    FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, PEER_ADDRESS,
-    PEER_INDEX, REPLY_DELAY_US, RadioHardware, RadioWait, prepare_rx, prepare_tx, radio_config,
-    recoverable_receive_error, wait_receive, wait_send,
+    FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, OWN_INDEX,
+    PEER_ADDRESS, PEER_INDEX, REPLY_DELAY_US, RadioHardware, RadioWait, diagnostic,
+    finish_receiving, finish_sending, prepare_rx, prepare_tx, radio_config,
+    recoverable_receive_error, reset_after_radio_failure, wait_receive, wait_send,
 };
-use crate::host::publish;
+use crate::host::{publish, transport_counters, update_radio_counters};
 
 fn publish_error(diagnostic: Diagnostic) {
     warn!("radio diagnostic={=u8}", diagnostic as u8);
@@ -28,11 +30,63 @@ fn publish_error(diagnostic: Diagnostic) {
 fn publish_health(wait: &RadioWait<'_>, ranges: &mut u32) {
     *ranges = ranges.wrapping_add(1);
     if *ranges % 32 == 0 {
-        publish(wait.counters().host_message());
+        let mut counters = wait.counters().health_counters();
+        counters.merge_transport(transport_counters());
+        update_radio_counters(counters);
+        publish(RadioToHost::Health {
+            request_id: 0,
+            counters,
+        });
     }
 }
 
+const RETAINED_RESET_REPORT_MS: u64 = 3_000;
+const RETAINED_RESET_REPORT_INTERVAL_MS: u64 = 750;
+
+fn publish_reset_diagnostics(
+    previous_radio_failure: Option<Diagnostic>,
+    previous_watchdog_reset: bool,
+) {
+    if let Some(diagnostic) = previous_radio_failure {
+        publish_error(diagnostic);
+        publish_error(Diagnostic::RadioReset);
+    }
+    if previous_watchdog_reset {
+        publish_error(Diagnostic::WatchdogReset);
+    }
+}
+
+async fn report_previous_reset(
+    wait: &mut RadioWait<'_>,
+    previous_radio_failure: Option<Diagnostic>,
+    previous_watchdog_reset: bool,
+) {
+    let reset_was_retained = previous_radio_failure.is_some() || previous_watchdog_reset;
+    if !reset_was_retained {
+        return;
+    }
+
+    // Repeat through the stable USB window: CDC may become configured and
+    // consume a one-shot event before the host process has opened the tty.
+    // Four radio-failure pairs exactly fit the diagnostic queue if no host is
+    // attached, so this reporting path cannot create queue drops by itself.
+    for _ in 0..RETAINED_RESET_REPORT_MS / RETAINED_RESET_REPORT_INTERVAL_MS {
+        publish_reset_diagnostics(previous_radio_failure, previous_watchdog_reset);
+        wait.pet_watchdog();
+        Timer::after_millis(RETAINED_RESET_REPORT_INTERVAL_MS).await;
+    }
+    wait.pet_watchdog();
+}
+
 pub async fn run(hw: RadioHardware) {
+    let mut wait = RadioWait::new(hw.irq, hw.watchdog);
+    report_previous_reset(
+        &mut wait,
+        hw.previous_radio_failure,
+        hw.previous_watchdog_reset,
+    )
+    .await;
+
     // DW_RST is open-drain. Driving high disconnects the nRF output and lets
     // the module pull-up release reset.
     let mut reset = Output::new(hw.reset, Level::High, OutputDrive::Standard0Disconnect1);
@@ -47,14 +101,12 @@ pub async fn run(hw: RadioHardware) {
     let cs = Output::new(hw.cs, Level::High, OutputDrive::Standard);
     let spi_device = match ExclusiveDevice::new(spi, cs, Delay) {
         Ok(device) => device,
-        Err(_) => panic!("failed to create DW3000 SPI device"),
+        Err(_) => reset_after_radio_failure(Diagnostic::Unknown),
     };
-    let mut wait = RadioWait::new(hw.irq);
-
     let mut radio = DW3000::new(spi_device);
     let id = match radio.ll().dev_id().read().await {
         Ok(id) => id,
-        Err(_) => panic!("failed to read DW3000 device ID"),
+        Err(_) => reset_after_radio_failure(Diagnostic::Spi),
     };
     publish(RadioToHost::RadioId {
         ridtag: id.ridtag(),
@@ -63,10 +115,22 @@ pub async fn run(hw: RadioHardware) {
         revision: id.rev(),
     });
 
-    let tx_power = radio.read_otp(0x011).await.unwrap_or(0);
-    let antenna = radio.read_otp(0x01a).await.unwrap_or(0);
-    let xtal = radio.read_otp(0x01e).await.unwrap_or(0);
-    let otp_revision = radio.read_otp(0x01f).await.unwrap_or(0);
+    let tx_power = radio
+        .read_otp(0x011)
+        .await
+        .unwrap_or_else(|_| reset_after_radio_failure(Diagnostic::Spi));
+    let antenna = radio
+        .read_otp(0x01a)
+        .await
+        .unwrap_or_else(|_| reset_after_radio_failure(Diagnostic::Spi));
+    let xtal = radio
+        .read_otp(0x01e)
+        .await
+        .unwrap_or_else(|_| reset_after_radio_failure(Diagnostic::Spi));
+    let otp_revision = radio
+        .read_otp(0x01f)
+        .await
+        .unwrap_or_else(|_| reset_after_radio_failure(Diagnostic::Spi));
     publish(RadioToHost::Otp {
         tx_power,
         antenna,
@@ -76,11 +140,11 @@ pub async fn run(hw: RadioHardware) {
 
     let radio = match radio.init().await {
         Ok(radio) => radio,
-        Err(_) => panic!("DW3000 initialization failed"),
+        Err(error) => reset_after_radio_failure(diagnostic(&error)),
     };
     let mut radio = match radio.config(radio_config(), Delay).await {
         Ok(radio) => radio,
-        Err(_) => panic!("DW3000 radio configuration failed"),
+        Err(error) => reset_after_radio_failure(diagnostic(&error)),
     };
 
     // The DW3000 must be initialized on a slow SPI clock. Once it is in its
@@ -92,7 +156,7 @@ pub async fn run(hw: RadioHardware) {
         .bus()
         .bus_mut()
         .set_config(&fast_spi_config)
-        .expect("failed to raise DW3000 SPI frequency");
+        .unwrap_or_else(|_| reset_after_radio_failure(Diagnostic::Unknown));
 
     let otp_tx_delay = antenna as u16;
     let otp_rx_delay = (antenna >> 16) as u16;
@@ -106,7 +170,7 @@ pub async fn run(hw: RadioHardware) {
         (otp_rx_delay, otp_tx_delay)
     };
     if radio.set_antenna_delay(rx_delay, tx_delay).await.is_err() {
-        panic!("failed to set antenna delay");
+        reset_after_radio_failure(Diagnostic::Spi);
     }
     if tx_power != 0
         && tx_power != u32::MAX
@@ -117,48 +181,64 @@ pub async fn run(hw: RadioHardware) {
             .await
             .is_err()
     {
-        panic!("failed to set calibrated transmit power");
+        reset_after_radio_failure(Diagnostic::Spi);
     }
     publish(RadioToHost::Ready {
-        role: if cfg!(feature = "initiator") { 0 } else { 1 },
+        mode: if cfg!(feature = "initiator") {
+            OperatingMode::Dw1000BenchInitiator
+        } else {
+            OperatingMode::Dw1000BenchResponder
+        },
         rx_delay,
         tx_delay,
+        node_address: OWN_INDEX as u16,
     });
-    publish(wait.counters().host_message());
+    let initial_counters = wait.counters().health_counters();
+    update_radio_counters(initial_counters);
+    publish(RadioToHost::Health {
+        request_id: 0,
+        counters: initial_counters,
+    });
 
     let config = radio_config();
     let mut rx_buf = [0_u8; 128];
     let mut range_count = 0_u32;
+    // Preparation-path SPI errors get three attempts between completed ranges.
+    // Errors from APIs that consume Ready or occur mid-transfer reset at once
+    // because the driver cannot guarantee a safe typestate for re-entry.
+    let mut spi_errors_since_range = 0_u8;
 
     if cfg!(feature = "initiator") {
         'transaction: loop {
-            prepare_tx(&mut radio).await.expect("prepare POLL transmit");
+            if let Err(error) = prepare_tx(&mut radio).await {
+                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+                Timer::after_millis(10).await;
+                continue 'transaction;
+            }
             let poll = Frame::poll(OWN_ADDRESS);
             let mut sending = match radio
                 .send_raw(poll.as_bytes(), SendTime::Now, &config)
                 .await
             {
                 Ok(sending) => sending,
-                Err(_) => panic!("failed to start POLL"),
+                Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
             let poll_tx = match wait_send(&mut sending, &mut wait).await {
                 Ok(timestamp) => timestamp,
                 Err(error) => {
-                    publish_error(error);
-                    panic!("POLL failed");
+                    reset_after_radio_failure(error);
                 }
             };
-            radio = match sending.finish_sending().await {
-                Ok(radio) => radio,
-                Err(_) => panic!("failed to finish POLL"),
-            };
+            radio = finish_sending(sending, &mut wait).await;
 
-            prepare_rx(&mut radio)
-                .await
-                .expect("prepare POLL_ACK receive");
+            if let Err(error) = prepare_rx(&mut radio).await {
+                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+                Timer::after_millis(10).await;
+                continue 'transaction;
+            }
             let mut receiving = match radio.receive(config).await {
                 Ok(receiving) => receiving,
-                Err(_) => panic!("failed to receive POLL_ACK"),
+                Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
             let (length, poll_ack_rx) =
                 match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
@@ -167,22 +247,15 @@ pub async fn run(hw: RadioHardware) {
                         warn!("restarting exchange after POLL_ACK receive error");
                         publish_error(error);
                         wait.recovered();
-                        radio = match receiving.finish_receiving().await {
-                            Ok(radio) => radio,
-                            Err(_) => panic!("failed to abort POLL_ACK receive"),
-                        };
+                        radio = finish_receiving(receiving, &mut wait).await;
                         Timer::after_millis(10).await;
                         continue 'transaction;
                     }
                     Err(error) => {
-                        publish_error(error);
-                        panic!("fatal POLL_ACK receive error");
+                        reset_after_radio_failure(error);
                     }
                 };
-            radio = match receiving.finish_receiving().await {
-                Ok(radio) => radio,
-                Err(_) => panic!("failed to finish POLL_ACK receive"),
-            };
+            radio = finish_receiving(receiving, &mut wait).await;
             if length < FRAME_LEN {
                 publish_error(Diagnostic::ShortPollAck);
                 continue;
@@ -209,38 +282,39 @@ pub async fn run(hw: RadioHardware) {
                 poll_ack_rx.value(),
                 predicted_range_tx,
             );
-            prepare_tx(&mut radio)
-                .await
-                .expect("prepare RANGE transmit");
-            let range_at = RadioInstant::new(range_at_value).expect("masked 40-bit timestamp");
+            if let Err(error) = prepare_tx(&mut radio).await {
+                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+                Timer::after_millis(10).await;
+                continue 'transaction;
+            }
+            let range_at = RadioInstant::new(range_at_value)
+                .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
             let mut sending = match radio
                 .send_raw(range.as_bytes(), SendTime::Delayed(range_at), &config)
                 .await
             {
                 Ok(sending) => sending,
-                Err(_) => panic!("failed to start delayed RANGE"),
+                Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
-            if let Err(error) = wait_send(&mut sending, &mut wait).await {
-                publish_error(error);
-                wait.recovered();
-                radio = match sending.finish_sending().await {
-                    Ok(radio) => radio,
-                    Err(_) => panic!("failed to abort delayed RANGE"),
-                };
-                Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
+            let range_tx = match wait_send(&mut sending, &mut wait).await {
+                Ok(timestamp) => timestamp,
+                Err(error) => {
+                    recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+                    radio = finish_sending(sending, &mut wait).await;
+                    Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
+                    continue 'transaction;
+                }
+            };
+            radio = finish_sending(sending, &mut wait).await;
+
+            if let Err(error) = prepare_rx(&mut radio).await {
+                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+                Timer::after_millis(10).await;
                 continue 'transaction;
             }
-            radio = match sending.finish_sending().await {
-                Ok(radio) => radio,
-                Err(_) => panic!("failed to finish RANGE"),
-            };
-
-            prepare_rx(&mut radio)
-                .await
-                .expect("prepare RANGE_REPORT receive");
             let mut receiving = match radio.receive(config).await {
                 Ok(receiving) => receiving,
-                Err(_) => panic!("failed to receive RANGE_REPORT"),
+                Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
             let (length, _) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
                 Ok(message) => message,
@@ -248,22 +322,15 @@ pub async fn run(hw: RadioHardware) {
                     warn!("restarting exchange after RANGE_REPORT receive error");
                     publish_error(error);
                     wait.recovered();
-                    radio = match receiving.finish_receiving().await {
-                        Ok(radio) => radio,
-                        Err(_) => panic!("failed to abort RANGE_REPORT receive"),
-                    };
+                    radio = finish_receiving(receiving, &mut wait).await;
                     Timer::after_millis(10).await;
                     continue 'transaction;
                 }
                 Err(error) => {
-                    publish_error(error);
-                    panic!("fatal RANGE_REPORT receive error");
+                    reset_after_radio_failure(error);
                 }
             };
-            radio = match receiving.finish_receiving().await {
-                Ok(radio) => radio,
-                Err(_) => panic!("failed to finish RANGE_REPORT receive"),
-            };
+            radio = finish_receiving(receiving, &mut wait).await;
             if length < FRAME_LEN {
                 publish_error(Diagnostic::ShortRangeReport);
                 continue;
@@ -281,10 +348,15 @@ pub async fn run(hw: RadioHardware) {
             if report.kind() == MessageKind::RangeReport && report.source() == PEER_ADDRESS {
                 if let Some(millimetres) = report.distance_mm() {
                     publish(RadioToHost::Range {
-                        peer: PEER_INDEX,
+                        peer: PEER_INDEX as u16,
+                        exchange_id: 0,
+                        range_event_time_dtu: range_tx.value(),
                         millimetres,
+                        rssi_cdbm: i16::MIN,
+                        quality_flags: 0,
                     });
                     publish_health(&wait, &mut range_count);
+                    spi_errors_since_range = 0;
                 }
             }
             Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
@@ -292,10 +364,14 @@ pub async fn run(hw: RadioHardware) {
     }
 
     'responder: loop {
-        prepare_rx(&mut radio).await.expect("prepare POLL receive");
+        if let Err(error) = prepare_rx(&mut radio).await {
+            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+            Timer::after_millis(10).await;
+            continue 'responder;
+        }
         let mut receiving = match radio.receive(config).await {
             Ok(receiving) => receiving,
-            Err(_) => panic!("failed to enter receive mode"),
+            Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
         let (length, poll_rx) = loop {
             match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
@@ -307,19 +383,15 @@ pub async fn run(hw: RadioHardware) {
                     if receiving.fast_cmd(FastCommand::CMD_CLR_IRQS).await.is_err()
                         || receiving.fast_cmd(FastCommand::CMD_RX).await.is_err()
                     {
-                        panic!("failed to re-arm DW3000 receiver");
+                        reset_after_radio_failure(Diagnostic::Spi);
                     }
                 }
                 Err(error) => {
-                    publish_error(error);
-                    panic!("fatal DW3000 receive error");
+                    reset_after_radio_failure(error);
                 }
             }
         };
-        radio = match receiving.finish_receiving().await {
-            Ok(radio) => radio,
-            Err(_) => panic!("failed to finish DW3000 receive"),
-        };
+        radio = finish_receiving(receiving, &mut wait).await;
         if length < FRAME_LEN {
             publish_error(Diagnostic::ShortPoll);
             continue;
@@ -339,39 +411,39 @@ pub async fn run(hw: RadioHardware) {
         }
 
         let ack_at = delayed_tx_time(poll_rx.value(), REPLY_DELAY_US);
-        let ack_at = RadioInstant::new(ack_at).expect("masked 40-bit timestamp");
-        prepare_tx(&mut radio)
-            .await
-            .expect("prepare POLL_ACK transmit");
+        let ack_at = RadioInstant::new(ack_at)
+            .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
+        if let Err(error) = prepare_tx(&mut radio).await {
+            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+            Timer::after_millis(10).await;
+            continue 'responder;
+        }
         let ack = Frame::poll_ack(OWN_ADDRESS);
         let mut sending = match radio
             .send_raw(ack.as_bytes(), SendTime::Delayed(ack_at), &config)
             .await
         {
             Ok(sending) => sending,
-            Err(_) => panic!("failed to start delayed POLL_ACK"),
+            Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
         let poll_ack_tx = match wait_send(&mut sending, &mut wait).await {
             Ok(timestamp) => timestamp,
             Err(error) => {
-                publish_error(error);
-                wait.recovered();
-                radio = match sending.finish_sending().await {
-                    Ok(radio) => radio,
-                    Err(_) => panic!("failed to abort delayed POLL_ACK"),
-                };
+                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+                radio = finish_sending(sending, &mut wait).await;
                 continue 'responder;
             }
         };
-        radio = match sending.finish_sending().await {
-            Ok(radio) => radio,
-            Err(_) => panic!("failed to finish POLL_ACK"),
-        };
+        radio = finish_sending(sending, &mut wait).await;
 
-        prepare_rx(&mut radio).await.expect("prepare RANGE receive");
+        if let Err(error) = prepare_rx(&mut radio).await {
+            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+            Timer::after_millis(10).await;
+            continue 'responder;
+        }
         let mut receiving = match radio.receive(config).await {
             Ok(receiving) => receiving,
-            Err(_) => panic!("failed to receive RANGE"),
+            Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
         let (length, range_rx) = loop {
             match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
@@ -383,19 +455,15 @@ pub async fn run(hw: RadioHardware) {
                     if receiving.fast_cmd(FastCommand::CMD_CLR_IRQS).await.is_err()
                         || receiving.fast_cmd(FastCommand::CMD_RX).await.is_err()
                     {
-                        panic!("failed to re-arm RANGE receiver");
+                        reset_after_radio_failure(Diagnostic::Spi);
                     }
                 }
                 Err(error) => {
-                    publish_error(error);
-                    panic!("fatal RANGE receive error");
+                    reset_after_radio_failure(error);
                 }
             }
         };
-        radio = match receiving.finish_receiving().await {
-            Ok(radio) => radio,
-            Err(_) => panic!("failed to finish RANGE receive"),
-        };
+        radio = finish_receiving(receiving, &mut wait).await;
         if length < FRAME_LEN {
             publish_error(Diagnostic::ShortRange);
             continue;
@@ -428,29 +496,49 @@ pub async fn run(hw: RadioHardware) {
             continue;
         };
         let millimetres = (distance * 1_000.0 + 0.5) as u32;
-        prepare_tx(&mut radio)
-            .await
-            .expect("prepare RANGE_REPORT transmit");
+        if let Err(error) = prepare_tx(&mut radio).await {
+            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
+            Timer::after_millis(10).await;
+            continue 'responder;
+        }
         let report = Frame::range_report(OWN_ADDRESS, millimetres);
         let mut sending = match radio
             .send_raw(report.as_bytes(), SendTime::Now, &config)
             .await
         {
             Ok(sending) => sending,
-            Err(_) => panic!("failed to start RANGE_REPORT"),
+            Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
         if let Err(error) = wait_send(&mut sending, &mut wait).await {
-            publish_error(error);
-            panic!("RANGE_REPORT failed");
+            reset_after_radio_failure(error);
         }
-        radio = match sending.finish_sending().await {
-            Ok(radio) => radio,
-            Err(_) => panic!("failed to finish RANGE_REPORT"),
-        };
+        radio = finish_sending(sending, &mut wait).await;
         publish(RadioToHost::Range {
-            peer: PEER_INDEX,
+            peer: PEER_INDEX as u16,
+            exchange_id: 0,
+            range_event_time_dtu: range_rx.value(),
             millimetres,
+            rssi_cdbm: i16::MIN,
+            quality_flags: 0,
         });
         publish_health(&wait, &mut range_count);
+        spi_errors_since_range = 0;
+    }
+}
+
+fn recover_exchange(
+    diagnostic: Diagnostic,
+    wait: &mut RadioWait<'_>,
+    spi_errors_since_range: &mut u8,
+) {
+    publish_error(diagnostic);
+    wait.recovered();
+    if diagnostic == Diagnostic::Spi {
+        *spi_errors_since_range = (*spi_errors_since_range).saturating_add(1);
+        if *spi_errors_since_range >= 3 {
+            reset_after_radio_failure(diagnostic);
+        }
+    } else {
+        *spi_errors_since_range = 0;
     }
 }

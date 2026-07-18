@@ -12,3 +12,4 @@ corncobs = "0.1.4"
 crc = { version = "3.4.0", default-features = false }
 hubpack = "0.1.2"
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+smoltcp = { version = "=0.13.1", default-features = false, features = ["medium-ieee802154", "socket-raw"] }

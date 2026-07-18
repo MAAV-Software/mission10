@@ -5,11 +5,12 @@ edition = "2024"
 publish = false
 
 [features]
-default = []
+default = ["dw1000-bench"]
 # The E1.0 module marking cannot be derived reliably from DW3000 OTP. Enable
 # this only for a board physically marked DWM3001C(DK)E1.0.
 engineering-sample = []
-initiator = []
+initiator = ["dw1000-bench"]
+dw1000-bench = []
 smoke = []
 
 [dependencies]

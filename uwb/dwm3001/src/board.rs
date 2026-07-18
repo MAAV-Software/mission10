@@ -1,3 +1,4 @@
+use defmt::warn;
 use dw3000_ng::configs::{
     BitRate, PdoaMode, PhrMode, PhrRate, PreambleLength, PulseRepetitionFrequency, SfdSequence,
     StsMode, UwbChannel,
@@ -9,10 +10,11 @@ use dw3000_ng::{
 };
 use embassy_futures::select::{Either, select};
 use embassy_nrf::gpio::{Input, Pull};
-use embassy_nrf::{Peri, peripherals};
+use embassy_nrf::wdt::WatchdogHandle;
+use embassy_nrf::{Peri, pac, peripherals};
 use embassy_time::Timer;
 use embedded_hal_async::spi::SpiDevice;
-use mission10_uwb_protocol::{Diagnostic, RadioToHost};
+use mission10_uwb_protocol::host::{Diagnostic, HealthCounters};
 
 pub const OWN_ADDRESS: [u8; 2] = if cfg!(feature = "initiator") {
     [0xa0, 0xc0]
@@ -24,6 +26,7 @@ pub const PEER_ADDRESS: [u8; 2] = if cfg!(feature = "initiator") {
 } else {
     [0xa0, 0xc0]
 };
+pub const OWN_INDEX: u8 = if cfg!(feature = "initiator") { 0 } else { 1 };
 pub const PEER_INDEX: u8 = if cfg!(feature = "initiator") { 1 } else { 0 };
 pub const FALLBACK_ANTENNA_DELAY: u16 = 16_390;
 
@@ -45,6 +48,9 @@ pub struct RadioHardware {
     pub reset: Peri<'static, peripherals::P0_25>,
     /// DWM3001C schematic net `DW_IRQ`, active-high, routed to nRF P1.02.
     pub irq: Peri<'static, peripherals::P1_02>,
+    pub watchdog: WatchdogHandle,
+    pub previous_radio_failure: Option<Diagnostic>,
+    pub previous_watchdog_reset: bool,
 }
 
 pub fn radio_config() -> RadioConfig {
@@ -72,16 +78,18 @@ pub struct WaitCounters {
     pub irq_wakes: u32,
     pub spurious_irq_wakes: u32,
     pub wait_timeouts: u32,
+    /// Exchanges and radio typestate finalizations recovered without reset.
     pub recoveries: u32,
 }
 
 impl WaitCounters {
-    pub fn host_message(self) -> RadioToHost {
-        RadioToHost::Health {
+    pub fn health_counters(self) -> HealthCounters {
+        HealthCounters {
             irq_wakes: self.irq_wakes,
             spurious_irq_wakes: self.spurious_irq_wakes,
             wait_timeouts: self.wait_timeouts,
             recoveries: self.recoveries,
+            ..HealthCounters::default()
         }
     }
 }
@@ -91,20 +99,24 @@ impl WaitCounters {
 /// sleep cannot be lost.
 pub struct RadioWait<'d> {
     irq: Input<'d>,
+    watchdog: WatchdogHandle,
     counters: WaitCounters,
     woke_on_irq: bool,
 }
 
 impl<'d> RadioWait<'d> {
-    pub fn new(irq: Peri<'d, impl embassy_nrf::gpio::Pin>) -> Self {
+    pub fn new(irq: Peri<'d, impl embassy_nrf::gpio::Pin>, mut watchdog: WatchdogHandle) -> Self {
+        watchdog.pet();
         Self {
             irq: Input::new(irq, Pull::Down),
+            watchdog,
             counters: WaitCounters::default(),
             woke_on_irq: false,
         }
     }
 
     pub async fn pending(&mut self) {
+        self.watchdog.pet();
         if self.woke_on_irq {
             self.counters.spurious_irq_wakes = self.counters.spurious_irq_wakes.wrapping_add(1);
         }
@@ -127,10 +139,16 @@ impl<'d> RadioWait<'d> {
                 self.woke_on_irq = false;
             }
         }
+        self.watchdog.pet();
     }
 
     pub fn completed(&mut self) {
+        self.watchdog.pet();
         self.woke_on_irq = false;
+    }
+
+    pub fn pet_watchdog(&mut self) {
+        self.watchdog.pet();
     }
 
     pub fn recovered(&mut self) {
@@ -240,7 +258,7 @@ pub const fn recoverable_receive_error(error: Diagnostic) -> bool {
     )
 }
 
-fn diagnostic<SPI>(error: &RadioError<SPI>) -> Diagnostic
+pub fn diagnostic<SPI>(error: &RadioError<SPI>) -> Diagnostic
 where
     SPI: SpiDevice<u8>,
 {
@@ -261,4 +279,74 @@ where
         RadioError::RxNotFinished | RadioError::StillAsleep => Diagnostic::RadioState,
         _ => Diagnostic::Unknown,
     }
+}
+
+const RETAINED_RADIO_FAILURE: u8 = 0xa0;
+const RETAINED_DIAGNOSTIC_MASK: u8 = 0x1f;
+const FINISH_RETRIES: usize = 3;
+const _: () = assert!((Diagnostic::WatchdogReset as u8) <= RETAINED_DIAGNOSTIC_MASK);
+
+pub fn take_retained_radio_failure() -> Option<Diagnostic> {
+    let retained = pac::POWER.gpregret().read().gpregret();
+    pac::POWER.gpregret().write(|w| w.set_gpregret(0));
+    ((retained & !RETAINED_DIAGNOSTIC_MASK) == RETAINED_RADIO_FAILURE)
+        .then(|| Diagnostic::from_wire_index(retained & RETAINED_DIAGNOSTIC_MASK))
+        .flatten()
+}
+
+pub fn reset_after_radio_failure(diagnostic: Diagnostic) -> ! {
+    warn!(
+        "reset after unrecoverable radio diagnostic={=u8}",
+        diagnostic as u8
+    );
+    pac::POWER.gpregret().write(|w| {
+        w.set_gpregret(RETAINED_RADIO_FAILURE | (diagnostic as u8 & RETAINED_DIAGNOSTIC_MASK))
+    });
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+pub async fn finish_sending<SPI>(
+    mut sending: DW3000<SPI, Sending>,
+    wait: &mut RadioWait<'_>,
+) -> DW3000<SPI, Ready>
+where
+    SPI: SpiDevice<u8>,
+{
+    let mut last = Diagnostic::RadioState;
+    for _ in 0..FINISH_RETRIES {
+        match sending.finish_sending().await {
+            Ok(radio) => return radio,
+            Err((returned, error)) => {
+                last = diagnostic(&error);
+                warn!("retry finish sending diagnostic={=u8}", last as u8);
+                sending = returned;
+                wait.recovered();
+                Timer::after_millis(1).await;
+            }
+        }
+    }
+    reset_after_radio_failure(last)
+}
+
+pub async fn finish_receiving<SPI>(
+    mut receiving: DW3000<SPI, SingleBufferReceiving>,
+    wait: &mut RadioWait<'_>,
+) -> DW3000<SPI, Ready>
+where
+    SPI: SpiDevice<u8>,
+{
+    let mut last = Diagnostic::RadioState;
+    for _ in 0..FINISH_RETRIES {
+        match receiving.finish_receiving().await {
+            Ok(radio) => return radio,
+            Err((returned, error)) => {
+                last = diagnostic(&error);
+                warn!("retry finish receiving diagnostic={=u8}", last as u8);
+                receiving = returned;
+                wait.recovered();
+                Timer::after_millis(1).await;
+            }
+        }
+    }
+    reset_after_radio_failure(last)
 }

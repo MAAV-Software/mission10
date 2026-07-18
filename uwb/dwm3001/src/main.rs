@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(feature = "dw1000-bench"))]
+compile_error!(
+    "the native DWM3001 peer FSM is intentionally gated until the second board is available"
+);
+
 mod board;
 mod host;
 mod ranging;
@@ -10,7 +15,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join3;
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
-use embassy_nrf::{bind_interrupts, pac, peripherals, spim, usb};
+use embassy_nrf::{bind_interrupts, pac, peripherals, spim, usb, wdt};
 #[cfg(feature = "smoke")]
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
@@ -34,6 +39,22 @@ async fn main(_spawner: Spawner) {
     loop {
         Timer::after_secs(1).await;
     }
+
+    let previous_watchdog_reset = pac::POWER.resetreas().read().dog();
+    pac::POWER.resetreas().write(|w| w.set_dog(true));
+    let previous_radio_failure = board::take_retained_radio_failure();
+
+    let mut watchdog_config = wdt::Config::default();
+    watchdog_config.timeout_ticks = 4 * 32_768;
+    watchdog_config.action_during_debug_halt = wdt::HaltConfig::Pause;
+    watchdog_config.action_during_sleep = wdt::SleepConfig::Run;
+    let (_watchdog, handles) = match wdt::Watchdog::try_new::<_, 1>(p.WDT, watchdog_config) {
+        Ok(watchdog) => watchdog,
+        Err(_) => panic!("failed to configure radio watchdog"),
+    };
+    // The watchdog owner must outlive all three joined tasks; the radio task
+    // receives only the pet handle.
+    let [radio_watchdog] = handles;
 
     // Native USB requires the external 32 MHz crystal.
     pac::CLOCK.tasks_hfclkstart().write_value(1);
@@ -71,6 +92,9 @@ async fn main(_spawner: Spawner) {
         cs: p.P1_06,
         reset: p.P0_25,
         irq: p.P1_02,
+        watchdog: radio_watchdog,
+        previous_radio_failure,
+        previous_watchdog_reset,
     };
 
     join3(usb_device.run(), host::run(cdc), ranging::run(radio)).await;

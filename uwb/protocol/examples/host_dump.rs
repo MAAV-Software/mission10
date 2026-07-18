@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read};
 
-use mission10_uwb_protocol::{HOST_FRAME_MAX_SIZE, HOST_RAW_MAX_SIZE, decode_host_frame};
+use mission10_uwb_protocol::host::{HOST_FRAME_MAX_SIZE, HOST_RAW_MAX_SIZE, decode_radio_to_host};
 
 fn main() -> io::Result<()> {
     // Put a serial/CDC device in raw mode before using this tiny generic reader,
@@ -26,7 +26,7 @@ fn main() -> io::Result<()> {
             }
             frame.push(byte);
             if byte == 0 {
-                match decode_host_frame(&frame, &mut raw) {
+                match decode_radio_to_host(&frame, &mut raw) {
                     Ok(envelope) => println!("{envelope:?}"),
                     Err(error) => eprintln!("discarding invalid host frame: {error:?}"),
                 }

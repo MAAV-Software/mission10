@@ -8,18 +8,20 @@ the Rust in this directory is ordinary Mission 10 software.
 
 - `dwm3001/` — Embassy application, DW3110 driver, DS-TWR state machine, J20
   USB CDC adapter, and J9 debug metadata.
-- `protocol/` — `no_std` legacy DW1000 air frames and the typed host envelope.
+- `protocol/` — `no_std` native air frames, isolated DW1000 bench frames,
+  ranging arithmetic, and the typed bidirectional host protocol.
 - `protocol/python/` — independent host decoder and cross-language golden test.
 
 The host stream is exactly:
 
 ```text
-COBS( Hubpack(HostEnvelope) || CRC-32/ISO-HDLC ) || 0x00
+COBS( Hubpack(HostToRadioEnvelope | RadioToHostEnvelope) || CRC-32/ISO-HDLC ) || 0x00
 ```
 
-The same envelope is intended for J20 USB CDC and the later UART adapter. The
-temporary 18-byte over-the-air format is deliberately separate: it exists only
-to range against the surviving DW1000 while the second DWM3001CDK is unavailable.
+The same envelopes are intended for J20 USB CDC and the later UART adapter. The
+temporary 18-byte over-the-air format is deliberately separate and selected by
+the default `dw1000-bench` build feature. It exists only to range against the
+DW1000 bench node on `bigrpi5` while the second DWM3001CDK is unavailable.
 
 ## Build and test
 
@@ -32,6 +34,18 @@ cargo test --target x86_64-unknown-linux-gnu -p mission10-uwb-protocol
 cargo build --release -p mission10-dwm3001
 # Or, for the reverse-role diagnostic instead:
 cargo build --release -p mission10-dwm3001 --features initiator
+```
+
+`protocol/testdata/host_protocol_v3.frames` is the shared wire contract: the
+Rust `committed_fixture_matches_the_encoders` test regenerates it from the
+encoders and fails if the checked-in copy is stale, while the Python suite
+decodes the same file and asserts its meaning. The two codecs stay independent;
+only the bytes have one owner. Never hand-edit the file — after an intended
+format change, regenerate it (which normally accompanies a protocol version
+bump):
+
+```sh
+UPDATE_GOLDEN=1 cargo test -p mission10-uwb-protocol committed_fixture
 ```
 
 The default build is the `A1:C1` responder used with the DW1000
@@ -55,6 +69,11 @@ Decode J20 on the Pi with only Python's standard library:
 python3 uwb/protocol/python/mission10_uwb_protocol.py \
   /dev/serial/by-id/usb-MAAV_Mission_10_DWM3001_bring-up_DWM3001-01-if00
 
+# Exercise the bidirectional link with an immediate health request:
+python3 uwb/protocol/python/mission10_uwb_protocol.py \
+  --request-health \
+  /dev/serial/by-id/usb-MAAV_Mission_10_DWM3001_bring-up_DWM3001-01-if00
+
 # Or measure aggregate range rate without printing every radio event:
 python3 uwb/protocol/python/mission10_uwb_protocol.py \
   --summary-interval 2 \
@@ -63,11 +82,40 @@ python3 uwb/protocol/python/mission10_uwb_protocol.py \
 
 The decoder sets the tty to raw mode. Any other host reader must do the same;
 otherwise Linux's terminal line discipline will consume binary control bytes.
+A writer sends an empty COBS boundary after opening the stream so stale bytes
+from a prior USB/UART connection cannot corrupt its first command; the radio
+treats this empty boundary as synchronization, not a malformed frame.
 
-Host protocol version 2 reports typed `Diagnostic` variants instead of reused
-numeric error codes. Its `Health` message carries cumulative IRQ wakes,
-spurious IRQ wakes, software wait timeouts, and receive recoveries. Health is
-emitted at startup and every 32 completed ranges.
+Host protocol version 3 is bidirectional. The native DWM3001 mode can configure
+a 16-bit node address and up to three peers; all modes can receive fixed-point
+ego state and health requests. The temporary DW1000 bench mode rejects
+`Configure` with `UnsupportedInMode` because its peer bytes remain compile-time
+interoperability constants.
+The radio reports configuration readback, addressed ranges, peer state, typed
+diagnostics, and cumulative radio/transport/queue counters. Independent bounded
+queues keep range and peer-state delivery ahead of discardable diagnostics.
+
+Native air frames use PAN `0x4d10` and IEEE 802.15.4 short source/destination
+addresses. Drone addresses are `0..4`; bench/development addresses occupy
+`0x8000..0x80ff`. The native four-message ranging FSM remains gated until a
+second DWM3001CDK is available, but its codec and shared timestamp arithmetic
+are covered by workstation tests now.
+
+Runtime PHY/timing failures abandon only the active exchange. Finish-state and
+SPI preparation failures receive bounded retries; an error from a consuming
+`dw3000-ng` start API deliberately resets the nRF because that API does not
+return ownership of the radio. The triggering diagnostic survives in GPREGRET
+and is emitted before radio initialization after reboot. A three-second,
+watchdog-petted backoff repeats the retained cause at bounded intervals so it
+remains visible while USB enumerates and the host opens the tty, even when a
+permanently absent radio triggers another reset. A four-second hardware watchdog
+independently resets a stalled radio task and is paused while a debugger halts
+the CPU. The `recoveries` health counter includes both recovered exchanges and
+successful finish-state retries.
+
+The committed `protocol/testdata/host_protocol_v3.frames` fixture is the single
+golden wire contract consumed by both the Rust encoder tests and Python codec
+tests.
 
 ## Bench result (2026-07-18)
 
@@ -75,7 +123,7 @@ The connected production module reports DW3110 ID `DECA/3/0/2`, OTP transmit
 power `0x61616161`, antenna delays `0x3ff0/0x3ff0`, crystal value
 `0x00be0019`, and OTP revision `0x00010201`.
 
-Both role directions completed DS-TWR against the surviving DW1000 on
+Both role directions completed DS-TWR against the DW1000 bench node on
 `bigrpi5`. The responder direction produced 201 samples in 30.2 seconds
 (approximately 6.7 Hz). The reverse direction sustained repeated 8–25 cm bench
 measurements, reported typed Hubpack ranges over J20, timed out visibly when the
@@ -105,7 +153,7 @@ SPIM3 to 32 MHz. Both delayed DS-TWR legs default to 2 ms, delayed-send deadline
 failures recover to the next exchange instead of panicking, and the diagnostic
 initiator waits 5 ms rather than 100 ms between exchanges.
 
-The surviving DW1000 on `bigrpi5` was used as initiator with its post-init SPI
+The DW1000 on `bigrpi5` was used as initiator with its post-init SPI
 clock at 20 MHz. Its event wait now observes the configured poll deadline rather
 than imposing a hidden 50 ms floor, and its stalled-exchange watchdog is
 configurable with `--watchdog-ms`.
