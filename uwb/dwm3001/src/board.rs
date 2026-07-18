@@ -27,9 +27,14 @@ pub const PEER_ADDRESS: [u8; 2] = if cfg!(feature = "initiator") {
 pub const PEER_INDEX: u8 = if cfg!(feature = "initiator") { 1 } else { 0 };
 pub const FALLBACK_ANTENNA_DELAY: u16 = 16_390;
 
-// The legacy DW1000 responder accepts any turnaround below its 250 ms
-// watchdog. This leaves time for diagnostics at the conservative 4 MHz SPI rate.
-pub const INITIATOR_REPLY_DELAY_US: u32 = 15_000;
+// Both delayed DS-TWR legs use the same bench-tunable turnaround. Two
+// milliseconds is intentionally still generous: once it is stable against the
+// DW1000 peer we can lower it toward the few-hundred-microsecond hardware limit.
+pub const REPLY_DELAY_US: u32 = 2_000;
+
+// Avoid monopolizing the channel in the one-pair diagnostic. Together with the
+// two delayed legs this targets roughly 100 ranging exchanges per second.
+pub const INITIATOR_INTER_EXCHANGE_GUARD_MS: u64 = 5;
 
 pub struct RadioHardware {
     pub spi: Peri<'static, peripherals::SPI3>,

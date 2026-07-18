@@ -765,6 +765,7 @@ dependencies = [
  "defmt 1.1.1",
  "defmt-rtt",
  "dw3000-ng",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-nrf",

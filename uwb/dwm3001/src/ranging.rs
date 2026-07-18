@@ -1,21 +1,22 @@
-use defmt::{info, warn};
+use defmt::warn;
 use dw3000_ng::hl::SendTime;
 use dw3000_ng::time::Instant as RadioInstant;
 use dw3000_ng::{DW3000, FastCommand};
+use embassy_embedded_hal::SetConfig;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Delay, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use mission10_uwb_protocol::{
-    Diagnostic, FRAME_LEN, Frame, MessageKind, REPLY_DELAY_US, RadioToHost, ResponderTimestamps,
-    TIMESTAMP_MASK, delayed_tx_time, distance_metres,
+    Diagnostic, FRAME_LEN, Frame, MessageKind, RadioToHost, ResponderTimestamps, TIMESTAMP_MASK,
+    delayed_tx_time, distance_metres,
 };
 
 use crate::Irqs;
 use crate::board::{
-    FALLBACK_ANTENNA_DELAY, INITIATOR_REPLY_DELAY_US, OWN_ADDRESS, PEER_ADDRESS, PEER_INDEX,
-    RadioHardware, RadioWait, prepare_rx, prepare_tx, radio_config, recoverable_receive_error,
-    wait_receive, wait_send,
+    FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, PEER_ADDRESS,
+    PEER_INDEX, REPLY_DELAY_US, RadioHardware, RadioWait, prepare_rx, prepare_tx, radio_config,
+    recoverable_receive_error, wait_receive, wait_send,
 };
 use crate::host::publish;
 
@@ -81,6 +82,17 @@ pub async fn run(hw: RadioHardware) {
         Ok(radio) => radio,
         Err(_) => panic!("DW3000 radio configuration failed"),
     };
+
+    // The DW3000 must be initialized on a slow SPI clock. Once it is in its
+    // configured IDLE_PLL state, both it and nRF52833 SPIM3 support 32 MHz.
+    let mut fast_spi_config = spim::Config::default();
+    fast_spi_config.frequency = spim::Frequency::M32;
+    radio
+        .ll()
+        .bus()
+        .bus_mut()
+        .set_config(&fast_spi_config)
+        .expect("failed to raise DW3000 SPI frequency");
 
     let otp_tx_delay = antenna as u16;
     let otp_rx_delay = (antenna >> 16) as u16;
@@ -189,24 +201,13 @@ pub async fn run(hw: RadioHardware) {
                 continue;
             }
 
-            let range_at_value = delayed_tx_time(poll_ack_rx.value(), INITIATOR_REPLY_DELAY_US);
+            let range_at_value = delayed_tx_time(poll_ack_rx.value(), REPLY_DELAY_US);
             let predicted_range_tx = range_at_value.wrapping_add(tx_delay as u64) & TIMESTAMP_MASK;
             let range = Frame::range(
                 OWN_ADDRESS,
                 poll_tx.value(),
                 poll_ack_rx.value(),
                 predicted_range_tx,
-            );
-            let schedule_now = radio
-                .sys_time()
-                .await
-                .expect("read system time before RANGE");
-            let schedule_target = (range_at_value >> 8) as u32;
-            info!(
-                "RANGE schedule now={=u32:08x} target={=u32:08x} remaining={=u32}",
-                schedule_now,
-                schedule_target,
-                schedule_target.wrapping_sub(schedule_now)
             );
             prepare_tx(&mut radio)
                 .await
@@ -221,7 +222,13 @@ pub async fn run(hw: RadioHardware) {
             };
             if let Err(error) = wait_send(&mut sending, &mut wait).await {
                 publish_error(error);
-                panic!("delayed RANGE failed");
+                wait.recovered();
+                radio = match sending.finish_sending().await {
+                    Ok(radio) => radio,
+                    Err(_) => panic!("failed to abort delayed RANGE"),
+                };
+                Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
+                continue 'transaction;
             }
             radio = match sending.finish_sending().await {
                 Ok(radio) => radio,
@@ -280,11 +287,11 @@ pub async fn run(hw: RadioHardware) {
                     publish_health(&wait, &mut range_count);
                 }
             }
-            Timer::after_millis(100).await;
+            Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
         }
     }
 
-    loop {
+    'responder: loop {
         prepare_rx(&mut radio).await.expect("prepare POLL receive");
         let mut receiving = match radio.receive(config).await {
             Ok(receiving) => receiving,
@@ -348,7 +355,12 @@ pub async fn run(hw: RadioHardware) {
             Ok(timestamp) => timestamp,
             Err(error) => {
                 publish_error(error);
-                panic!("delayed POLL_ACK failed");
+                wait.recovered();
+                radio = match sending.finish_sending().await {
+                    Ok(radio) => radio,
+                    Err(_) => panic!("failed to abort delayed POLL_ACK"),
+                };
+                continue 'responder;
             }
         };
         radio = match sending.finish_sending().await {

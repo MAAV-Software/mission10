@@ -23,8 +23,6 @@ to range against the surviving DW1000 while the second DWM3001CDK is unavailable
 
 ## Build and test
 
-Run all compilation on a workstation, never on a Pi:
-
 ```sh
 nix develop .#uwb
 cd uwb
@@ -36,7 +34,7 @@ cargo build --release -p mission10-dwm3001
 cargo build --release -p mission10-dwm3001 --features initiator
 ```
 
-The default build is the `A1:C1` responder used with the legacy DW1000
+The default build is the `A1:C1` responder used with the DW1000
 initiator and waits on the DW3110's active-high IRQ at nRF `P1.02`.
 `--features initiator` builds the reverse-role `A0:C0` diagnostic.
 `engineering-sample` must only be enabled for a module physically marked E1.0.
@@ -55,6 +53,11 @@ Decode J20 on the Pi with only Python's standard library:
 
 ```sh
 python3 uwb/protocol/python/mission10_uwb_protocol.py \
+  /dev/serial/by-id/usb-MAAV_Mission_10_DWM3001_bring-up_DWM3001-01-if00
+
+# Or measure aggregate range rate without printing every radio event:
+python3 uwb/protocol/python/mission10_uwb_protocol.py \
+  --summary-interval 2 \
   /dev/serial/by-id/usb-MAAV_Mission_10_DWM3001_bring-up_DWM3001-01-if00
 ```
 
@@ -94,3 +97,28 @@ stopped and restarted. The IRQ initiator also ranged in the reverse direction,
 reported health counters, and resumed after its DW1000 responder was stopped
 for four seconds and restarted. The default responder was finally downloaded
 and reset into standalone operation on `bigrpi5`.
+
+## High-rate one-pair bench result (2026-07-18)
+
+After initialization at the required 4 MHz, the DWM3001 application now raises
+SPIM3 to 32 MHz. Both delayed DS-TWR legs default to 2 ms, delayed-send deadline
+failures recover to the next exchange instead of panicking, and the diagnostic
+initiator waits 5 ms rather than 100 ms between exchanges.
+
+The surviving DW1000 on `bigrpi5` was used as initiator with its post-init SPI
+clock at 20 MHz. Its event wait now observes the configured poll deadline rather
+than imposing a hidden 50 ms floor, and its stalled-exchange watchdog is
+configurable with `--watchdog-ms`.
+
+Measured close-range regimes:
+
+| Requested period | Delayed legs | Completed | Result | Recoveries |
+| --- | --- | ---: | ---: | ---: |
+| 20 ms | 2 ms / 2 ms | 486 / 489 | 48.4 Hz | 2 POLL_ACK |
+| 10 ms | 2 ms / 2 ms | 921 / 931 | 90.0 Hz | 8 POLL_ACK, 2 RANGE_REPORT |
+| 5 ms stress | 2 ms / 1 ms | 1382 / 1396 | 172.0 Hz | 9 POLL_ACK, 4 RANGE_REPORT |
+
+J20 independently tracked the active 50 Hz and 100 Hz regimes without invalid
+host frames. The 5 ms result is a stress observation, not the fleet operating
+point: Mission 10 should schedule close pairs at 50 Hz, selectively promote an
+urgent pair toward 100 Hz, and retain airtime for the other five possible pairs.

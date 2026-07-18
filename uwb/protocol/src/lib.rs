@@ -149,7 +149,6 @@ pub fn decode_host_frame(
 
 pub const FRAME_LEN: usize = 18;
 pub const TIMESTAMP_MASK: u64 = (1_u64 << 40) - 1;
-pub const REPLY_DELAY_US: u32 = 7_000;
 pub const DTU_PER_US: u64 = 63_897;
 pub const DTU_METRES: f64 = 0.004_691_763_978_615_9;
 
@@ -341,7 +340,7 @@ mod tests {
 
     #[test]
     fn delayed_transmit_is_512_dtu_aligned() {
-        let scheduled = delayed_tx_time(TIMESTAMP_MASK - 1_000, REPLY_DELAY_US);
+        let scheduled = delayed_tx_time(TIMESTAMP_MASK - 1_000, 2_000);
         assert_eq!(scheduled & 0x1ff, 0);
         assert!(scheduled <= TIMESTAMP_MASK);
     }

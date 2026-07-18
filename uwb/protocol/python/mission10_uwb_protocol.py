@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import struct
+import time
 import tty
 import zlib
 from collections.abc import Iterator
@@ -92,14 +93,55 @@ def frames(stream: BinaryIO) -> Iterator[bytes]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dump typed DWM3001 J20 events")
     parser.add_argument("device", help="CDC device, normally /dev/serial/by-id/usb-MAAV_...")
+    parser.add_argument(
+        "--summary-interval",
+        type=float,
+        default=0.0,
+        help="print range/error counts and range rate every N seconds (default: print every event)",
+    )
     args = parser.parse_args()
-    with open(args.device, "rb", buffering=0) as stream:
-        tty.setraw(stream.fileno())
-        for frame in frames(stream):
-            try:
-                print(decode_frame(frame), flush=True)
-            except FrameError as error:
-                print(f"discarding invalid frame {frame.hex()}: {error}", flush=True)
+    started = time.monotonic()
+    summary_started = started
+    ranges = errors = invalid = 0
+    try:
+        with open(args.device, "rb", buffering=0) as stream:
+            tty.setraw(stream.fileno())
+            for frame in frames(stream):
+                try:
+                    envelope = decode_frame(frame)
+                except FrameError as error:
+                    invalid += 1
+                    if args.summary_interval <= 0:
+                        print(f"discarding invalid frame {frame.hex()}: {error}", flush=True)
+                    continue
+
+                if envelope.kind == "range":
+                    ranges += 1
+                elif envelope.kind == "error":
+                    errors += 1
+
+                if args.summary_interval <= 0:
+                    print(envelope, flush=True)
+                    continue
+
+                now = time.monotonic()
+                if now - summary_started >= args.summary_interval:
+                    elapsed = now - started
+                    print(
+                        f"ranges={ranges} rate={ranges / elapsed:.1f} Hz "
+                        f"errors={errors} invalid={invalid} last={envelope}",
+                        flush=True,
+                    )
+                    summary_started = now
+    except KeyboardInterrupt:
+        pass
+
+    elapsed = max(time.monotonic() - started, 1e-6)
+    print(
+        f"STATS ranges={ranges} rate={ranges / elapsed:.1f} Hz "
+        f"errors={errors} invalid={invalid}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
