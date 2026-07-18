@@ -21,7 +21,13 @@ class Station:
     s: float  # arc length along the lane
 
 
-def stations(cfg: GenConfig, alt: float, rng: random.Random) -> List[Station]:
+def stations(
+    cfg: GenConfig, alt_rng: random.Random, rng: random.Random
+) -> List[Station]:
+    # altitude is drawn per station, not per scene: scale must vary
+    # independently of everything else that is per-scene (minefield layout,
+    # ground variant, lighting), and stations are independent training
+    # images, not a flyable trajectory
     width = cfg.east_extent[1] - cfg.east_extent[0]
     span = (cfg.n_lanes - 1) * cfg.lane_spacing_m
     origin = (cfg.north_extent[0], cfg.east_extent[0] + (width - span) / 2.0)
@@ -38,6 +44,7 @@ def stations(cfg: GenConfig, alt: float, rng: random.Random) -> List[Station]:
         while s <= lane.length + 1e-9:
             north, east = lane.point_at(s)
             yaw = lane.heading + rng.uniform(-jit, jit)
+            alt = alt_rng.uniform(*cfg.alt_range_m)
             out.append(
                 Station(pos=(north, east, -alt), q=quat_from_yaw(yaw), lane=lane.index, s=s)
             )

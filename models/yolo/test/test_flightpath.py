@@ -12,7 +12,9 @@ CFG = GenConfig()
 
 class TestFlightpath(unittest.TestCase):
     def setUp(self):
-        self.sts = stations(CFG, alt=6.0, rng=random.Random("fp"))
+        self.sts = stations(
+            CFG, alt_rng=random.Random("alt"), rng=random.Random("fp")
+        )
 
     def test_station_count(self):
         # 25 m lanes, 1 m interval -> 26 stations per lane, 3 lanes
@@ -23,9 +25,14 @@ class TestFlightpath(unittest.TestCase):
         easts = sorted({round(s.pos[1], 6) for s in self.sts})
         self.assertEqual(easts, [1.5, 7.5, 13.5])
 
-    def test_altitude_applied(self):
-        for s in self.sts:
-            self.assertAlmostEqual(s.pos[2], -6.0)
+    def test_altitude_varies_per_station_within_envelope(self):
+        alts = [-s.pos[2] for s in self.sts]
+        for a in alts:
+            self.assertGreaterEqual(a, CFG.alt_range_m[0])
+            self.assertLessEqual(a, CFG.alt_range_m[1])
+        # 78 uniform draws over 1-8 m should span most of the envelope
+        self.assertLess(min(alts), 2.0)
+        self.assertGreater(max(alts), 7.0)
 
     def test_headings_alternate_with_jitter(self):
         jit = math.radians(CFG.yaw_jitter_deg) + 1e-9

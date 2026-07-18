@@ -1,0 +1,330 @@
+"""Mission state machine: takeoff -> serpentine lanes -> (dip stub) ->
+egress -> dump -> land, abort from anywhere (rfd-mission-execution).
+
+Pure core: the engine is ticked with time + flight state and returns a
+setpoint; the ROS rim (or the test fake) owns transport. Detection
+ingest is not a state — it feeds the mine log continuously from takeoff
+to land. Setpoints are always in the flight-layer local frame.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+from .geometry import Lane, Vec3, serpentine
+from .minelog import CONFIRMED, DIPPED, Cluster, MineLog
+
+# phases
+PREFLIGHT = "PREFLIGHT"
+OFFBOARD_SYNC = "OFFBOARD_SYNC"
+TAKEOFF = "TAKEOFF"
+LANE = "LANE"
+VERIFY_DIP = "VERIFY_DIP"
+EGRESS = "EGRESS"
+DUMP = "DUMP"
+LAND = "LAND"
+ABORT = "ABORT"
+DONE = "DONE"
+
+
+@dataclass(frozen=True)
+class Setpoint:
+    pos: Vec3  # NED position target
+    vel: Optional[Vec3] = None  # feed-forward (lanes) or command (crawl)
+    yaw: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class MissionConfig:
+    # lanes
+    lanes_origin: Tuple[float, float] = (0.0, 0.0)
+    lane_length: float = 20.0
+    n_lanes: int = 3
+    lane_spacing: float = 6.0
+    survey_alt_m: float = 6.0  # AGL, positive
+    lane_speed: float = 2.0
+    # transit / vertical
+    climb_speed: float = 1.5
+    descent_speed: float = 0.8
+    reach_tol_m: float = 0.5
+    track_gate_m: float = 2.0  # lane progress pauses beyond this error
+    sync_duration_s: float = 1.2
+    egress_ne: Tuple[float, float] = (0.0, 0.0)
+    # verify-dip stub
+    dip_hover_s: float = 2.0
+    max_dips: int = 4
+    # abort policy
+    detector_silence_s: float = 5.0
+    reset_storm_count: int = 3
+    dump_retry_limit: int = 3
+
+    def __post_init__(self) -> None:
+        if self.survey_alt_m <= 0.0 or self.lane_speed <= 0.0:
+            raise ValueError("survey_alt_m and lane_speed must be positive")
+        if self.reach_tol_m <= 0.0 or self.track_gate_m < self.reach_tol_m:
+            raise ValueError("need 0 < reach_tol_m <= track_gate_m")
+
+
+@dataclass
+class CoveredInterval:
+    lane: int
+    s0: float
+    s1: float
+
+
+class MissionEngine:
+    """Deterministic mission sequencer. Drive it with tick(t, pos);
+    feed detections into `log` via the ingest module; read `phase`."""
+
+    def __init__(self, cfg: MissionConfig, log: Optional[MineLog] = None) -> None:
+        self.cfg = cfg
+        self.log = log if log is not None else MineLog()
+        self.lanes: List[Lane] = serpentine(
+            cfg.lanes_origin, cfg.lane_length, cfg.n_lanes, cfg.lane_spacing
+        )
+        self.phase = PREFLIGHT
+        self.abort_reason: Optional[str] = None
+        self.t_takeoff: Optional[float] = None
+        self.dips_done = 0
+        self.dump_attempts = 0
+        self.dump_acked = False
+        self.covered: List[CoveredInterval] = []
+        self.ekf_resets_seen = 0
+        self._sync_t0: Optional[float] = None
+        self._lane_i = 0
+        self._lane_s = 0.0
+        self._last_t: Optional[float] = None
+        self._home_ne: Optional[Tuple[float, float]] = None
+        self._dip_target: Optional[Cluster] = None
+        self._dip_t0: Optional[float] = None
+        self._last_detector_t: Optional[float] = None
+        self._last_reset_counter: Optional[int] = None
+        self._last_yaw = 0.0
+
+    # ------------------------------------------------------------ inputs
+
+    def start(self) -> None:
+        """Operator mission-start ack (the arming gate lives in the rim)."""
+        if self.phase == PREFLIGHT:
+            self.phase = OFFBOARD_SYNC
+
+    def note_detector_alive(self, t: float) -> None:
+        self._last_detector_t = t
+
+    def note_reset_counter(self, counter: int) -> None:
+        if self._last_reset_counter is not None and counter != self._last_reset_counter:
+            self.ekf_resets_seen += abs(counter - self._last_reset_counter)
+        self._last_reset_counter = counter
+
+    def operator_abort(self) -> None:
+        self._abort("operator")
+
+    def notify_dump_result(self, ok: bool) -> None:
+        if self.phase != DUMP:
+            return
+        if ok:
+            self.dump_acked = True
+        else:
+            self.dump_attempts += 1
+            if self.dump_attempts >= self.cfg.dump_retry_limit:
+                self._abort("dump retries exhausted")
+
+    # ------------------------------------------------------------ state
+
+    def _abort(self, reason: str) -> None:
+        if self.phase in (ABORT, DONE):
+            return
+        self.abort_reason = reason
+        self.phase = ABORT
+
+    def _alt_target(self) -> float:
+        return -self.cfg.survey_alt_m  # NED
+
+    def _check_aborts(self, t: float) -> None:
+        if self.phase not in (TAKEOFF, LANE, VERIFY_DIP):
+            return
+        if (
+            self._last_detector_t is not None
+            and t - self._last_detector_t > self.cfg.detector_silence_s
+        ):
+            self._abort(f"detector silent > {self.cfg.detector_silence_s} s")
+        if self.ekf_resets_seen >= self.cfg.reset_storm_count:
+            self._abort("EKF reset storm")
+
+    def _toward(self, pos: Vec3, target: Vec3, speed: float, dt: float) -> Setpoint:
+        """Position setpoint stepped along the line to `target` — a smooth
+        stream, never one far waypoint (setpoint streaming policy)."""
+        d = (target[0] - pos[0], target[1] - pos[1], target[2] - pos[2])
+        dist = math.sqrt(d[0] ** 2 + d[1] ** 2 + d[2] ** 2)
+        if dist < 1e-9 or dist <= speed * dt:
+            return Setpoint(pos=target, yaw=self._last_yaw)
+        k = speed * dt / dist
+        step = (pos[0] + d[0] * k, pos[1] + d[1] * k, pos[2] + d[2] * k)
+        if math.hypot(d[0], d[1]) > 0.3:
+            self._last_yaw = math.atan2(d[1], d[0])
+        vel = (d[0] / dist * speed, d[1] / dist * speed, d[2] / dist * speed)
+        return Setpoint(pos=step, vel=vel, yaw=self._last_yaw)
+
+    def _reached(self, pos: Vec3, target: Vec3) -> bool:
+        return (
+            math.hypot(target[0] - pos[0], target[1] - pos[1]) <= self.cfg.reach_tol_m
+            and abs(target[2] - pos[2]) <= self.cfg.reach_tol_m
+        )
+
+    # ------------------------------------------------------------ tick
+
+    def tick(self, t: float, pos: Vec3) -> Optional[Setpoint]:
+        dt = 0.0 if self._last_t is None else max(t - self._last_t, 0.0)
+        self._last_t = t
+        self._check_aborts(t)
+
+        if self.phase == PREFLIGHT:
+            return None
+
+        if self.phase == OFFBOARD_SYNC:
+            if self._sync_t0 is None:
+                self._sync_t0 = t
+                self._home_ne = (pos[0], pos[1])
+            if t - self._sync_t0 >= self.cfg.sync_duration_s:
+                self.phase = TAKEOFF
+                self.t_takeoff = t
+            return Setpoint(pos=(self._home_ne[0], self._home_ne[1], pos[2]))
+
+        if self.phase == TAKEOFF:
+            target = (self._home_ne[0], self._home_ne[1], self._alt_target())
+            if self._reached(pos, target):
+                self.phase = LANE
+                return self.tick_lane(pos, dt)
+            return self._toward(pos, target, self.cfg.climb_speed, dt)
+
+        if self.phase == LANE:
+            return self.tick_lane(pos, dt)
+
+        if self.phase == VERIFY_DIP:
+            return self._tick_dip(t, pos, dt)
+
+        if self.phase == EGRESS or self.phase == ABORT:
+            target = (self.cfg.egress_ne[0], self.cfg.egress_ne[1], self._alt_target())
+            if self._reached(pos, target):
+                self.phase = DUMP if self.phase == EGRESS else LAND
+            return self._toward(pos, target, self.cfg.lane_speed, dt)
+
+        if self.phase == DUMP:
+            if self.dump_acked:
+                self.phase = LAND
+            return Setpoint(
+                pos=(self.cfg.egress_ne[0], self.cfg.egress_ne[1], self._alt_target())
+            )
+
+        if self.phase == LAND:
+            target = (self.cfg.egress_ne[0], self.cfg.egress_ne[1], 0.0)
+            if self._reached(pos, target):
+                self.phase = DONE
+                return None
+            return self._toward(pos, target, self.cfg.descent_speed, dt)
+
+        return None  # DONE
+
+    def tick_lane(self, pos: Vec3, dt: float) -> Setpoint:
+        lane = self.lanes[self._lane_i]
+        n, e = lane.point_at(self._lane_s)
+        target = (n, e, self._alt_target())
+
+        # dip trigger between progress steps, budget permitting
+        if self.dips_done < self.cfg.max_dips:
+            c = self.log.next_dip_target()
+            if c is not None:
+                self._dip_target = c
+                self._dip_t0 = None
+                self.phase = VERIFY_DIP
+                return Setpoint(pos=target, yaw=self._last_yaw)
+
+        # off the lane (lane entry, dip re-entry): stream toward it,
+        # progress paused — never a far position step
+        err = math.hypot(target[0] - pos[0], target[1] - pos[1]) + abs(
+            target[2] - pos[2]
+        )
+        if err > self.cfg.track_gate_m:
+            return self._toward(pos, target, self.cfg.lane_speed, dt)
+
+        s0 = self._lane_s
+        self._lane_s = min(self._lane_s + self.cfg.lane_speed * dt, lane.length)
+        self._record_coverage(lane.index, s0, self._lane_s)
+        if self._lane_s >= lane.length and self._reached(pos, target):
+            if self._lane_i + 1 < len(self.lanes):
+                self._lane_i += 1
+                self._lane_s = 0.0
+                lane = self.lanes[self._lane_i]
+            else:
+                self.phase = EGRESS
+        n, e = lane.point_at(self._lane_s)
+        hd = lane.heading
+        self._last_yaw = hd
+        return Setpoint(
+            pos=(n, e, self._alt_target()),
+            vel=(
+                self.cfg.lane_speed * math.cos(hd),
+                self.cfg.lane_speed * math.sin(hd),
+                0.0,
+            ),
+            yaw=hd,
+        )
+
+    def _tick_dip(self, t: float, pos: Vec3, dt: float) -> Setpoint:
+        """v0 stub: hover over the cluster centroid at survey altitude,
+        mark it dipped, resume the lane at the recorded progress point."""
+        c = self._dip_target
+        target = (c.centroid[0], c.centroid[1], self._alt_target())
+        if not self._reached(pos, target):
+            return self._toward(pos, target, self.cfg.lane_speed, dt)
+        if self._dip_t0 is None:
+            self._dip_t0 = t
+        if t - self._dip_t0 >= self.cfg.dip_hover_s:
+            c.status = DIPPED
+            self.dips_done += 1
+            self._dip_target = None
+            self.phase = LANE
+        return Setpoint(pos=target, yaw=self._last_yaw)
+
+    def _record_coverage(self, lane_index: int, s0: float, s1: float) -> None:
+        if s1 <= s0:
+            return
+        if (
+            self.covered
+            and self.covered[-1].lane == lane_index
+            and abs(self.covered[-1].s1 - s0) < 1e-9
+        ):
+            self.covered[-1].s1 = s1
+        else:
+            self.covered.append(CoveredInterval(lane_index, s0, s1))
+
+    # ------------------------------------------------------------ outputs
+
+    def coverage_report(self) -> Dict:
+        lanes = []
+        gaps = []
+        for iv in self.covered:
+            lane = self.lanes[iv.lane]
+            lanes.append([list(lane.point_at(iv.s0)), list(lane.point_at(iv.s1))])
+        by_lane: Dict[int, List[CoveredInterval]] = {}
+        for iv in self.covered:
+            by_lane.setdefault(iv.lane, []).append(iv)
+        for lane in self.lanes:
+            ivs = sorted(by_lane.get(lane.index, []), key=lambda iv: iv.s0)
+            cursor = 0.0
+            for iv in ivs:
+                if iv.s0 > cursor + 1e-6:
+                    gaps.append([list(lane.point_at(cursor)), list(lane.point_at(iv.s0))])
+                cursor = max(cursor, iv.s1)
+            if cursor < lane.length - 1e-6:
+                gaps.append([list(lane.point_at(cursor)), list(lane.point_at(lane.length))])
+        return {"lanes": lanes, "gaps": gaps}
+
+    def stats(self) -> Dict:
+        return {
+            "detections": self.log.n_ingested,
+            "dips": self.dips_done,
+            "ekf_resets": self.ekf_resets_seen,
+        }

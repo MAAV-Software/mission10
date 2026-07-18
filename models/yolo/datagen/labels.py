@@ -47,6 +47,61 @@ def mine_corners(m: MinePose, dims: Tuple[float, float, float]) -> List[Vec3]:
     return corners
 
 
+def raw_extents(
+    cam: CameraModel,
+    pos: Vec3,
+    q: Quat,
+    mine: MinePose,
+    dims: Tuple[float, float, float],
+) -> Optional[Tuple[float, float, float, float]]:
+    """Unclipped pixel-extent rectangle (u0, u1, v0, v1) of the projected
+    corners; None for a degenerate station/mine pairing. Projected once per
+    station/mine, the extents serve any clip window (frame or tile)."""
+    us: List[float] = []
+    vs: List[float] = []
+    for corner in mine_corners(mine, dims):
+        try:
+            u, v = project_raw(cam, pos, q, corner)
+        except BehindCamera:
+            return None
+        us.append(u)
+        vs.append(v)
+    return min(us), max(us), min(vs), max(vs)
+
+
+def box_from_extents(
+    extents: Tuple[float, float, float, float],
+    window: Tuple[float, float, float, float],
+    *,
+    min_visible_frac: float,
+    min_box_px: float,
+) -> Optional[YoloBox]:
+    """Extents clipped to a pixel window (x0, y0, x1, y1) and normalized to
+    it. None = not (usefully) visible inside this window."""
+    u0, u1, v0, v1 = extents
+    x0, y0, x1, y1 = window
+    raw_area = (u1 - u0) * (v1 - v0)
+    if raw_area <= 0.0:
+        return None
+    cu0, cu1 = max(u0, x0), min(u1, x1)
+    cv0, cv1 = max(v0, y0), min(v1, y1)
+    if cu1 <= cu0 or cv1 <= cv0:
+        return None
+    frac = ((cu1 - cu0) * (cv1 - cv0)) / raw_area
+    if frac < min_visible_frac:
+        return None
+    if (cu1 - cu0) < min_box_px or (cv1 - cv0) < min_box_px:
+        return None
+    return YoloBox(
+        cls=CLASS_MINE,
+        cx=((cu0 + cu1) / 2.0 - x0) / (x1 - x0),
+        cy=((cv0 + cv1) / 2.0 - y0) / (y1 - y0),
+        w=(cu1 - cu0) / (x1 - x0),
+        h=(cv1 - cv0) / (y1 - y0),
+        visible_frac=frac,
+    )
+
+
 def yolo_box(
     cam: CameraModel,
     pos: Vec3,
@@ -59,33 +114,12 @@ def yolo_box(
 ) -> Optional[YoloBox]:
     """Axis-aligned image box over the projected corners, clipped to the
     frame. None = not (usefully) visible from this station."""
-    us: List[float] = []
-    vs: List[float] = []
-    for corner in mine_corners(mine, dims):
-        try:
-            u, v = project_raw(cam, pos, q, corner)
-        except BehindCamera:
-            return None  # degenerate station/mine pairing
-        us.append(u)
-        vs.append(v)
-    u0, u1, v0, v1 = min(us), max(us), min(vs), max(vs)
-    raw_area = (u1 - u0) * (v1 - v0)
-    if raw_area <= 0.0:
+    extents = raw_extents(cam, pos, q, mine, dims)
+    if extents is None:
         return None
-    cu0, cu1 = max(u0, 0.0), min(u1, float(cam.width_px))
-    cv0, cv1 = max(v0, 0.0), min(v1, float(cam.height_px))
-    if cu1 <= cu0 or cv1 <= cv0:
-        return None
-    frac = ((cu1 - cu0) * (cv1 - cv0)) / raw_area
-    if frac < min_visible_frac:
-        return None
-    if (cu1 - cu0) < min_box_px or (cv1 - cv0) < min_box_px:
-        return None
-    return YoloBox(
-        cls=CLASS_MINE,
-        cx=(cu0 + cu1) / 2.0 / cam.width_px,
-        cy=(cv0 + cv1) / 2.0 / cam.height_px,
-        w=(cu1 - cu0) / cam.width_px,
-        h=(cv1 - cv0) / cam.height_px,
-        visible_frac=frac,
+    return box_from_extents(
+        extents,
+        (0.0, 0.0, float(cam.width_px), float(cam.height_px)),
+        min_visible_frac=min_visible_frac,
+        min_box_px=min_box_px,
     )

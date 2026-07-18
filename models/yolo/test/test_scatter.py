@@ -3,7 +3,7 @@ import unittest
 from dataclasses import replace
 
 from datagen.config import GenConfig
-from datagen.scatter import ScatterFailed, scatter
+from datagen.scatter import MinePose, ScatterFailed, scatter
 
 CFG = GenConfig()
 
@@ -33,6 +33,43 @@ class TestScatter(unittest.TestCase):
         cfg = replace(CFG, mines_min=12, mines_max=12, min_separation_m=50.0)
         with self.assertRaises(ScatterFailed):
             scatter(cfg, random.Random("fail"))
+
+    def test_tag_visible_truth_table_is_derived(self):
+        cases = (
+            ("both", False, True),
+            ("both", True, True),
+            ("one", False, False),
+            ("one", True, True),
+            ("none", False, False),
+            ("none", True, False),
+        )
+        for layout, tag_up, expected in cases:
+            with self.subTest(layout=layout, tag_up=tag_up):
+                pose = MinePose(1.0, 2.0, 3.0, tag_layout=layout, tag_up=tag_up)
+                self.assertEqual(pose.tag_visible, expected)
+
+    def test_forced_layout_and_flip_knobs(self):
+        cases = (
+            ("both", 0.0, False, True),
+            ("one", 0.0, False, False),
+            ("one", 1.0, True, True),
+            ("none", 1.0, True, False),
+        )
+        for layout, tag_up_prob, expected_up, visible in cases:
+            with self.subTest(layout=layout, tag_up_prob=tag_up_prob):
+                weights = {
+                    f"p_tag_{name}": 1.0 if name == layout else 0.0
+                    for name in ("both", "one", "none")
+                }
+                cfg = replace(CFG, tag_up_prob=tag_up_prob, **weights)
+                mines = scatter(
+                    cfg,
+                    random.Random("geometry"),
+                    random.Random("tags"),
+                )
+                self.assertTrue(all(m.tag_layout == layout for m in mines))
+                self.assertTrue(all(m.tag_up == expected_up for m in mines))
+                self.assertTrue(all(m.tag_visible == visible for m in mines))
 
 
 if __name__ == "__main__":

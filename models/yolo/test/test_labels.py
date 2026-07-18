@@ -7,7 +7,7 @@ from mission_engine.core.geometry import quat_from_yaw
 from datagen.labels import mine_corners, yolo_box
 from datagen.scatter import MinePose
 
-CAM = CameraModel()
+CAM = CameraModel(tilt_deg=10.0)  # tilted vectors; the mount default is nadir
 DIMS = (0.12, 0.061, 0.020)
 POS = (0.0, 0.0, -6.0)
 Q0 = quat_from_yaw(0.0)
@@ -44,6 +44,11 @@ class TestYoloBox(unittest.TestCase):
         b90 = box(MinePose(LEAD, 0.0, math.pi / 2.0))
         self.assertGreater(b90.w, b0.w)  # long axis now spans east/u
         self.assertLess(b90.h, b0.h)
+
+    def test_tag_visibility_does_not_change_box(self):
+        visible = MinePose(LEAD, 0.0, 0.0, tag_layout="one", tag_up=True)
+        hidden = MinePose(LEAD, 0.0, 0.0, tag_layout="one", tag_up=False)
+        self.assertEqual(box(visible), box(hidden))
 
     def test_edge_clipping(self):
         # mine centered on the right image edge: half the box clips away

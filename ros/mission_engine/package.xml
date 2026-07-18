@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mission_engine</name>
+  <version>0.0.0</version>
+  <description>Mission execution layer for one drone: survey state machine, lane geometry, detection back-projection, mine log, and regroup dump (rfd-mission-execution).</description>
+  <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
+  <license>MPL-2.0</license>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

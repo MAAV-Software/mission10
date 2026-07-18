@@ -52,8 +52,13 @@ def main(argv=None) -> None:
         man = write_scene(cfg, i, out)
         n_boxes = sum(len(st["labels"]) for st in man["stations"])
         total += n_boxes
+        surface = man["surface"]["primary"]
+        if man["surface"]["secondary"] is not None:
+            surface += f"+{man['surface']['secondary']}"
+        visible = sum(m["tag_visible"] for m in man["mines"])
         print(
             f"scene {i}: {len(man['mines'])} mines, "
+            f"{visible} tag-visible, surface {surface}, "
             f"{len(man['stations'])} stations, {n_boxes} boxes"
         )
     print(f"total label boxes: {total}")

@@ -11,5 +11,6 @@ log/
 # assets + datasets
 models/*/assets/
 models/*/out/
+models/*/dataset/
 
 .DS_Store

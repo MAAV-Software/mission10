@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from datagen.config import GenConfig
@@ -17,6 +18,53 @@ class TestScene(unittest.TestCase):
 
     def test_scenes_differ(self):
         self.assertNotEqual(build_scene(CFG, 0).mines, build_scene(CFG, 1).mines)
+
+    def test_surface_draw_is_deterministic(self):
+        self.assertEqual(build_scene(CFG, 4).surface, build_scene(CFG, 4).surface)
+
+    def test_forced_single_and_mixed_surfaces(self):
+        single = replace(
+            CFG, surface_materials=("concrete",), mixed_surface_prob=0.0
+        )
+        self.assertEqual(build_scene(single, 0).surface.primary, "concrete")
+        self.assertIsNone(build_scene(single, 0).surface.secondary)
+
+        mixed = replace(
+            CFG,
+            surface_materials=("grass", "pavement"),
+            mixed_surface_prob=1.0,
+            mixed_strip_width_m=(3.0, 3.0),
+        )
+        surface = build_scene(mixed, 0).surface
+        self.assertNotEqual(surface.primary, surface.secondary)
+        self.assertIn(surface.strip_axis, ("north", "east"))
+        self.assertEqual(surface.strip_width_m, 3.0)
+
+    def test_new_knobs_do_not_perturb_geometry_or_labels(self):
+        untagged_grass = replace(
+            CFG,
+            surface_materials=("grass",),
+            mixed_surface_prob=0.0,
+            p_tag_both=0.0, p_tag_one=0.0, p_tag_none=1.0,
+            tag_up_prob=0.0,
+        )
+        tagged_mixed = replace(
+            CFG,
+            surface_materials=("dirt", "pavement"),
+            mixed_surface_prob=1.0,
+            p_tag_both=1.0, p_tag_one=0.0, p_tag_none=0.0,
+            tag_up_prob=1.0,
+        )
+        a = build_scene(untagged_grass, 2)
+        b = build_scene(tagged_mixed, 2)
+        self.assertEqual(
+            [(m.north, m.east, m.yaw) for m in a.mines],
+            [(m.north, m.east, m.yaw) for m in b.mines],
+        )
+        self.assertEqual(a.stations, b.stations)
+        self.assertEqual(
+            scene_labels(untagged_grass, a), scene_labels(tagged_mixed, b)
+        )
 
     def test_index_validated(self):
         with self.assertRaises(ValueError):
@@ -46,6 +94,22 @@ class TestManifestAndDump(unittest.TestCase):
         self.assertEqual(man["schema"], SCHEMA)
         self.assertEqual(len(man["stations"]), len(scene.stations))
         self.assertEqual(len(man["mines"]), len(scene.mines))
+        self.assertEqual(
+            man["surface"],
+            {
+                "primary": scene.surface.primary,
+                "secondary": scene.surface.secondary,
+                "strip_axis": scene.surface.strip_axis,
+                "strip_center_m": scene.surface.strip_center_m,
+                "strip_width_m": scene.surface.strip_width_m,
+            },
+        )
+        visible = sum(m.tag_visible for m in scene.mines)
+        self.assertEqual(man["tag_visible_fraction"], visible / len(scene.mines))
+        for mine, record in zip(scene.mines, man["mines"]):
+            self.assertEqual(record["tag_layout"], mine.tag_layout)
+            self.assertEqual(record["tag_up"], mine.tag_up)
+            self.assertEqual(record["tag_visible"], mine.tag_visible)
 
     def test_write_scene_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -61,6 +125,25 @@ class TestManifestAndDump(unittest.TestCase):
                     parts = line.split()
                     self.assertEqual(len(parts), 5)
                     self.assertEqual(parts[0], "0")
+
+    def test_write_scene_is_byte_deterministic(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp_a,
+            tempfile.TemporaryDirectory() as tmp_b,
+        ):
+            out_a = Path(tmp_a)
+            out_b = Path(tmp_b)
+            write_scene(CFG, 3, out_a)
+            write_scene(CFG, 3, out_b)
+            files_a = sorted(path.relative_to(out_a) for path in out_a.rglob("*"))
+            files_b = sorted(path.relative_to(out_b) for path in out_b.rglob("*"))
+            self.assertEqual(files_a, files_b)
+            for relative in files_a:
+                if (out_a / relative).is_file():
+                    self.assertEqual(
+                        (out_a / relative).read_bytes(),
+                        (out_b / relative).read_bytes(),
+                    )
 
 
 if __name__ == "__main__":

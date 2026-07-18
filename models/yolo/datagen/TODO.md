@@ -1,6 +1,48 @@
 # datagen TODO
 
+Status (2026-07-17): both knobs implemented and unit-tested; the first Blender
+bench session ran on 5.1.2. Prepped assets (`m10-mine.blend`, `m10-base.blend`
+via `tools/`), fixed a transposed camera-matrix bug the overlay tripwire
+caught, and verified image/label alignment in real renders. The BENCH LIST at
+the end of `generate.py` tracks what that session closed and what remains —
+the mine template carries a tag36h11 decal (`tools/prep_mine_material.py`),
+so the tag knob changes real pixels; family/faces stay assumptions until the
+IARC resource addendum.
+
+Render-stream rename: the single `seed:scene:render` stream is now split into
+`seed:scene:render:sun` and `seed:scene:render:mines` (plus the new `:surface`
+and `:tags` streams). This changes render-side RNG output versus the old
+name, so pre-rename renders are not byte-reproducible against this code. Harmless
+today — no renders are banked — but don't diff old vs new renders expecting
+identity. Pure labels/manifests are unaffected.
+
+Procedural clutter (rock/debris primitives as hard negatives) was implemented
+and then cut for simplicity: the arena's decoys (§85) are deliberately
+*mine-like* inert objects, so gray primitive blobs wouldn't train the rejection
+that matters. Hard negatives return as real distractor assets when the asset
+session happens (see BENCH LIST).
+
 ## Surface variety (domain randomization gap)
+
+**Implemented:** `GenConfig.surface_materials` is sampled uniformly once per
+scene; `mixed_surface_prob` and `mixed_strip_width_m` control an optional second
+material on a crossing strip. The selected materials, strip axis, center, and
+width are manifest records. The independent `seed:scene:surface` stream
+prevents the draw from changing mine geometry or boxes.
+
+**Bench-only:** `generate.py` assigns named ground materials and creates the
+mixed strip. The base blend needs matching material names, and surface scale,
+intersections, shadows, and z-fighting need visual verification.
+
+**Grass (verified on the bench 2026-07-17):** two layers. The grass material
+is a nadir bake of the archive's real hair-particle patch (view-consistent
+with the nadir survey camera), and a camera-following 3x3 grid of the actual
+particle patch (flattened, uniform density) adds real blade occlusion around
+the mines, snapped/flushed off non-grass strips. `grass_blade_m` samples blade
+length per scene — it directly randomizes occlusion severity. Fully buried
+mines no longer stay labeled: the renderer writes per-mine visible fractions
+to `out/occlusion/` sidecars and `datagen.materialize` drops boxes whose
+occlusion x edge-clip product falls under `--min-frac`.
 
 **Problem:** datagen currently renders mines on grass only. The Mission 10 arena
 (rules v3.1.2 §184) explicitly contains non-grass surfaces — **pavement, gravel,
@@ -26,6 +68,20 @@ during training are what make that rejection reliable. The rules even prescribe
 shape detection for exactly this (§81).
 
 ## AprilTag visibility randomization
+
+**Implemented:** `GenConfig.p_tag_both / p_tag_one / p_tag_none` are relative
+layout weights. Defaults are 0.495 / 0.495 / 0.01: untagged props stay rare
+while the unresolved both-vs-one split remains neutral and sweepable.
+`tag_up_prob=0.5` remains the explicitly flagged landing-orientation guess.
+`MinePose.tag_visible` is derived as both -> true, one -> `tag_up`, none ->
+false. Layout, flip, visibility, and the per-scene visible fraction are recorded
+in schema `minefield-datagen/3` manifests. The independent `seed:scene:tags`
+stream keeps these draws from changing geometry or YOLO boxes.
+
+**Bench-only:** `generate.py` rotates tag-invisible mines by pi around the
+template's local long axis and applies body hue jitter while excluding tag-named
+materials. Template origin/orientation, tag appearance, ground contact, and
+material-node behavior need visual verification.
 
 **Problem:** the rulebook doesn't specify whether the prop's AprilTag is on one
 face, both faces, or which way a scattered mine lands. If datagen renders every
