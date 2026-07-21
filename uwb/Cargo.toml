@@ -1,6 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "dwm3001"]
+members = [
+  "protocol",
+  "dwm3001",
+  "dw1000",
+  "dw1000/vendor/dw1000-rs",
+]
+
+[patch.crates-io]
+# v0.2.0 recomputes delayed TX deadlines after its ranging payload has already
+# captured the predicted timestamp. Keep the upstream source intact except for
+# the small absolute-deadline API documented in dw1000/vendor/dw1000-rs/MAAV.md.
+dw1000-rs = { path = "dw1000/vendor/dw1000-rs" }
 
 [profile.dev]
 codegen-units = 1
@@ -13,4 +24,3 @@ codegen-units = 1
 debug = 2
 lto = "fat"
 opt-level = "s"
-

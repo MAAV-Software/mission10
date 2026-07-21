@@ -1,13 +1,15 @@
 # Mission 10 UWB software
 
-This Cargo workspace owns the DWM3001CDK's nRF52833 application and the wire
-protocol shared with the CM5. The DW3110's opaque internal code is firmware;
-the Rust in this directory is ordinary Mission 10 software.
+This Cargo workspace owns both UWB radio applications and the wire protocol
+shared with the CM5. The DW3110's opaque internal code is firmware; the Rust in
+this directory is ordinary Mission 10 software.
 
 ## Workspace
 
 - `dwm3001/` — Embassy application, DW3110 driver, DS-TWR state machine, J20
   USB CDC adapter, and J9 debug metadata.
+- `dw1000/` — Linux application for the CM5-attached DW1000, including the
+  SPI/GPIO adapters and symmetric DS-TWR bench CLI.
 - `protocol/` — `no_std` native air frames, isolated DW1000 bench frames,
   ranging arithmetic, and the typed bidirectional host protocol.
 - `protocol/python/` — independent host decoder and cross-language golden test.
@@ -32,7 +34,9 @@ cd uwb
 
 cargo fmt --all --check
 cargo test --target x86_64-unknown-linux-gnu -p mission10-uwb-protocol
+cargo test --target x86_64-unknown-linux-gnu -p mission10-dw1000
 cargo build --release -p mission10-dwm3001
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p mission10-dw1000
 # Or, for the reverse-role diagnostic instead:
 cargo build --release -p mission10-dwm3001 --features initiator
 ```
@@ -118,6 +122,57 @@ successful finish-state retries.
 The committed `protocol/testdata/host_protocol_v3.frames` fixture is the single
 golden wire contract consumed by both the Rust encoder tests and Python codec
 tests.
+
+## DW1000 Linux flight-candidate spike
+
+The direct-CM5 application is built on the workstation for aarch64 Linux. Zig
+links it against a glibc 2.31 compatibility floor and records the standard
+`/lib/ld-linux-aarch64.so.1` interpreter, so the artifact runs on the fleet Pis
+without a Nix installation. The known `bigrpi5` wiring is CE0 at
+`/dev/spidev0.0`, active-high IRQ on GPIO24, and open-drain RSTn on GPIO25.
+Logical reset-high releases GPIO25 as an input with a pull-up.
+
+```sh
+nix develop .#uwb
+cd uwb
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p mission10-dw1000
+scp target/aarch64-unknown-linux-gnu/release/mission10-dw1000 bigrpi5:/tmp/
+ssh bigrpi5 'chmod 755 /tmp/mission10-dw1000'
+
+ssh bigrpi5 '/tmp/mission10-dw1000 probe --index 0'
+ssh bigrpi5 \
+  '/tmp/mission10-dw1000 range --index 0 --peer 1 --duration 60 --quiet'
+```
+
+`probe` performs a hardware reset, initializes at 2 MHz, verifies device ID
+`0xDECA0130`, and then raises SPI to 20 MHz. `range` defaults to the DWM3001
+bench PHY, 2 ms delayed legs, a 10 ms poll period, and a 10 ms response bound.
+Lower-index nodes initiate; every node also answers a configured peer's POLL.
+Exchange failures re-arm receive and preserve the process for peer recovery.
+The temporary frame carries a source address and no destination address. One
+node can answer several lower-index peers, but it can initiate to only one
+higher-index peer. `RangingConfig` rejects an ambiguous initiator peer set.
+
+The application uses `dw1000-rs` 0.2.0. Its exact upstream source is retained
+under `dw1000/vendor/` with three documented blocking-driver additions: device-ID
+readout, an absolute delayed-TX entry point, and raw receive timestamps. The TX
+entry point writes the unadjusted `DX_TIME` deadline while returning the
+antenna-adjusted timestamp carried by DS-TWR. Raw RX timestamps keep bias and
+antenna calibration at the shared subsystem layer. Remove the local patch when
+an upstream release provides equivalent semantics.
+
+### Rust DW1000 bench result (2026-07-21)
+
+The Rust initiator ranged against the `bigrpi5` DWM3001CDK responder for 60
+seconds at the 10 ms operating point. It completed 5,957 of 6,001 polls
+(99.27%), delivered 99.3 ranges/s, decoded zero invalid frames, and reported
+zero delayed-TX timestamp mismatches. Current unsurveyed bench readings were
+approximately 0.3--0.55 m; calibration remains pending.
+
+Ten consecutive J-Link resets of the DWM3001 peer produced the expected bounded
+timeouts; the same DW1000 process resumed and completed 804 ranges during the
+10-second disturbance run. Under the same 2 ms/10 ms/20 MHz settings, the
+existing Python oracle delivered 79.2 ranges/s in a separate 10-second run.
 
 ## Bench result (2026-07-18)
 

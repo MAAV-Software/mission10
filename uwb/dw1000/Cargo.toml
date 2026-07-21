@@ -1,0 +1,15 @@
+[package]
+name = "mission10-dw1000"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.54", features = ["derive"] }
+ctrlc = "3.5.1"
+dw1000-rs = "=0.2.0"
+embedded-hal = "1.0.0"
+gpiocdev = "0.8.0"
+linux-embedded-hal = { version = "0.4.1", default-features = false, features = ["spi"] }
+mission10-uwb-protocol = { path = "../protocol" }
