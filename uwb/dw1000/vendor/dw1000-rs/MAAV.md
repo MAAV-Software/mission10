@@ -18,6 +18,11 @@ Mission 10 adds these driver interfaces:
   receiver state-machine failures;
 - `set_transmit_power`, which permits controlled close-range saturation tests.
 
+Mission 10 removes the upstream tag/anchor protocol and ranging state machine.
+The mission application owns its air protocol, schedule, and recovery policy.
+Keeping a second coordinator-based protocol in the hardware driver made
+ownership ambiguous and added an unused public interface.
+
 The delayed-transmit entry point is required for DS-TWR. Upstream 0.2.0 computes
 the timestamp inserted into a Range payload and then computes a later timestamp
 when `transmit` writes `DX_TIME`. Even a small difference corrupts the time of
@@ -36,6 +41,6 @@ from hiding the next edge. The interrupt mask enables only events owned by the
 TX or RX service; automatic-acknowledgement trigger interrupts remain disabled.
 
 Keep this copy aligned with 0.2.0 outside these documented additions, their
-tests, this note, and removal of the package-local profiles now supplied by the
-enclosing workspace. Replace it with an upstream release once equivalent APIs
-are available.
+tests, the removed ranging protocol and state machine, this note, and removal
+of the package-local profiles now supplied by the enclosing workspace. Replace
+it with an upstream release once equivalent APIs are available.

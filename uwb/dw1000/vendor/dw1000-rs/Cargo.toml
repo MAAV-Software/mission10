@@ -49,16 +49,8 @@ name = "async_driver"
 path = "tests/async_driver.rs"
 
 [[test]]
-name = "async_ranging"
-path = "tests/async_ranging.rs"
-
-[[test]]
 name = "driver"
 path = "tests/driver.rs"
-
-[[test]]
-name = "ranging"
-path = "tests/ranging.rs"
 
 [dependencies.defmt]
 version = "0.3"
@@ -70,14 +62,8 @@ version = "1.0.0"
 [dependencies.embedded-hal-async]
 version = "1.0.0"
 
-[dependencies.heapless]
-version = "0.9.1"
-
 [dependencies.libm]
 version = "0.2"
-
-[dependencies.rand_core]
-version = "0.9.3"
 
 [dev-dependencies.futures]
 version = "0.3"

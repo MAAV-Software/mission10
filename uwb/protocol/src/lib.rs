@@ -11,8 +11,10 @@ use serde::de::{Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod air;
+pub mod clock;
 pub mod host;
 pub mod ranging;
+pub mod scheduler;
 pub mod state;
 
 pub use ranging::{
@@ -26,9 +28,9 @@ pub use state::{AvoidanceMode, EgoState, StateValidity};
 pub struct NodeAddress(u16);
 
 impl NodeAddress {
-    /// Creates an aircraft (`0..4`) or development (`0x8000..0x80ff`) address.
+    /// Creates an aircraft (`0..3`) or development (`0x8000..0x80ff`) address.
     pub const fn new(value: u16) -> Option<Self> {
-        if value <= 4 || (value >= 0x8000 && value <= 0x80ff) {
+        if value <= 3 || (value >= 0x8000 && value <= 0x80ff) {
             Some(Self(value))
         } else {
             None
@@ -62,7 +64,7 @@ impl Visitor<'_> for NodeAddressVisitor {
     type Value = NodeAddress;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an aircraft address 0..4 or development address 0x8000..0x80ff")
+        formatter.write_str("an aircraft address 0..3 or development address 0x8000..0x80ff")
     }
 
     fn visit_u16<E>(self, value: u16) -> Result<Self::Value, E>
@@ -92,7 +94,7 @@ impl<'de> Deserialize<'de> for NodeAddress {
     }
 }
 
-/// MAC destination, including the address reserved for future broadcast messages.
+/// MAC destination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Destination {
     /// One validated Mission 10 node.
@@ -119,7 +121,7 @@ mod tests {
     fn node_address_namespace_is_exhaustive() {
         for value in 0_u32..=u32::from(u16::MAX) {
             let value = value as u16;
-            let expected = value <= 4 || (0x8000..=0x80ff).contains(&value);
+            let expected = value <= 3 || (0x8000..=0x80ff).contains(&value);
             assert_eq!(NodeAddress::new(value).is_some(), expected);
             let raw = value.to_le_bytes();
             assert_eq!(hubpack::deserialize::<NodeAddress>(&raw).is_ok(), expected);

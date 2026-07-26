@@ -11,7 +11,7 @@ use mission10_dw1000::board::{
     HardwareConfig, PhyProfile, open_and_initialize,
 };
 use mission10_dw1000::oracle::run_rx_oracle;
-use mission10_dw1000::ranging::{Ranger, RangingConfig};
+use mission10_dw1000::ranging::{Ranger, RangingConfig, RangingStats};
 
 #[derive(Debug, Parser)]
 #[command(about = "Mission 10 DW1000 Linux bring-up and DS-TWR tool")]
@@ -66,7 +66,7 @@ struct RxOracleArgs {
     #[arg(long, value_parser = parse_node_address)]
     address: NodeAddress,
     /// Stop after this many seconds.
-    #[arg(long, default_value_t = 10.0)]
+    #[arg(long, default_value_t = 5.0)]
     duration: f64,
 }
 
@@ -76,17 +76,12 @@ struct RangeArgs {
     address: NodeAddress,
     #[arg(long = "peer", value_parser = parse_node_address, required = true)]
     peers: Vec<NodeAddress>,
-    #[arg(long, default_value_t = 10.0)]
-    poll_period_ms: f64,
     #[arg(long, default_value_t = 2_000)]
     reply_delay_us: u32,
-    #[arg(long, default_value_t = 10.0)]
+    #[arg(long, default_value_t = 3.5)]
     timeout_ms: f64,
-    /// Use 110 kbps with a 2048-symbol preamble for RF-link diagnosis.
-    #[arg(long)]
-    robust_phy: bool,
     /// Reduce TX gain by 8.5 dB to diagnose very close-range receiver saturation.
-    #[arg(long, conflicts_with = "robust_phy")]
+    #[arg(long)]
     low_tx_power: bool,
     /// Stop after this many seconds; omit to run until Ctrl-C.
     #[arg(long)]
@@ -168,10 +163,6 @@ fn rx_oracle(hardware: &HardwareConfig, args: RxOracleArgs) -> Result<()> {
 
 fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
     ensure!(
-        args.poll_period_ms.is_finite() && args.poll_period_ms > 0.0,
-        "poll period must be positive"
-    );
-    ensure!(
         args.timeout_ms.is_finite() && args.timeout_ms > 0.0,
         "response timeout must be positive"
     );
@@ -183,53 +174,99 @@ fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
     let config = RangingConfig::new(
         args.address,
         args.peers.clone(),
-        Duration::from_secs_f64(args.poll_period_ms / 1_000.0),
         args.reply_delay_us,
         Duration::from_secs_f64(args.timeout_ms / 1_000.0),
     )?;
     let duration = args.duration.map(Duration::from_secs_f64);
     let quiet = args.quiet;
-    let profile = if args.robust_phy {
-        PhyProfile::RobustDiagnostic
-    } else if args.low_tx_power {
+    report_runtime_scheduling();
+    let profile = if args.low_tx_power {
         PhyProfile::CloseRangeDiagnostic
     } else {
         PhyProfile::Operational
     };
-    let radio = open_and_initialize(hardware, args.address, profile)?;
-    let mut ranger = Ranger::new(radio, config);
-    let peers: Vec<_> = ranger.peers().iter().map(|peer| peer.get()).collect();
-    println!(
-        "DW1000 ranger ready: device_id=0x{device_id:08x} address={} peers={:?} profile={profile:?}",
-        args.address,
-        peers,
-        device_id = ranger.device_id(),
-    );
-
     let stop = Arc::new(AtomicBool::new(false));
     let signal_stop = stop.clone();
     ctrlc::set_handler(move || signal_stop.store(true, Ordering::Relaxed))
         .context("install Ctrl-C handler")?;
     let started = Instant::now();
-    let stats = ranger.run(&stop, duration, |measurement| {
-        if !quiet {
-            println!(
-                "range recv={} src={} metres={:.3} seq={} range_event_time_dtu={}",
-                measurement.receiver,
-                measurement.source,
-                measurement.distance_metres,
-                measurement.sequence,
-                measurement.range_event_time_dtu
-            );
+    let mut stats = RangingStats::default();
+    let mut restart_delay = Duration::from_millis(100);
+    while !stop.load(Ordering::Relaxed)
+        && duration.is_none_or(|duration| started.elapsed() < duration)
+    {
+        let radio = match open_and_initialize(hardware, args.address, profile) {
+            Ok(radio) => radio,
+            Err(error) => {
+                stats.radio_reinitializations += 1;
+                eprintln!(
+                    "DW1000 initialization failed; retrying in {:.3}s: {error:#}",
+                    restart_delay.as_secs_f64()
+                );
+                std::thread::sleep(restart_delay);
+                restart_delay = (restart_delay * 2).min(Duration::from_secs(2));
+                continue;
+            }
+        };
+        let mut ranger = Ranger::new(radio, config.clone());
+        let peers: Vec<_> = ranger.peers().iter().map(|peer| peer.get()).collect();
+        println!(
+            "DW1000 ranger ready: device_id=0x{device_id:08x} address={} peers={:?} profile={profile:?}",
+            args.address,
+            peers,
+            device_id = ranger.device_id(),
+        );
+        let remaining = duration.map(|duration| duration.saturating_sub(started.elapsed()));
+        match ranger.run(&stop, remaining, |measurement| {
+            if !quiet {
+                println!(
+                    "range recv={} src={} metres={:.3} seq={} range_event_time_dtu={} mission_event_time_us={:?} mission_generation={:?} mission_time_error_us={}",
+                    measurement.receiver,
+                    measurement.source,
+                    measurement.distance_metres,
+                    measurement.sequence,
+                    measurement.range_event_time_dtu,
+                    measurement.mission_event_time_us,
+                    measurement.mission_generation,
+                    measurement.mission_time_error_us,
+                );
+            }
+        }) {
+            Ok(run_stats) => {
+                stats.merge(run_stats);
+                break;
+            }
+            Err(error) => {
+                stats.merge(ranger.stats());
+                stats.radio_reinitializations += 1;
+                eprintln!(
+                    "DW1000 service failed; reinitializing in {:.3}s: {error:#}",
+                    restart_delay.as_secs_f64()
+                );
+                std::thread::sleep(restart_delay);
+                restart_delay = (restart_delay * 2).min(Duration::from_secs(2));
+            }
         }
-    })?;
+    }
     let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
     println!(
-        "STATS elapsed={elapsed:.3}s rate={:.1}Hz polls={} ranges={} timeouts={} rx_errors={} invalid={} wrong_peer={} unexpected_frames={} unexpected_tx_events={} scheduled_tx_misses={} explicit_rx_arms={} receiver_resets={}",
+        "STATS elapsed={elapsed:.3}s rate={:.1}Hz reinitializations={} polls_tx={} polls_rx={} responses_tx={} responses_rx={} finals_tx={} finals_rx={} reports_tx={} reports_rx={} completions={} backoffs={} ranges={} timeouts={} tx_completion_timeouts={} rx_completion_timeouts={} rx_errors={} invalid={} wrong_peer={} unexpected_frames={} unexpected_tx_events={} scheduled_tx_misses={} explicit_rx_arms={} receiver_resets={}",
         stats.ranges as f64 / elapsed,
+        stats.radio_reinitializations,
         stats.polls_sent,
+        stats.polls_received,
+        stats.responses_sent,
+        stats.responses_received,
+        stats.finals_sent,
+        stats.finals_received,
+        stats.reports_sent,
+        stats.reports_received,
+        stats.exchange_completions,
+        stats.contention_backoffs,
         stats.ranges,
         stats.timeouts,
+        stats.tx_completion_timeouts,
+        stats.rx_completion_timeouts,
         stats.rx_errors,
         stats.invalid_frames,
         stats.wrong_peer_frames,
@@ -240,6 +277,31 @@ fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
         stats.receiver_resets,
     );
     Ok(())
+}
+
+fn report_runtime_scheduling() {
+    let mut parameters = libc::sched_param { sched_priority: 0 };
+    // These queries do not change process state.
+    let policy = unsafe { libc::sched_getscheduler(0) };
+    let parameter_result = unsafe { libc::sched_getparam(0, &mut parameters) };
+    let cpu = unsafe { libc::sched_getcpu() };
+    let policy_name = match policy {
+        libc::SCHED_FIFO => "fifo",
+        libc::SCHED_RR => "round-robin",
+        libc::SCHED_OTHER => "other",
+        _ => "unknown",
+    };
+    if parameter_result == 0 {
+        println!(
+            "runtime scheduler={policy_name} priority={} cpu={cpu}",
+            parameters.sched_priority
+        );
+    }
+    if policy != libc::SCHED_FIFO {
+        eprintln!(
+            "warning: direct DW1000 service is not running with SCHED_FIFO; use chrt and taskset for qualification"
+        );
+    }
 }
 
 fn parse_node_address(value: &str) -> Result<NodeAddress, String> {
@@ -253,7 +315,7 @@ fn parse_node_address(value: &str) -> Result<NodeAddress, String> {
     }
     .map_err(|_| format!("invalid 16-bit node address {value:?}"))?;
     NodeAddress::new(raw).ok_or_else(|| {
-        format!("node address {value:?} is outside aircraft 0..4 and development 0x8000..0x80ff")
+        format!("node address {value:?} is outside aircraft 0..3 and development 0x8000..0x80ff")
     })
 }
 
@@ -264,7 +326,7 @@ mod tests {
     #[test]
     fn cli_address_parser_matches_the_mission_namespace() {
         for raw in 0_u32..=u32::from(u16::MAX) {
-            let expected = raw <= 4 || (0x8000..=0x80ff).contains(&raw);
+            let expected = raw <= 3 || (0x8000..=0x80ff).contains(&raw);
             assert_eq!(
                 parse_node_address(&raw.to_string()).is_ok(),
                 expected,

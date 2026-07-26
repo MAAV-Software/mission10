@@ -14,31 +14,8 @@ use embassy_nrf::wdt::WatchdogHandle;
 use embassy_nrf::{Peri, pac, peripherals};
 use embassy_time::{Duration, Instant as EmbassyInstant, Timer};
 use embedded_hal_async::spi::SpiDevice;
-use mission10_uwb_protocol::NodeAddress;
 use mission10_uwb_protocol::host::{Diagnostic, HealthCounters};
 
-pub const OWN_ADDRESS: NodeAddress = if cfg!(feature = "initiator") {
-    match NodeAddress::new(0) {
-        Some(address) => address,
-        None => panic!("invalid fixed initiator address"),
-    }
-} else {
-    match NodeAddress::new(1) {
-        Some(address) => address,
-        None => panic!("invalid fixed responder address"),
-    }
-};
-pub const PEER_ADDRESS: NodeAddress = if cfg!(feature = "initiator") {
-    match NodeAddress::new(1) {
-        Some(address) => address,
-        None => panic!("invalid fixed responder address"),
-    }
-} else {
-    match NodeAddress::new(0) {
-        Some(address) => address,
-        None => panic!("invalid fixed initiator address"),
-    }
-};
 pub const FALLBACK_ANTENNA_DELAY: u16 = 16_390;
 
 // Both delayed DS-TWR legs use the same tunable turnaround. Two
@@ -46,14 +23,9 @@ pub const FALLBACK_ANTENNA_DELAY: u16 = 16_390;
 // DW1000 peer we can lower it toward the few-hundred-microsecond hardware limit.
 pub const REPLY_DELAY_US: u32 = 2_000;
 
-// Every response in the ranging exchange is scheduled within 2 ms. Give USB and
-// executor activity ample margin, but do not let a lost packet leave both
-// peers receiving forever.
-pub const RESPONSE_TIMEOUT_US: u32 = 10_000;
-
-// Avoid monopolizing the channel in the one-pair diagnostic. Together with the
-// two delayed legs this targets roughly 100 ranging exchanges per second.
-pub const INITIATOR_INTER_EXCHANGE_GUARD_MS: u64 = 5;
+// Every reply marker is 2 ms after the preceding leg. This timeout bounds one
+// failed exchange without delaying other due pairs for a full far-pair period.
+pub const RESPONSE_TIMEOUT_US: u32 = 3_500;
 
 // IEEE short SFD timeout: preamble symbols + 1 + SFD symbols - PAC symbols.
 // The 128-symbol preamble selects PAC8, and the standard SFD is 8 symbols.

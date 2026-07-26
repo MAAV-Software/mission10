@@ -4,10 +4,12 @@ use crc::{CRC_32_ISO_HDLC, Crc};
 use hubpack::SerializedSize;
 use serde::{Deserialize, Serialize};
 
+use crate::scheduler::{ExchangeId, FlightRoster};
 use crate::{EgoState, NodeAddress};
 
-pub const HOST_PROTOCOL_VERSION: u8 = 4;
-pub const MAX_PEERS: usize = 3;
+pub const HOST_PROTOCOL_VERSION: u8 = 7;
+/// The other five radios in the complete development inventory.
+pub const MAX_PEERS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
 pub struct RadioConfiguration {
@@ -22,23 +24,32 @@ impl RadioConfiguration {
     }
 
     pub fn is_valid(&self) -> bool {
-        let Some(peers) = self.peers() else {
-            return false;
-        };
-        for (index, peer) in peers.iter().enumerate() {
-            if *peer == self.node_address || peers[..index].contains(peer) {
-                return false;
-            }
-        }
-        true
+        self.roster().is_some()
+    }
+
+    pub fn roster(&self) -> Option<FlightRoster> {
+        FlightRoster::new(self.node_address, self.peers()?)
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
 pub enum HostToRadio {
-    Configure { configuration: RadioConfiguration },
-    SetEgoState { state: EgoState },
-    RequestHealth { request_id: u32 },
+    Configure {
+        configuration: RadioConfiguration,
+    },
+    SetEgoState {
+        state: EgoState,
+    },
+    RequestHealth {
+        request_id: u32,
+    },
+    ClockReply {
+        request_id: u16,
+        mission_rx_us: u64,
+        mission_tx_us: u64,
+        mission_generation: u32,
+        source_error_us: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
@@ -56,12 +67,6 @@ impl HostToRadioEnvelope {
             message,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
-#[repr(u8)]
-pub enum OperatingMode {
-    Native,
 }
 
 /// Stable, non-overlapping diagnostics reported by the radio and host tasks.
@@ -89,7 +94,6 @@ pub enum Diagnostic {
     UnexpectedAir,
     InvalidTimestamp,
     Unknown,
-    UnsupportedInMode,
     RadioReset,
     WatchdogReset,
 }
@@ -120,9 +124,8 @@ impl Diagnostic {
             18 => Self::UnexpectedAir,
             19 => Self::InvalidTimestamp,
             20 => Self::Unknown,
-            21 => Self::UnsupportedInMode,
-            22 => Self::RadioReset,
-            23 => Self::WatchdogReset,
+            21 => Self::RadioReset,
+            22 => Self::WatchdogReset,
             _ => return None,
         })
     }
@@ -134,9 +137,27 @@ pub struct HealthCounters {
     pub spurious_irq_wakes: u32,
     pub wait_timeouts: u32,
     pub recoveries: u32,
-    pub missed_deadlines: u32,
     pub malformed_air_frames: u32,
     pub unexpected_air_frames: u32,
+    pub clock_samples_accepted: u32,
+    pub clock_samples_rejected: u32,
+    pub time_mapping_unavailable: u32,
+    pub clock_generation_changes: u32,
+    pub polls_sent: u32,
+    pub polls_received: u32,
+    pub responses_sent: u32,
+    pub responses_received: u32,
+    pub finals_sent: u32,
+    pub finals_received: u32,
+    pub reports_sent: u32,
+    pub reports_received: u32,
+    pub exchange_completions: u32,
+    pub exchange_timeouts: u32,
+    pub contention_backoffs: u32,
+    pub late_delayed_transmits: u32,
+    pub host_stale_transitions: u32,
+    pub peer_stale_transitions: u32,
+    pub radio_reinitializations: u32,
     pub host_decode_errors: u32,
     pub host_command_drops: u32,
     pub control_drops: u32,
@@ -145,6 +166,39 @@ pub struct HealthCounters {
 }
 
 impl HealthCounters {
+    pub const ZERO: Self = Self {
+        irq_wakes: 0,
+        spurious_irq_wakes: 0,
+        wait_timeouts: 0,
+        recoveries: 0,
+        malformed_air_frames: 0,
+        unexpected_air_frames: 0,
+        clock_samples_accepted: 0,
+        clock_samples_rejected: 0,
+        time_mapping_unavailable: 0,
+        clock_generation_changes: 0,
+        polls_sent: 0,
+        polls_received: 0,
+        responses_sent: 0,
+        responses_received: 0,
+        finals_sent: 0,
+        finals_received: 0,
+        reports_sent: 0,
+        reports_received: 0,
+        exchange_completions: 0,
+        exchange_timeouts: 0,
+        contention_backoffs: 0,
+        late_delayed_transmits: 0,
+        host_stale_transitions: 0,
+        peer_stale_transitions: 0,
+        radio_reinitializations: 0,
+        host_decode_errors: 0,
+        host_command_drops: 0,
+        control_drops: 0,
+        measurement_drops: 0,
+        diagnostic_drops: 0,
+    };
+
     /// Merge the counters owned by the host transport without disturbing
     /// radio-owned counters in `self`.
     pub fn merge_transport(&mut self, transport: Self) {
@@ -153,7 +207,30 @@ impl HealthCounters {
         self.control_drops = transport.control_drops;
         self.measurement_drops = transport.measurement_drops;
         self.diagnostic_drops = transport.diagnostic_drops;
+        self.host_stale_transitions = transport.host_stale_transitions;
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
+pub enum MissionEventTime {
+    Unavailable,
+    Mapped {
+        mission_time_us: u64,
+        generation: u32,
+        error_us: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
+pub struct CompletedExchange {
+    pub peer: NodeAddress,
+    pub exchange_id: ExchangeId,
+    pub range_event_time_dtu: u64,
+    pub mission_event_time: MissionEventTime,
+    pub millimetres: u32,
+    pub rssi_cdbm: i16,
+    pub quality_flags: u16,
+    pub state: EgoState,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
@@ -171,29 +248,23 @@ pub enum RadioToHost {
         revision: u32,
     },
     Ready {
-        mode: OperatingMode,
         rx_delay: u16,
         tx_delay: u16,
-        node_address: NodeAddress,
+    },
+    ClockProbe {
+        request_id: u16,
+    },
+    ClockStatus {
+        generation: u32,
+        error_us: u32,
+        age_us: u32,
+        mapped: bool,
     },
     Configured {
         configuration: RadioConfiguration,
     },
-    Rx {
-        kind: u8,
-    },
-    Range {
-        peer: NodeAddress,
-        exchange_id: u16,
-        range_event_time_dtu: u64,
-        millimetres: u32,
-        rssi_cdbm: i16,
-        quality_flags: u16,
-    },
-    PeerState {
-        peer: NodeAddress,
-        exchange_id: u16,
-        state: EgoState,
+    CompletedExchange {
+        exchange: CompletedExchange,
     },
     Error {
         diagnostic: Diagnostic,
@@ -202,6 +273,77 @@ pub enum RadioToHost {
         request_id: u32,
         counters: HealthCounters,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LatestExchanges {
+    entries: [Option<(u32, CompletedExchange)>; MAX_PEERS],
+    generation: u32,
+}
+
+impl LatestExchanges {
+    pub const fn new() -> Self {
+        Self {
+            entries: [None; MAX_PEERS],
+            generation: 0,
+        }
+    }
+
+    /// Inserts the newest exchange for a peer. Returns true when an older
+    /// unsent exchange was replaced.
+    pub fn push(&mut self, exchange: CompletedExchange) -> bool {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|(_, current)| current.peer == exchange.peer)
+        }) {
+            *entry = Some((self.generation, exchange));
+            return true;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.is_none()) {
+            *entry = Some((self.generation, exchange));
+            return false;
+        }
+        let oldest = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.map(|(generation, _)| generation))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.entries[oldest] = Some((self.generation, exchange));
+        true
+    }
+
+    pub fn pop_oldest(&mut self) -> Option<CompletedExchange> {
+        let oldest = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.map(|(generation, _)| (index, generation)))
+            .min_by_key(|(_, generation)| *generation)
+            .map(|(index, _)| index)?;
+        self.entries[oldest].take().map(|(_, exchange)| exchange)
+    }
+
+    /// Restores an interrupted transmission unless a newer exchange for the
+    /// same peer is already pending. Returns true when the restored value was
+    /// obsolete and was discarded.
+    pub fn restore(&mut self, exchange: CompletedExchange) -> bool {
+        if self.entries.iter().any(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|(_, current)| current.peer == exchange.peer)
+        }) {
+            return true;
+        }
+        self.push(exchange)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries = [None; MAX_PEERS];
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
@@ -231,7 +373,7 @@ pub const HOST_ENVELOPE_MAX_SIZE: usize = max(
 );
 pub const HOST_RAW_MAX_SIZE: usize = HOST_ENVELOPE_MAX_SIZE + 4;
 pub const HOST_FRAME_MAX_SIZE: usize = corncobs::max_encoded_len(HOST_RAW_MAX_SIZE);
-const _: () = assert!(HOST_FRAME_MAX_SIZE <= 64);
+const _: () = assert!(HOST_FRAME_MAX_SIZE <= 192);
 
 const HOST_CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
@@ -328,13 +470,17 @@ mod tests {
         NodeAddress::new(value).unwrap()
     }
 
+    fn exchange_id(value: u16) -> ExchangeId {
+        ExchangeId::new(value)
+    }
+
     #[test]
     fn configuration_rejects_reserved_duplicate_and_self_addresses() {
         assert!(
             RadioConfiguration {
                 node_address: node(2),
                 peer_count: 3,
-                peers: [node(0), node(1), node(3)],
+                peers: [node(0), node(1), node(3), node(0), node(0)],
             }
             .is_valid()
         );
@@ -342,7 +488,7 @@ mod tests {
             !RadioConfiguration {
                 node_address: node(2),
                 peer_count: 2,
-                peers: [node(1), node(1), node(0)],
+                peers: [node(1), node(1), node(0), node(0), node(0)],
             }
             .is_valid()
         );
@@ -350,15 +496,15 @@ mod tests {
             !RadioConfiguration {
                 node_address: node(2),
                 peer_count: 1,
-                peers: [node(2), node(0), node(0)],
+                peers: [node(2), node(0), node(0), node(0), node(0)],
             }
             .is_valid()
         );
         assert!(
             !RadioConfiguration {
                 node_address: node(2),
-                peer_count: 4,
-                peers: [node(0); 3],
+                peer_count: 6,
+                peers: [node(0); 5],
             }
             .is_valid()
         );
@@ -388,7 +534,6 @@ mod tests {
             Diagnostic::UnexpectedAir,
             Diagnostic::InvalidTimestamp,
             Diagnostic::Unknown,
-            Diagnostic::UnsupportedInMode,
             Diagnostic::RadioReset,
             Diagnostic::WatchdogReset,
         ];
@@ -400,47 +545,59 @@ mod tests {
     }
 
     #[test]
-    fn host_to_radio_round_trip() {
-        let envelope = HostToRadioEnvelope::new(
-            42,
-            HostToRadio::Configure {
-                configuration: RadioConfiguration {
-                    node_address: node(2),
-                    peer_count: 2,
-                    peers: [node(0), node(4), node(0)],
-                },
-            },
-        );
-        let mut frame = [0; HOST_FRAME_MAX_SIZE];
-        let len = encode_host_to_radio(&envelope, &mut frame).unwrap();
-        assert_eq!(frame[len - 1], 0);
-        let mut raw = [0; HOST_RAW_MAX_SIZE];
-        assert_eq!(decode_host_to_radio(&frame[..len], &mut raw), Ok(envelope));
-    }
-
-    #[test]
-    fn radio_to_host_round_trip_and_crc_rejection() {
+    fn corrupted_radio_frame_is_rejected() {
         let envelope = RadioToHostEnvelope::new(
             7,
-            RadioToHost::Range {
-                peer: node(4),
-                exchange_id: 0x1234,
-                range_event_time_dtu: 0x12_3456_789a,
-                millimetres: 2_345,
-                rssi_cdbm: -7_225,
-                quality_flags: 3,
+            RadioToHost::CompletedExchange {
+                exchange: CompletedExchange {
+                    peer: node(3),
+                    exchange_id: exchange_id(0x1234),
+                    range_event_time_dtu: 0x12_3456_789a,
+                    mission_event_time: MissionEventTime::Unavailable,
+                    millimetres: 2_345,
+                    rssi_cdbm: -7_225,
+                    quality_flags: 3,
+                    state: golden_state(),
+                },
             },
         );
         let mut frame = [0; HOST_FRAME_MAX_SIZE];
         let len = encode_radio_to_host(&envelope, &mut frame).unwrap();
         let mut raw = [0; HOST_RAW_MAX_SIZE];
-        assert_eq!(decode_radio_to_host(&frame[..len], &mut raw), Ok(envelope));
 
         frame[2] ^= 0x40;
         assert_eq!(
             decode_radio_to_host(&frame[..len], &mut raw),
             Err(HostFrameError::Crc)
         );
+    }
+
+    #[test]
+    fn latest_exchange_slots_replace_per_peer_and_preserve_other_peers() {
+        fn exchange(peer: u16, id: u16) -> CompletedExchange {
+            CompletedExchange {
+                peer: node(peer),
+                exchange_id: exchange_id(id),
+                range_event_time_dtu: 0,
+                mission_event_time: MissionEventTime::Unavailable,
+                millimetres: 0,
+                rssi_cdbm: 0,
+                quality_flags: 0,
+                state: EgoState::default(),
+            }
+        }
+
+        let mut slots = LatestExchanges::default();
+        assert!(!slots.push(exchange(1, 9)));
+        assert!(!slots.push(exchange(3, 0x14)));
+        assert!(slots.push(exchange(1, 0x18)));
+        assert_eq!(slots.pop_oldest().unwrap().exchange_id.get(), 0x14);
+        assert_eq!(slots.pop_oldest().unwrap().exchange_id.get(), 0x18);
+        assert!(slots.pop_oldest().is_none());
+
+        assert!(!slots.push(exchange(1, 0x22)));
+        assert!(slots.restore(exchange(1, 0x18)));
+        assert_eq!(slots.pop_oldest().unwrap().exchange_id.get(), 0x22);
     }
 
     /// Ordered radio→host golden frames. Sequence numbers are part of the
@@ -469,40 +626,50 @@ mod tests {
             (
                 "radio.ready",
                 RadioToHost::Ready {
-                    mode: OperatingMode::Native,
                     rx_delay: 0x3ff0,
                     tx_delay: 0x3ff1,
-                    node_address: node(2),
+                },
+            ),
+            (
+                "radio.clock_probe",
+                RadioToHost::ClockProbe { request_id: 0x5678 },
+            ),
+            (
+                "radio.clock_status",
+                RadioToHost::ClockStatus {
+                    generation: 7,
+                    error_us: 125,
+                    age_us: 12_345,
+                    mapped: true,
                 },
             ),
             (
                 "radio.configured",
                 RadioToHost::Configured { configuration },
             ),
-            ("radio.rx", RadioToHost::Rx { kind: 3 }),
             (
-                "radio.range",
-                RadioToHost::Range {
-                    peer: node(4),
-                    exchange_id: 0x1234,
-                    range_event_time_dtu: 0x01_0203_0405,
-                    millimetres: 2_345,
-                    rssi_cdbm: -7_225,
-                    quality_flags: 3,
-                },
-            ),
-            (
-                "radio.peer_state",
-                RadioToHost::PeerState {
-                    peer: node(4),
-                    exchange_id: 0x1234,
-                    state: golden_state(),
+                "radio.completed_exchange",
+                RadioToHost::CompletedExchange {
+                    exchange: CompletedExchange {
+                        peer: node(3),
+                        exchange_id: exchange_id(0x1234),
+                        range_event_time_dtu: 0x01_0203_0405,
+                        mission_event_time: MissionEventTime::Mapped {
+                            mission_time_us: 0x0102_0304_0506_0708,
+                            generation: 7,
+                            error_us: 125,
+                        },
+                        millimetres: 2_345,
+                        rssi_cdbm: -7_225,
+                        quality_flags: 3,
+                        state: golden_state(),
+                    },
                 },
             ),
             (
                 "radio.error",
                 RadioToHost::Error {
-                    diagnostic: Diagnostic::UnsupportedInMode,
+                    diagnostic: Diagnostic::RadioReset,
                 },
             ),
             (
@@ -514,14 +681,32 @@ mod tests {
                         spurious_irq_wakes: 2,
                         wait_timeouts: 3,
                         recoveries: 4,
-                        missed_deadlines: 5,
-                        malformed_air_frames: 6,
-                        unexpected_air_frames: 7,
-                        host_decode_errors: 8,
-                        host_command_drops: 9,
-                        control_drops: 10,
-                        measurement_drops: 11,
-                        diagnostic_drops: 12,
+                        malformed_air_frames: 5,
+                        unexpected_air_frames: 6,
+                        clock_samples_accepted: 7,
+                        clock_samples_rejected: 8,
+                        time_mapping_unavailable: 9,
+                        clock_generation_changes: 10,
+                        polls_sent: 11,
+                        polls_received: 12,
+                        responses_sent: 13,
+                        responses_received: 14,
+                        finals_sent: 15,
+                        finals_received: 16,
+                        reports_sent: 17,
+                        reports_received: 18,
+                        exchange_completions: 19,
+                        exchange_timeouts: 20,
+                        contention_backoffs: 21,
+                        late_delayed_transmits: 22,
+                        host_stale_transitions: 23,
+                        peer_stale_transitions: 24,
+                        radio_reinitializations: 25,
+                        host_decode_errors: 26,
+                        host_command_drops: 27,
+                        control_drops: 28,
+                        measurement_drops: 29,
+                        diagnostic_drops: 30,
                     },
                 },
             ),
@@ -569,6 +754,19 @@ mod tests {
                     },
                 ),
             ),
+            (
+                "host.clock_reply",
+                HostToRadioEnvelope::new(
+                    0x0102_0307,
+                    HostToRadio::ClockReply {
+                        request_id: 0x5678,
+                        mission_rx_us: 0x0102_0304_0506_0708,
+                        mission_tx_us: 0x1112_1314_1516_1718,
+                        mission_generation: 7,
+                        source_error_us: 125,
+                    },
+                ),
+            ),
         ];
         let mut frame = [0; HOST_FRAME_MAX_SIZE];
         cases
@@ -586,7 +784,8 @@ mod tests {
 # These are test payloads, not node configuration. Changing a frame normally
 # requires a host protocol version bump rather than regenerating this file.
 # Generated by the Rust encoders. Regenerate (never hand-edit) with:
-#   UPDATE_GOLDEN=1 cargo test -p mission10-uwb-protocol committed_fixture
+#   UPDATE_GOLDEN=1 cargo test --target x86_64-unknown-linux-gnu \
+#     -p mission10-uwb-protocol committed_fixture
 ";
 
     fn render_committed_fixture() -> String {
@@ -612,19 +811,24 @@ mod tests {
     #[test]
     fn committed_fixture_matches_the_encoders() {
         let rendered = render_committed_fixture();
+        if std::env::var_os("PRINT_HOST_GOLDEN").is_some() {
+            println!("{rendered}");
+            return;
+        }
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/testdata/host_protocol_v4.frames"
+                "/testdata/host_protocol_v7.frames"
             );
             std::fs::write(path, &rendered).expect("write golden fixture");
             return;
         }
         assert_eq!(
             rendered,
-            include_str!("../testdata/host_protocol_v4.frames"),
+            include_str!("../testdata/host_protocol_v7.frames"),
             "golden fixture is stale; regenerate with \
-             UPDATE_GOLDEN=1 cargo test -p mission10-uwb-protocol committed_fixture",
+             UPDATE_GOLDEN=1 cargo test --target x86_64-unknown-linux-gnu \
+             -p mission10-uwb-protocol committed_fixture",
         );
     }
 
@@ -632,7 +836,7 @@ mod tests {
         RadioConfiguration {
             node_address: node(2),
             peer_count: 3,
-            peers: [node(0), node(4), node(0x8000)],
+            peers: [node(0), node(3), node(0x8000), node(0), node(0)],
         }
     }
 

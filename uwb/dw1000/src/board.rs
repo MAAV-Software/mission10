@@ -32,7 +32,6 @@ pub enum PhyProfile {
     #[default]
     Operational,
     CloseRangeDiagnostic,
-    RobustDiagnostic,
 }
 
 #[derive(Clone)]
@@ -308,7 +307,7 @@ pub fn open_and_initialize(
     let reset = OpenDrainReset::request(&config.gpio_chip, config.reset_gpio)?;
     let mut radio = Dw1000::new(spi.clone(), irq_pin, reset);
     let mut delay = Delay;
-    let radio_config = radio_config(address, profile);
+    let radio_config = radio_config(address);
     radio
         .init(&mut delay, &radio_config)
         .map_err(|error| anyhow::anyhow!("DW1000 initialization failed: {error:?}"))?;
@@ -332,18 +331,13 @@ pub fn open_and_initialize(
     })
 }
 
-fn radio_config(address: NodeAddress, profile: PhyProfile) -> RadioConfig {
+fn radio_config(address: NodeAddress) -> RadioConfig {
     let identity = DeviceIdentity::new(
         PanId::new(mission10_uwb_protocol::air::PAN_ID),
         ShortAddress::new(short_address_for(address)),
         Eui64::new(eui_for(address)),
     );
-    let (data_rate, preamble_length) = match profile {
-        PhyProfile::Operational | PhyProfile::CloseRangeDiagnostic => {
-            (DataRate::Mbps6800, PreambleLength::Symbols128)
-        }
-        PhyProfile::RobustDiagnostic => (DataRate::Kbps110, PreambleLength::Symbols2048),
-    };
+    let (data_rate, preamble_length) = (DataRate::Mbps6800, PreambleLength::Symbols128);
     RadioConfig {
         address: AddressConfig { identity },
         phy: PhyConfig {
@@ -394,32 +388,12 @@ mod tests {
 
     #[test]
     fn radio_config_matches_the_dwm3001_native_phy() {
-        let config = radio_config(NodeAddress::new(0).unwrap(), PhyProfile::Operational);
+        let config = radio_config(NodeAddress::new(0).unwrap());
         assert_eq!(config.phy.channel, Channel::Channel5);
         assert_eq!(config.phy.data_rate, DataRate::Mbps6800);
         assert_eq!(config.phy.pulse_frequency, PulseFrequency::Mhz64);
         assert_eq!(config.phy.preamble_length, PreambleLength::Symbols128);
         assert_eq!(config.phy.preamble_code, Some(PreambleCode::Code10));
         assert!(!config.receiver_auto_reenable);
-    }
-
-    #[test]
-    fn robust_diagnostic_phy_trades_airtime_for_link_margin() {
-        let config = radio_config(NodeAddress::new(0).unwrap(), PhyProfile::RobustDiagnostic);
-        assert_eq!(config.phy.channel, Channel::Channel5);
-        assert_eq!(config.phy.data_rate, DataRate::Kbps110);
-        assert_eq!(config.phy.pulse_frequency, PulseFrequency::Mhz64);
-        assert_eq!(config.phy.preamble_length, PreambleLength::Symbols2048);
-        assert_eq!(config.phy.preamble_code, Some(PreambleCode::Code10));
-    }
-
-    #[test]
-    fn close_range_profile_preserves_the_operational_phy() {
-        let operational = radio_config(NodeAddress::new(0).unwrap(), PhyProfile::Operational);
-        let close_range = radio_config(
-            NodeAddress::new(0).unwrap(),
-            PhyProfile::CloseRangeDiagnostic,
-        );
-        assert_eq!(close_range.phy, operational.phy);
     }
 }

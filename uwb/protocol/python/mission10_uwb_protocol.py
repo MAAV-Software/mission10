@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """Independent standard-library codec for Mission 10's UWB host stream."""
 
 from __future__ import annotations
@@ -11,12 +13,12 @@ import zlib
 from collections.abc import Iterator
 from typing import BinaryIO
 
-PROTOCOL_VERSION = 4
-MAX_PEERS = 3
-MAX_FRAME_SIZE = 64
+PROTOCOL_VERSION = 7
+MAX_PEERS = 5
+MAX_FRAME_SIZE = 192
 EGO_STATE_FORMAT = "<QIhhh3i3hBH"
 EGO_STATE_SIZE = struct.calcsize(EGO_STATE_FORMAT)
-CONFIGURATION_FORMAT = "<HB3H"
+CONFIGURATION_FORMAT = "<HB5H"
 CONFIGURATION_SIZE = struct.calcsize(CONFIGURATION_FORMAT)
 DIAGNOSTIC_NAMES = (
     "rx_fcs",
@@ -40,14 +42,13 @@ DIAGNOSTIC_NAMES = (
     "unexpected_air",
     "invalid_timestamp",
     "unknown",
-    "unsupported_in_mode",
     "radio_reset",
     "watchdog_reset",
 )
 
 
 def is_node_address(address: int) -> bool:
-    return 0 <= address <= 4 or 0x8000 <= address <= 0x80FF
+    return 0 <= address <= 3 or 0x8000 <= address <= 0x80FF
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,8 +72,8 @@ class RadioConfiguration:
     def __post_init__(self) -> None:
         if not is_node_address(self.node_address):
             raise ValueError("node address is outside the Mission 10 namespaces")
-        if len(self.peers) > MAX_PEERS:
-            raise ValueError(f"at most {MAX_PEERS} peers are supported")
+        if not 1 <= len(self.peers) <= MAX_PEERS:
+            raise ValueError(f"one to {MAX_PEERS} peers are required")
         if any(not is_node_address(peer) for peer in self.peers):
             raise ValueError("peer address is outside the Mission 10 namespaces")
         if self.node_address in self.peers or len(set(self.peers)) != len(self.peers):
@@ -83,6 +84,13 @@ class RadioConfiguration:
 class Diagnostic:
     code: int
     name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class MissionEventTime:
+    mission_time_us: int | None
+    generation: int = 0
+    error_us: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -211,22 +219,48 @@ def decode_frame(frame: bytes) -> Envelope:
     fixed_formats = {
         0: ("radio_id", "<HBBB"),
         1: ("otp", "<IIII"),
-        2: ("ready", "<BHHH"),
-        4: ("rx", "<B"),
-        5: ("range", "<HHQIhH"),
-        8: ("health", "<13I"),
+        2: ("ready", "<HH"),
+        3: ("clock_probe", "<H"),
+        4: ("clock_status", "<IIIB"),
+        8: ("health", "<31I"),
     }
-    if variant == 3:
+    if variant == 5:
         return Envelope(version, sequence, "configured", (_decode_configuration(body),))
     if variant == 6:
-        if len(body) != 4 + EGO_STATE_SIZE:
-            raise FrameError("peer state has the wrong length")
-        peer, exchange_id = struct.unpack_from("<HH", body)
+        header_format = "<HHQ"
+        header_size = struct.calcsize(header_format)
+        if len(body) < header_size + 1:
+            raise FrameError("completed exchange has the wrong length")
+        header = struct.unpack_from(header_format, body)
+        mapping_variant = body[header_size]
+        offset = header_size + 1
+        if mapping_variant == 0:
+            mission_event_time = MissionEventTime(None)
+        elif mapping_variant == 1:
+            mapping_format = "<QII"
+            mapping_size = struct.calcsize(mapping_format)
+            if len(body) < offset + mapping_size:
+                raise FrameError("mapped event time is truncated")
+            mission_event_time = MissionEventTime(
+                *struct.unpack_from(mapping_format, body, offset)
+            )
+            offset += mapping_size
+        else:
+            raise FrameError("unknown mission event-time variant")
+        tail_format = "<IhH"
+        tail_size = struct.calcsize(tail_format)
+        if len(body) != offset + tail_size + EGO_STATE_SIZE:
+            raise FrameError("completed exchange has the wrong length")
         return Envelope(
             version,
             sequence,
-            "peer_state",
-            (peer, exchange_id, _decode_ego_state(body[4:])),
+            "completed_exchange",
+            (
+                *header,
+                mission_event_time,
+                *struct.unpack_from(tail_format, body, offset),
+                _decode_ego_state(body[offset + tail_size :]),
+            ),
         )
     if variant == 7:
         if len(body) != 1:
@@ -264,6 +298,28 @@ def encode_health_request(sequence: int, request_id: int) -> bytes:
     return _encode_host_command(sequence, 2, struct.pack("<I", request_id))
 
 
+def encode_clock_reply(
+    sequence: int,
+    request_id: int,
+    mission_rx_us: int,
+    mission_tx_us: int,
+    mission_generation: int,
+    source_error_us: int,
+) -> bytes:
+    return _encode_host_command(
+        sequence,
+        3,
+        struct.pack(
+            "<HQQII",
+            request_id,
+            mission_rx_us,
+            mission_tx_us,
+            mission_generation,
+            source_error_us,
+        ),
+    )
+
+
 def frames(stream: BinaryIO) -> Iterator[bytes]:
     frame = bytearray()
     discarding = False
@@ -287,7 +343,7 @@ def _address(value: str) -> int:
     address = int(value, 0)
     if not is_node_address(address):
         raise argparse.ArgumentTypeError(
-            "address must be aircraft 0..4 or development 0x8000..0x80ff"
+            "address must be aircraft 0..3 or development 0x8000..0x80ff"
         )
     return address
 
@@ -299,7 +355,7 @@ def main() -> None:
         "--configure-node", type=_address, help="set this node's short address (native mode only)"
     )
     parser.add_argument(
-        "--peer", type=_address, action="append", default=[], help="peer short address (up to three)"
+        "--peer", type=_address, action="append", default=[], help="peer short address (up to five)"
     )
     parser.add_argument(
         "--request-health", action="store_true", help="request an immediate health snapshot"
@@ -309,6 +365,18 @@ def main() -> None:
         type=float,
         default=0.0,
         help="print range/error counts and range rate every N seconds (default: print every event)",
+    )
+    parser.add_argument(
+        "--time-source-error-us",
+        type=int,
+        default=50,
+        help="measured upper bound for this host's mission-clock error (default: 50)",
+    )
+    parser.add_argument(
+        "--mission-generation",
+        type=int,
+        default=int(time.time()) & 0xFFFFFFFF,
+        help="clock generation; change it after a time step (default: process start time)",
     )
     args = parser.parse_args()
     if args.peer and args.configure_node is None:
@@ -334,6 +402,7 @@ def main() -> None:
                 stream.write(encode_health_request(command_sequence, int(time.time()) & 0xFFFFFFFF))
 
             for frame in frames(stream):
+                mission_rx_us = time.time_ns() // 1_000
                 try:
                     envelope = decode_frame(frame)
                 except FrameError as error:
@@ -342,7 +411,21 @@ def main() -> None:
                         print(f"discarding invalid frame {frame.hex()}: {error}", flush=True)
                     continue
 
-                if envelope.kind == "range":
+                if envelope.kind == "clock_probe":
+                    mission_tx_us = time.time_ns() // 1_000
+                    stream.write(
+                        encode_clock_reply(
+                            command_sequence,
+                            envelope.fields[0],
+                            mission_rx_us,
+                            mission_tx_us,
+                            args.mission_generation,
+                            args.time_source_error_us,
+                        )
+                    )
+                    command_sequence += 1
+
+                if envelope.kind == "completed_exchange":
                     ranges += 1
                 elif envelope.kind == "error":
                     errors += 1

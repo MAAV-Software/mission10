@@ -9,7 +9,6 @@ default = []
 # The E1.0 module marking cannot be derived reliably from DW3000 OTP. Enable
 # this only for a board physically marked DWM3001C(DK)E1.0.
 engineering-sample = []
-initiator = []
 smoke = []
 
 [dependencies]

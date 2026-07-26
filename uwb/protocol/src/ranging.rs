@@ -29,18 +29,18 @@ pub const fn delayed_tx_time(base: u64, delay_us: u32) -> u64 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponderTimestamps {
     pub poll_rx: u64,
-    pub poll_ack_tx: u64,
-    pub range_rx: u64,
+    pub response_tx: u64,
+    pub final_rx: u64,
 }
 
 /// Asymmetric double-sided TWR. Both native peers evaluate this function over
 /// the same six hardware timestamps.
 pub fn distance_metres(initiator: [u64; 3], responder: ResponderTimestamps) -> Option<f64> {
-    let [poll_tx, poll_ack_rx, range_tx] = initiator;
-    let round1 = wrapping_delta(poll_ack_rx, poll_tx) as i128;
-    let reply1 = wrapping_delta(responder.poll_ack_tx, responder.poll_rx) as i128;
-    let round2 = wrapping_delta(responder.range_rx, responder.poll_ack_tx) as i128;
-    let reply2 = wrapping_delta(range_tx, poll_ack_rx) as i128;
+    let [poll_tx, response_rx, final_tx] = initiator;
+    let round1 = wrapping_delta(response_rx, poll_tx) as i128;
+    let reply1 = wrapping_delta(responder.response_tx, responder.poll_rx) as i128;
+    let round2 = wrapping_delta(responder.final_rx, responder.response_tx) as i128;
+    let reply2 = wrapping_delta(final_tx, response_rx) as i128;
     let denominator = round1 + round2 + reply1 + reply2;
     if denominator == 0 {
         return None;
@@ -79,16 +79,16 @@ mod tests {
         let tof = 2_130_u64;
         let poll_tx = TIMESTAMP_MASK - 10_000;
         let poll_rx = (poll_tx + tof) & TIMESTAMP_MASK;
-        let poll_ack_tx = (poll_rx + 447_283_000) & TIMESTAMP_MASK;
-        let poll_ack_rx = (poll_ack_tx + tof) & TIMESTAMP_MASK;
-        let range_tx = (poll_ack_rx + 447_279_000) & TIMESTAMP_MASK;
-        let range_rx = (range_tx + tof) & TIMESTAMP_MASK;
+        let response_tx = (poll_rx + 447_283_000) & TIMESTAMP_MASK;
+        let response_rx = (response_tx + tof) & TIMESTAMP_MASK;
+        let final_tx = (response_rx + 447_279_000) & TIMESTAMP_MASK;
+        let final_rx = (final_tx + tof) & TIMESTAMP_MASK;
         let distance = distance_metres(
-            [poll_tx, poll_ack_rx, range_tx],
+            [poll_tx, response_rx, final_tx],
             ResponderTimestamps {
                 poll_rx,
-                poll_ack_tx,
-                range_rx,
+                response_tx,
+                final_rx,
             },
         )
         .unwrap();
