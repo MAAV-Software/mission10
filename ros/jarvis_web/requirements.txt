@@ -1,0 +1,15 @@
+# Installed into a per-package uv venv. Create the venv from inside the nix `sim`
+# devShell and give uv that interpreter, thus rclpy stays visible:
+#
+#   uv venv --python "$(which python3)" --system-site-packages
+#
+# Without --python, uv selects its own interpreter. A venv on a different minor
+# version cannot load the rclpy C extension. See the package README.
+#
+# All three have wheels for linux aarch64. A resolution against
+# aarch64-manylinux_2_28 gives vosk 0.3.45, piper-tts 1.5.0 and onnxruntime
+# 1.27.0. The aarch64 wheels for onnxruntime need glibc 2.27 or later, thus the
+# CM5 needs a bookworm userland or a later one.
+flask
+vosk
+piper-tts

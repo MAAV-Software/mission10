@@ -1,0 +1,18 @@
+/* Only what push-to-talk needs in order to work on a touchscreen. No colours,
+   no fonts, no layout; browser defaults do the rest. */
+
+#talk {
+  /* A press-and-hold is a gesture to the browser. Without this, a finger that
+     drifts even slightly pans the page instead, and the resulting pointercancel
+     cuts the utterance short mid-word. */
+  touch-action: none;
+
+  /* A long press on text raises the selection handles over the button. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Keep an oversized render from scrolling the page sideways. */
+#map {
+  max-width: 100%;
+}
