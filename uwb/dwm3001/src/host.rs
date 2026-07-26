@@ -186,17 +186,17 @@ impl QueueSchedule {
 }
 
 async fn next_event(schedule: &mut QueueSchedule) -> RadioToHost {
-    if schedule.events_since_diagnostic >= MAX_EVENTS_BEFORE_DIAGNOSTIC {
-        if let Ok(event) = DIAGNOSTICS.try_receive() {
-            schedule.selected(EventQueue::Diagnostic);
-            return event;
-        }
+    if schedule.events_since_diagnostic >= MAX_EVENTS_BEFORE_DIAGNOSTIC
+        && let Ok(event) = DIAGNOSTICS.try_receive()
+    {
+        schedule.selected(EventQueue::Diagnostic);
+        return event;
     }
-    if schedule.measurements_since_control >= MAX_MEASUREMENTS_BEFORE_CONTROL {
-        if let Ok(event) = CONTROL.try_receive() {
-            schedule.selected(EventQueue::Control);
-            return event;
-        }
+    if schedule.measurements_since_control >= MAX_MEASUREMENTS_BEFORE_CONTROL
+        && let Ok(event) = CONTROL.try_receive()
+    {
+        schedule.selected(EventQueue::Control);
+        return event;
     }
     if let Ok(event) = MEASUREMENTS.try_receive() {
         schedule.selected(EventQueue::Measurement);

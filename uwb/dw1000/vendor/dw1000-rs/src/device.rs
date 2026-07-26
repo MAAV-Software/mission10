@@ -7,6 +7,68 @@ use defmt::Format;
 
 use crate::time::DwTime;
 
+/// Raw 40-bit system deadline written to the DW1000 `DX_TIME` register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub struct DxTimeDeadline(DwTime);
+
+impl DxTimeDeadline {
+    /// Creates a raw deadline for a radio implementation or test double.
+    pub const fn new(value: DwTime) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw DW1000 deadline.
+    pub const fn value(self) -> DwTime {
+        self.0
+    }
+}
+
+/// Antenna-adjusted 40-bit RMARKER timestamp for a transmitted frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub struct OnAirTimestamp(DwTime);
+
+impl OnAirTimestamp {
+    /// Creates an on-air timestamp for a radio implementation or test double.
+    pub const fn new(value: DwTime) -> Self {
+        Self(value)
+    }
+
+    /// Returns the antenna-adjusted DW1000 timestamp.
+    pub const fn value(self) -> DwTime {
+        self.0
+    }
+}
+
+/// One delayed-transmit schedule in both DW1000 time domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub struct DelayedTransmit {
+    deadline: DxTimeDeadline,
+    timestamp: OnAirTimestamp,
+}
+
+impl DelayedTransmit {
+    /// Creates a schedule from a raw deadline and its corresponding RMARKER timestamp.
+    pub const fn new(deadline: DxTimeDeadline, timestamp: OnAirTimestamp) -> Self {
+        Self {
+            deadline,
+            timestamp,
+        }
+    }
+
+    /// Returns the raw deadline programmed into `DX_TIME`.
+    pub const fn deadline(self) -> DxTimeDeadline {
+        self.deadline
+    }
+
+    /// Returns the RMARKER timestamp to place in a ranging frame.
+    pub const fn timestamp(self) -> OnAirTimestamp {
+        self.timestamp
+    }
+}
+
 /// 16-bit PAN identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(Format))]
@@ -183,6 +245,24 @@ impl BitOrAssign for SysStatus {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
+}
+
+/// Raw radio registers useful when diagnosing receiver state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub struct RadioDebugState {
+    /// System event status.
+    pub sys_status: SysStatus,
+    /// System state machine state, stored in the low 40 bits.
+    pub sys_state: u64,
+    /// System control register.
+    pub sys_ctrl: u32,
+    /// System configuration register.
+    pub sys_cfg: u32,
+    /// Interrupt mask register.
+    pub sys_mask: u32,
+    /// Power-management and system-clocking control register.
+    pub pmsc_ctrl0: u32,
 }
 
 /// Borrowed view of a received frame.

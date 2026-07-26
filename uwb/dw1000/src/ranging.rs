@@ -3,37 +3,40 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use dw1000_rs::registers::status;
-use dw1000_rs::{DwTime, RxOptions, SysStatus, TxOptions};
-use mission10_uwb_protocol::dw1000_bench::{FRAME_LEN, Frame, MessageKind};
-use mission10_uwb_protocol::{ResponderTimestamps, TIMESTAMP_MASK, distance_metres};
+use dw1000_rs::{DelayedTransmit, DwTime, RxOptions, SysStatus, TxOptions};
+use mission10_uwb_protocol::air::{self, AIR_FRAME_MAX_NO_FCS, AirEnvelope, AirMessage};
+use mission10_uwb_protocol::{
+    Destination, EgoState, NodeAddress, REPORT_TURNAROUND_US, ResponderTimestamps, TIMESTAMP_MASK,
+    distance_metres, scheduled_tx_matches,
+};
 
 use crate::board::RadioHardware;
-use crate::{NodeIndex, address_for};
 
 const MAX_IRQ_WAIT: Duration = Duration::from_millis(100);
 const MIN_IRQ_WAIT: Duration = Duration::from_micros(50);
 const MAX_STATUS_DRAIN_PASSES: usize = 8;
-// DX_TIME has 512-DTU scheduling granularity.
-const MAX_SCHEDULED_TX_ERROR_DTU: u64 = 512;
+const RX_EVENT_BITS: u64 = status::RX_TERMINAL_EVENTS.0;
+const RX_ERROR_BITS: u64 = status::RX_ERROR_EVENTS.0;
 
-const RX_EVENT_BITS: u64 = status::RX_FRAME_READY.0
-    | status::RX_FRAME_GOOD.0
-    | status::RX_FRAME_CHECK_ERROR.0
-    | status::RX_REED_SOLOMON_ERROR.0
-    | status::RX_TIMEOUT.0
-    | status::LDE_DONE.0
-    | status::LDE_ERROR.0
-    | status::RX_HEADER_ERROR.0;
-const RX_ERROR_BITS: u64 = status::RX_FRAME_CHECK_ERROR.0
-    | status::RX_REED_SOLOMON_ERROR.0
-    | status::RX_TIMEOUT.0
-    | status::LDE_ERROR.0
-    | status::RX_HEADER_ERROR.0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAction {
+    Rearm,
+    ResetReceiverThenRearm,
+}
+
+const fn recovery_action(status_value: SysStatus) -> RecoveryAction {
+    let no_reset_errors = status::RX_PREAMBLE_TIMEOUT.0 | status::RX_SFD_TIMEOUT.0;
+    if status_value.0 & RX_ERROR_BITS & !no_reset_errors == 0 {
+        RecoveryAction::Rearm
+    } else {
+        RecoveryAction::ResetReceiverThenRearm
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RangingConfig {
-    index: NodeIndex,
-    peers: Vec<NodeIndex>,
+    address: NodeAddress,
+    peers: Vec<NodeAddress>,
     poll_period: Duration,
     reply_delay_us: u32,
     response_timeout: Duration,
@@ -41,8 +44,8 @@ pub struct RangingConfig {
 
 impl RangingConfig {
     pub fn new(
-        index: NodeIndex,
-        peers: Vec<NodeIndex>,
+        address: NodeAddress,
+        peers: Vec<NodeAddress>,
         poll_period: Duration,
         reply_delay_us: u32,
         response_timeout: Duration,
@@ -50,18 +53,21 @@ impl RangingConfig {
         if peers.is_empty() {
             bail!("at least one peer is required");
         }
-        if peers.contains(&index) {
-            bail!("node {index} cannot range with itself");
+        if peers.len() > mission10_uwb_protocol::host::MAX_PEERS {
+            bail!(
+                "at most {} peers are supported",
+                mission10_uwb_protocol::host::MAX_PEERS
+            );
+        }
+        if peers.contains(&address) {
+            bail!("node {address} cannot range with itself");
         }
         if peers
             .iter()
             .enumerate()
             .any(|(position, peer)| peers[..position].contains(peer))
         {
-            bail!("peer indices must be unique");
-        }
-        if peers.iter().filter(|peer| **peer > index).count() > 1 {
-            bail!("the destination-free bench frame permits only one initiated peer");
+            bail!("peer addresses must be unique");
         }
         if poll_period.is_zero() {
             bail!("poll period must be positive");
@@ -73,7 +79,7 @@ impl RangingConfig {
             bail!("response timeout must be positive");
         }
         Ok(Self {
-            index,
+            address,
             peers,
             poll_period,
             reply_delay_us,
@@ -84,11 +90,11 @@ impl RangingConfig {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RangeMeasurement {
-    pub receiver: NodeIndex,
-    pub source: NodeIndex,
+    pub receiver: NodeAddress,
+    pub source: NodeAddress,
     pub distance_metres: f64,
     pub sequence: u64,
-    pub completed_at_dtu: u64,
+    pub range_event_time_dtu: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -102,35 +108,54 @@ pub struct RangingStats {
     pub unexpected_frames: u64,
     pub unexpected_tx_events: u64,
     pub scheduled_tx_misses: u64,
+    pub explicit_rx_arms: u64,
+    pub receiver_resets: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum ExchangeState {
     Idle,
     SendingPoll {
-        peer: NodeIndex,
+        peer: NodeAddress,
+        exchange_id: u16,
     },
-    AwaitPollAck {
-        peer: NodeIndex,
+    AwaitResponse {
+        peer: NodeAddress,
+        exchange_id: u16,
         poll_tx: u64,
     },
-    SendingPollAck {
-        peer: NodeIndex,
+    SendingResponse {
+        peer: NodeAddress,
+        exchange_id: u16,
         poll_rx: u64,
+        response_tx: u64,
     },
-    AwaitRange {
-        peer: NodeIndex,
+    AwaitFinal {
+        peer: NodeAddress,
+        exchange_id: u16,
         poll_rx: u64,
-        poll_ack_tx: u64,
+        response_tx: u64,
     },
-    SendingRange {
-        peer: NodeIndex,
-        range_tx: u64,
+    SendingFinal {
+        peer: NodeAddress,
+        exchange_id: u16,
+        poll_tx: u64,
+        poll_rx: u64,
+        response_tx: u64,
+        response_rx: u64,
+        final_tx: u64,
     },
-    AwaitRangeReport {
-        peer: NodeIndex,
+    AwaitReport {
+        peer: NodeAddress,
+        exchange_id: u16,
+        poll_tx: u64,
+        poll_rx: u64,
+        response_tx: u64,
+        response_rx: u64,
+        final_tx: u64,
+        final_event_time: u64,
     },
-    SendingRangeReport,
+    SendingReport,
 }
 
 impl ExchangeState {
@@ -145,25 +170,32 @@ pub struct Ranger {
     state: ExchangeState,
     deadline: Option<Instant>,
     next_poll: Instant,
-    initiator_peer: Option<NodeIndex>,
+    initiator_peers: Vec<NodeAddress>,
+    initiator_cursor: usize,
+    next_exchange_id: u16,
+    mac_sequence: u8,
     sequence: u64,
     stats: RangingStats,
 }
 
 impl Ranger {
     pub fn new(hardware: RadioHardware, config: RangingConfig) -> Self {
-        let initiator_peer = config
+        let initiator_peers = config
             .peers
             .iter()
             .copied()
-            .find(|peer| *peer > config.index);
+            .filter(|peer| *peer > config.address)
+            .collect();
         Self {
             hardware,
             config,
             state: ExchangeState::Idle,
             deadline: None,
             next_poll: Instant::now(),
-            initiator_peer,
+            initiator_peers,
+            initiator_cursor: 0,
+            next_exchange_id: 0,
+            mac_sequence: 0,
             sequence: 0,
             stats: RangingStats::default(),
         }
@@ -173,7 +205,7 @@ impl Ranger {
         self.hardware.device_id()
     }
 
-    pub fn peers(&self) -> &[NodeIndex] {
+    pub fn peers(&self) -> &[NodeAddress] {
         &self.config.peers
     }
 
@@ -183,25 +215,24 @@ impl Ranger {
         duration: Option<Duration>,
         mut on_range: impl FnMut(RangeMeasurement),
     ) -> Result<RangingStats> {
-        self.arm_receive()?;
+        self.arm_receive(RecoveryAction::Rearm)?;
         let started = Instant::now();
         while !stop.load(Ordering::Relaxed)
             && duration.is_none_or(|duration| started.elapsed() < duration)
         {
             let now = Instant::now();
+            let status = self.read_status()?;
+            if status.0 & (status::TX_FRAME_SENT.0 | RX_EVENT_BITS) != 0 {
+                self.service_status(status, &mut on_range)?;
+                continue;
+            }
             if self.deadline.is_some_and(|deadline| now >= deadline) {
                 self.stats.timeouts += 1;
-                self.recover_exchange()?;
+                self.recover_exchange(RecoveryAction::Rearm)?;
                 continue;
             }
             if let Some(peer) = self.peer_to_poll(now) {
                 self.send_poll(peer)?;
-                continue;
-            }
-
-            let status = self.read_status()?;
-            if status.0 & (status::TX_FRAME_SENT.0 | RX_EVENT_BITS) != 0 {
-                self.service_status(status, &mut on_range)?;
                 continue;
             }
 
@@ -215,12 +246,13 @@ impl Ranger {
         Ok(self.stats)
     }
 
-    fn peer_to_poll(&self, now: Instant) -> Option<NodeIndex> {
-        if self.state.is_idle() && now >= self.next_poll {
-            self.initiator_peer
-        } else {
-            None
+    fn peer_to_poll(&mut self, now: Instant) -> Option<NodeAddress> {
+        if !self.state.is_idle() || now < self.next_poll || self.initiator_peers.is_empty() {
+            return None;
         }
+        let peer = self.initiator_peers[self.initiator_cursor];
+        self.initiator_cursor = (self.initiator_cursor + 1) % self.initiator_peers.len();
+        Some(peer)
     }
 
     fn next_wait(&self, now: Instant) -> Duration {
@@ -228,7 +260,7 @@ impl Ranger {
         if let Some(deadline) = self.deadline {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
-        if self.state.is_idle() && self.initiator_peer.is_some() {
+        if self.state.is_idle() && !self.initiator_peers.is_empty() {
             wait = wait.min(self.next_poll.saturating_duration_since(now));
         }
         wait.max(MIN_IRQ_WAIT)
@@ -257,30 +289,24 @@ impl Ranger {
                     || !status_value.contains(status::RX_FRAME_READY)
                 {
                     self.stats.rx_errors += 1;
-                    self.clear_events(SysStatus(status_value.0 & RX_EVENT_BITS))?;
-                    self.recover_exchange()?;
+                    self.clear_rx_events(status_value)?;
+                    self.recover_exchange(recovery_action(status_value))?;
                 } else {
-                    let mut bytes = [0u8; FRAME_LEN];
+                    let mut bytes = [0u8; AIR_FRAME_MAX_NO_FCS];
                     let received = self
                         .hardware
                         .radio
                         .read_frame_raw(&mut bytes)
                         .map_err(|error| anyhow::anyhow!("read DW1000 frame: {error:?}"));
-                    self.clear_events(SysStatus(status_value.0 & RX_EVENT_BITS))?;
+                    self.clear_rx_events(status_value)?;
                     match received {
                         Ok(frame) => {
-                            let len = frame.bytes.len();
                             let radio_time = ticks(frame.timestamp);
-                            if len != FRAME_LEN {
-                                self.stats.invalid_frames += 1;
-                                self.arm_receive()?;
-                            } else {
-                                self.handle_frame(&bytes, radio_time, on_range)?;
-                            }
+                            self.handle_frame(frame.bytes, radio_time, on_range)?;
                         }
                         Err(_) => {
                             self.stats.rx_errors += 1;
-                            self.recover_exchange()?;
+                            self.recover_exchange(RecoveryAction::ResetReceiverThenRearm)?;
                         }
                     }
                 }
@@ -296,34 +322,70 @@ impl Ranger {
 
     fn handle_tx_done(&mut self) -> Result<()> {
         match self.state {
-            ExchangeState::SendingPoll { peer } => {
-                self.state = ExchangeState::AwaitPollAck {
+            ExchangeState::SendingPoll { peer, exchange_id } => {
+                self.state = ExchangeState::AwaitResponse {
                     peer,
+                    exchange_id,
                     poll_tx: self.tx_timestamp()?,
                 };
             }
-            ExchangeState::SendingPollAck { peer, poll_rx } => {
-                self.state = ExchangeState::AwaitRange {
+            ExchangeState::SendingResponse {
+                peer,
+                exchange_id,
+                poll_rx,
+                response_tx,
+            } => {
+                let actual_response_tx = self.tx_timestamp()?;
+                if !scheduled_tx_matches(response_tx, actual_response_tx) {
+                    self.stats.scheduled_tx_misses += 1;
+                    self.recover_exchange(RecoveryAction::Rearm)?;
+                    return Ok(());
+                }
+                self.state = ExchangeState::AwaitFinal {
                     peer,
+                    exchange_id,
                     poll_rx,
-                    poll_ack_tx: self.tx_timestamp()?,
+                    response_tx,
                 };
             }
-            ExchangeState::SendingRange { peer, range_tx } => {
-                if timestamp_error(range_tx, self.tx_timestamp()?) > MAX_SCHEDULED_TX_ERROR_DTU {
+            ExchangeState::SendingFinal {
+                peer,
+                exchange_id,
+                poll_tx,
+                poll_rx,
+                response_tx,
+                response_rx,
+                final_tx,
+            } => {
+                let actual_final_tx = self.tx_timestamp()?;
+                if !scheduled_tx_matches(final_tx, actual_final_tx) {
                     self.stats.scheduled_tx_misses += 1;
+                    self.recover_exchange(RecoveryAction::Rearm)?;
+                    return Ok(());
                 }
-                self.state = ExchangeState::AwaitRangeReport { peer };
+                self.state = ExchangeState::AwaitReport {
+                    peer,
+                    exchange_id,
+                    poll_tx,
+                    poll_rx,
+                    response_tx,
+                    response_rx,
+                    final_tx,
+                    final_event_time: actual_final_tx,
+                };
+                // Report has an explicit turnaround. Re-arm here so its RX
+                // attempt starts from cleared status and synchronized buffers.
+                self.arm_receive(RecoveryAction::Rearm)?;
             }
-            ExchangeState::SendingRangeReport => {
+            ExchangeState::SendingReport => {
                 self.state = ExchangeState::Idle;
                 self.deadline = None;
-                self.arm_receive()?;
+                self.arm_receive(RecoveryAction::Rearm)?;
             }
             ExchangeState::Idle
-            | ExchangeState::AwaitPollAck { .. }
-            | ExchangeState::AwaitRange { .. }
-            | ExchangeState::AwaitRangeReport { .. } => {
+            | ExchangeState::AwaitResponse { .. }
+            | ExchangeState::AwaitFinal { .. }
+            | ExchangeState::AwaitReport { .. } => {
                 self.stats.unexpected_tx_events += 1;
             }
         }
@@ -340,95 +402,134 @@ impl Ranger {
 
     fn handle_frame(
         &mut self,
-        bytes: &[u8; FRAME_LEN],
+        bytes: &[u8],
         rx_time: u64,
         on_range: &mut impl FnMut(RangeMeasurement),
     ) -> Result<()> {
-        let frame = match Frame::decode(bytes) {
+        let frame = match air::decode(bytes, self.config.address) {
             Ok(frame) => frame,
             Err(_) => {
                 self.stats.invalid_frames += 1;
-                self.arm_receive()?;
+                self.arm_receive(RecoveryAction::Rearm)?;
                 return Ok(());
             }
         };
-        let Some(source) = self.peer_for_address(frame.source()) else {
+        let Some(source) = self.peer_for_address(frame.source) else {
             self.stats.wrong_peer_frames += 1;
-            self.arm_receive()?;
+            self.arm_receive(RecoveryAction::Rearm)?;
             return Ok(());
         };
 
-        match (self.state, frame.kind()) {
-            (ExchangeState::Idle, MessageKind::Poll) => {
-                self.send_poll_ack(source, rx_time)?;
-            }
-            (ExchangeState::AwaitPollAck { peer, poll_tx }, MessageKind::PollAck)
-                if peer == source =>
-            {
-                self.send_range(source, poll_tx, rx_time)?;
+        match (self.state, frame.envelope.message) {
+            (ExchangeState::Idle, AirMessage::Poll { .. }) => {
+                self.send_response(source, frame.envelope.exchange_id, rx_time)?;
             }
             (
-                ExchangeState::AwaitRange {
+                ExchangeState::AwaitResponse {
                     peer,
-                    poll_rx,
-                    poll_ack_tx,
+                    exchange_id,
+                    poll_tx,
                 },
-                MessageKind::Range,
-            ) if peer == source => {
-                let Some(initiator) = frame.timestamps() else {
-                    self.stats.invalid_frames += 1;
-                    self.recover_exchange()?;
-                    return Ok(());
-                };
+                AirMessage::Response {
+                    poll_rx,
+                    response_tx,
+                    ..
+                },
+            ) if peer == source && exchange_id == frame.envelope.exchange_id => {
+                self.send_final(source, exchange_id, poll_tx, poll_rx, response_tx, rx_time)?;
+            }
+            (
+                ExchangeState::AwaitFinal {
+                    peer,
+                    exchange_id,
+                    poll_rx,
+                    response_tx,
+                },
+                AirMessage::Final {
+                    poll_tx,
+                    response_rx,
+                    final_tx,
+                },
+            ) if peer == source && exchange_id == frame.envelope.exchange_id => {
                 let Some(distance) = distance_metres(
-                    initiator,
+                    [poll_tx, response_rx, final_tx],
                     ResponderTimestamps {
                         poll_rx,
-                        poll_ack_tx,
+                        poll_ack_tx: response_tx,
                         range_rx: rx_time,
                     },
                 ) else {
                     self.stats.invalid_frames += 1;
-                    self.recover_exchange()?;
+                    self.recover_exchange(RecoveryAction::Rearm)?;
                     return Ok(());
                 };
-                self.send_range_report(distance)?;
+                self.send_report(source, exchange_id, rx_time)?;
                 self.emit(source, distance, rx_time, on_range);
             }
-            (ExchangeState::AwaitRangeReport { peer }, MessageKind::RangeReport)
-                if peer == source =>
-            {
-                let Some(distance_mm) = frame.distance_mm() else {
+            (
+                ExchangeState::AwaitReport {
+                    peer,
+                    exchange_id,
+                    poll_tx,
+                    poll_rx,
+                    response_tx,
+                    response_rx,
+                    final_tx,
+                    final_event_time,
+                },
+                AirMessage::Report {
+                    final_rx,
+                    status: 0,
+                },
+            ) if peer == source && exchange_id == frame.envelope.exchange_id => {
+                let Some(distance) = distance_metres(
+                    [poll_tx, response_rx, final_tx],
+                    ResponderTimestamps {
+                        poll_rx,
+                        poll_ack_tx: response_tx,
+                        range_rx: final_rx,
+                    },
+                ) else {
                     self.stats.invalid_frames += 1;
-                    self.recover_exchange()?;
+                    self.recover_exchange(RecoveryAction::Rearm)?;
                     return Ok(());
                 };
                 self.state = ExchangeState::Idle;
                 self.deadline = None;
-                self.arm_receive()?;
-                self.emit(source, f64::from(distance_mm) / 1000.0, rx_time, on_range);
+                self.arm_receive(RecoveryAction::Rearm)?;
+                self.emit(source, distance, final_event_time, on_range);
             }
             _ => {
                 self.stats.unexpected_frames += 1;
-                self.arm_receive()?;
+                self.arm_receive(RecoveryAction::Rearm)?;
             }
         }
         Ok(())
     }
 
-    fn send_poll(&mut self, peer: NodeIndex) -> Result<()> {
-        let frame = Frame::poll(address_for(self.config.index));
+    fn send_poll(&mut self, peer: NodeAddress) -> Result<()> {
+        let exchange_id = self.next_exchange_id;
+        self.next_exchange_id = self.next_exchange_id.wrapping_add(1);
+        let frame = self.encode(
+            peer,
+            AirEnvelope::new(
+                exchange_id,
+                AirMessage::Poll {
+                    state: EgoState::default(),
+                },
+            ),
+        )?;
         self.hardware
             .radio
             .transmit(
-                frame.as_bytes(),
+                frame.bytes(),
                 TxOptions {
                     delayed_time: None,
                     wait_for_response: true,
                 },
             )
             .map_err(|error| anyhow::anyhow!("send POLL: {error:?}"))?;
-        self.state = ExchangeState::SendingPoll { peer };
+        self.state = ExchangeState::SendingPoll { peer, exchange_id };
         self.deadline = Some(Instant::now() + self.config.response_timeout);
         self.next_poll += self.config.poll_period;
         let now = Instant::now();
@@ -439,69 +540,140 @@ impl Ranger {
         Ok(())
     }
 
-    fn send_poll_ack(&mut self, peer: NodeIndex, poll_rx: u64) -> Result<()> {
+    fn send_response(&mut self, peer: NodeAddress, exchange_id: u16, poll_rx: u64) -> Result<()> {
         let planned = self.planned_tx()?;
-        let frame = Frame::poll_ack(address_for(self.config.index));
+        let response_tx = ticks(planned.timestamp().value());
+        let frame = self.encode(
+            peer,
+            AirEnvelope::new(
+                exchange_id,
+                AirMessage::Response {
+                    poll_rx,
+                    response_tx,
+                    state: EgoState::default(),
+                },
+            ),
+        )?;
         self.hardware
             .radio
-            .transmit_at(frame.as_bytes(), planned, true)
-            .map_err(|error| anyhow::anyhow!("send delayed POLL_ACK: {error:?}"))?;
-        self.state = ExchangeState::SendingPollAck { peer, poll_rx };
+            .transmit_at(frame.bytes(), planned, true)
+            .map_err(|error| anyhow::anyhow!("send delayed RESPONSE: {error:?}"))?;
+        self.state = ExchangeState::SendingResponse {
+            peer,
+            exchange_id,
+            poll_rx,
+            response_tx,
+        };
         self.deadline = Some(Instant::now() + self.config.response_timeout);
         Ok(())
     }
 
-    fn send_range(&mut self, peer: NodeIndex, poll_tx: u64, poll_ack_rx: u64) -> Result<()> {
+    fn send_final(
+        &mut self,
+        peer: NodeAddress,
+        exchange_id: u16,
+        poll_tx: u64,
+        poll_rx: u64,
+        response_tx: u64,
+        response_rx: u64,
+    ) -> Result<()> {
         let planned = self.planned_tx()?;
-        let range_tx = ticks(planned);
-        let frame = Frame::range(
-            address_for(self.config.index),
+        let final_tx = ticks(planned.timestamp().value());
+        let frame = self.encode(
+            peer,
+            AirEnvelope::new(
+                exchange_id,
+                AirMessage::Final {
+                    poll_tx,
+                    response_rx,
+                    final_tx,
+                },
+            ),
+        )?;
+        self.hardware
+            .radio
+            .transmit_at(frame.bytes(), planned, false)
+            .map_err(|error| anyhow::anyhow!("send delayed FINAL: {error:?}"))?;
+        self.state = ExchangeState::SendingFinal {
+            peer,
+            exchange_id,
             poll_tx,
-            poll_ack_rx,
-            range_tx,
-        );
-        self.hardware
-            .radio
-            .transmit_at(frame.as_bytes(), planned, true)
-            .map_err(|error| anyhow::anyhow!("send delayed RANGE: {error:?}"))?;
-        self.state = ExchangeState::SendingRange { peer, range_tx };
+            poll_rx,
+            response_tx,
+            response_rx,
+            final_tx,
+        };
         self.deadline = Some(Instant::now() + self.config.response_timeout);
         Ok(())
     }
 
-    fn send_range_report(&mut self, distance: f64) -> Result<()> {
-        let millimetres = (distance * 1000.0).round().clamp(0.0, u32::MAX as f64) as u32;
-        let frame = Frame::range_report(address_for(self.config.index), millimetres);
+    fn send_report(&mut self, peer: NodeAddress, exchange_id: u16, final_rx: u64) -> Result<()> {
+        let planned = self
+            .hardware
+            .radio
+            .schedule_delayed_transmit(DwTime::from_micros(REPORT_TURNAROUND_US as f32))
+            .map_err(|error| anyhow::anyhow!("compute REPORT timestamp: {error:?}"))?;
+        let frame = self.encode(
+            peer,
+            AirEnvelope::new(
+                exchange_id,
+                AirMessage::Report {
+                    final_rx,
+                    status: 0,
+                },
+            ),
+        )?;
         self.hardware
             .radio
-            .transmit(frame.as_bytes(), TxOptions::default())
-            .map_err(|error| anyhow::anyhow!("send RANGE_REPORT: {error:?}"))?;
-        self.state = ExchangeState::SendingRangeReport;
+            .transmit_at(frame.bytes(), planned, false)
+            .map_err(|error| anyhow::anyhow!("send delayed REPORT: {error:?}"))?;
+        self.state = ExchangeState::SendingReport;
         self.deadline = Some(Instant::now() + self.config.response_timeout);
         Ok(())
     }
 
-    fn planned_tx(&mut self) -> Result<DwTime> {
+    fn encode(&mut self, peer: NodeAddress, envelope: AirEnvelope) -> Result<air::EncodedAirFrame> {
+        let sequence = self.mac_sequence;
+        self.mac_sequence = self.mac_sequence.wrapping_add(1);
+        air::encode(
+            self.config.address,
+            Destination::Node(peer),
+            sequence,
+            &envelope,
+        )
+        .map_err(|error| anyhow::anyhow!("encode native air frame: {error:?}"))
+    }
+
+    fn planned_tx(&mut self) -> Result<DelayedTransmit> {
         self.hardware
             .radio
-            .compute_delayed_time(DwTime::from_micros(self.config.reply_delay_us as f32))
+            .schedule_delayed_transmit(DwTime::from_micros(self.config.reply_delay_us as f32))
             .map_err(|error| anyhow::anyhow!("compute delayed TX timestamp: {error:?}"))
     }
 
-    fn recover_exchange(&mut self) -> Result<()> {
+    fn recover_exchange(&mut self, action: RecoveryAction) -> Result<()> {
         self.state = ExchangeState::Idle;
         self.deadline = None;
-        self.arm_receive()
+        self.arm_receive(action)
     }
 
-    fn arm_receive(&mut self) -> Result<()> {
+    fn arm_receive(&mut self, action: RecoveryAction) -> Result<()> {
+        if action == RecoveryAction::ResetReceiverThenRearm {
+            self.hardware
+                .radio
+                .reset_receiver()
+                .map_err(|error| anyhow::anyhow!("reset DW1000 receiver: {error:?}"))?;
+            self.stats.receiver_resets += 1;
+        }
         self.hardware
             .radio
             .start_receive(RxOptions {
                 delayed_time: None,
                 permanent: false,
             })
-            .map_err(|error| anyhow::anyhow!("arm DW1000 receiver: {error:?}"))
+            .map_err(|error| anyhow::anyhow!("arm DW1000 receiver: {error:?}"))?;
+        self.stats.explicit_rx_arms += 1;
+        Ok(())
     }
 
     fn clear_events(&mut self, events: SysStatus) -> Result<()> {
@@ -511,27 +683,31 @@ impl Ranger {
             .map_err(|error| anyhow::anyhow!("clear DW1000 status 0x{:x}: {error:?}", events.0))
     }
 
-    fn peer_for_address(&self, address: [u8; 2]) -> Option<NodeIndex> {
+    fn clear_rx_events(&mut self, status_value: SysStatus) -> Result<()> {
+        self.clear_events(SysStatus(status_value.0 & status::RX_CLEAR_EVENTS.0))
+    }
+
+    fn peer_for_address(&self, address: NodeAddress) -> Option<NodeAddress> {
         self.config
             .peers
             .iter()
             .copied()
-            .find(|peer| address_for(*peer) == address)
+            .find(|peer| *peer == address)
     }
 
     fn emit(
         &mut self,
-        source: NodeIndex,
+        source: NodeAddress,
         distance: f64,
-        completed_at_dtu: u64,
+        range_event_time_dtu: u64,
         on_range: &mut impl FnMut(RangeMeasurement),
     ) {
         let measurement = RangeMeasurement {
-            receiver: self.config.index,
+            receiver: self.config.address,
             source,
             distance_metres: distance,
             sequence: self.sequence,
-            completed_at_dtu,
+            range_event_time_dtu,
         };
         self.sequence += 1;
         self.stats.ranges += 1;
@@ -543,35 +719,30 @@ fn ticks(time: DwTime) -> u64 {
     (time.get_timestamp() as u64) & TIMESTAMP_MASK
 }
 
-fn timestamp_error(expected: u64, actual: u64) -> u64 {
-    let forward = actual.wrapping_sub(expected) & TIMESTAMP_MASK;
-    let backward = expected.wrapping_sub(actual) & TIMESTAMP_MASK;
-    forward.min(backward)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn delayed_timestamp_error_wraps_and_chooses_the_short_path() {
-        assert_eq!(timestamp_error(TIMESTAMP_MASK - 10, 9), 20);
-        assert_eq!(timestamp_error(1_000, 1_512), 512);
-    }
-
-    #[test]
-    fn ranging_config_rejects_ambiguous_peer_sets() {
-        let node0 = NodeIndex::new(0).unwrap();
-        let node1 = NodeIndex::new(1).unwrap();
+    fn ranging_config_accepts_multiple_addressed_initiator_peers() {
+        let node0 = NodeAddress::new(0).unwrap();
+        let node1 = NodeAddress::new(1).unwrap();
+        let node2 = NodeAddress::new(2).unwrap();
         let timing = Duration::from_millis(10);
 
         assert!(RangingConfig::new(node0, vec![], timing, 2_000, timing).is_err());
         assert!(RangingConfig::new(node0, vec![node0], timing, 2_000, timing).is_err());
         assert!(RangingConfig::new(node0, vec![node1, node1], timing, 2_000, timing).is_err());
+        assert!(RangingConfig::new(node0, vec![node1, node2], timing, 2_000, timing).is_ok());
         assert!(
             RangingConfig::new(
                 node0,
-                vec![node1, NodeIndex::new(2).unwrap()],
+                vec![
+                    node1,
+                    node2,
+                    NodeAddress::new(3).unwrap(),
+                    NodeAddress::new(4).unwrap(),
+                ],
                 timing,
                 2_000,
                 timing,
@@ -582,12 +753,65 @@ mod tests {
 
     #[test]
     fn ranging_config_rejects_zero_timing() {
-        let node0 = NodeIndex::new(0).unwrap();
-        let node1 = NodeIndex::new(1).unwrap();
+        let node0 = NodeAddress::new(0).unwrap();
+        let node1 = NodeAddress::new(1).unwrap();
         let timing = Duration::from_millis(10);
 
         assert!(RangingConfig::new(node0, vec![node1], Duration::ZERO, 2_000, timing).is_err());
         assert!(RangingConfig::new(node0, vec![node1], timing, 0, timing).is_err());
         assert!(RangingConfig::new(node0, vec![node1], timing, 2_000, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn receiver_recovery_is_derived_from_terminal_status() {
+        assert_eq!(
+            recovery_action(status::RX_PREAMBLE_TIMEOUT),
+            RecoveryAction::Rearm
+        );
+        assert_eq!(
+            recovery_action(status::RX_SFD_TIMEOUT),
+            RecoveryAction::Rearm
+        );
+        for status_value in [
+            status::RX_HEADER_ERROR,
+            status::RX_FRAME_CHECK_ERROR,
+            status::RX_REED_SOLOMON_ERROR,
+            status::RX_TIMEOUT,
+            status::LDE_ERROR,
+            status::RX_OVERRUN,
+            status::FRAME_FILTER_REJECTION,
+        ] {
+            assert_eq!(
+                recovery_action(status_value),
+                RecoveryAction::ResetReceiverThenRearm
+            );
+        }
+        assert_eq!(
+            recovery_action(status::RX_SFD_TIMEOUT | status::RX_FRAME_CHECK_ERROR),
+            RecoveryAction::ResetReceiverThenRearm
+        );
+    }
+
+    #[test]
+    fn receive_event_masks_cover_irq_terminal_and_clear_latches() {
+        for event in [
+            status::RX_FRAME_READY,
+            status::RX_PREAMBLE_TIMEOUT,
+            status::RX_SFD_TIMEOUT,
+            status::RX_OVERRUN,
+        ] {
+            assert_ne!(RX_EVENT_BITS & event.0, 0);
+        }
+
+        for latch in [
+            status::RX_PREAMBLE_DETECTED,
+            status::RX_SFD_DETECTED,
+            status::LDE_DONE,
+            status::RX_HEADER_DETECTED,
+            status::RX_FRAME_GOOD,
+        ] {
+            assert_ne!(status::RX_CLEAR_EVENTS.0 & latch.0, 0);
+        }
+        assert_eq!(RX_EVENT_BITS & status::LDE_DONE.0, 0);
     }
 }

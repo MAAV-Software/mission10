@@ -7,20 +7,25 @@ use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Delay, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use mission10_uwb_protocol::dw1000_bench::{FRAME_LEN, Frame, MessageKind};
+use mission10_uwb_protocol::air::{
+    self, AIR_FRAME_MAX_NO_FCS, AirEnvelope, AirMessage, DecodedAirFrame,
+};
 use mission10_uwb_protocol::host::{Diagnostic, OperatingMode, RadioToHost};
 use mission10_uwb_protocol::{
-    ResponderTimestamps, TIMESTAMP_MASK, delayed_tx_time, distance_metres,
+    Destination, NodeAddress, REPORT_TURNAROUND_US, ResponderTimestamps, TIMESTAMP_MASK,
+    delayed_tx_time, distance_metres, scheduled_tx_matches,
 };
 
 use crate::Irqs;
 use crate::board::{
-    FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, OWN_INDEX,
-    PEER_ADDRESS, PEER_INDEX, REPLY_DELAY_US, RESPONSE_TIMEOUT_US, RadioHardware, RadioWait,
-    diagnostic, finish_receiving, finish_sending, prepare_rx, prepare_tx, radio_config,
-    recoverable_receive_error, reset_after_radio_failure, wait_receive, wait_send,
+    FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, PEER_ADDRESS,
+    REPLY_DELAY_US, RESPONSE_TIMEOUT_US, RadioHardware, RadioWait, diagnostic, finish_receiving,
+    finish_sending, prepare_rx, prepare_tx, radio_config, recoverable_receive_error,
+    reset_after_radio_failure, wait_receive, wait_send,
 };
-use crate::host::{publish, transport_counters, update_radio_counters};
+use crate::host::{latest_ego_state, publish, transport_counters, update_radio_counters};
+
+const PHY_FCS_LEN: usize = 2;
 
 fn publish_error(diagnostic: Diagnostic) {
     warn!("radio diagnostic={=u8}", diagnostic as u8);
@@ -29,7 +34,7 @@ fn publish_error(diagnostic: Diagnostic) {
 
 fn publish_health(wait: &RadioWait<'_>, ranges: &mut u32) {
     *ranges = ranges.wrapping_add(1);
-    if *ranges % 32 == 0 {
+    if (*ranges).is_multiple_of(32) {
         let mut counters = wait.counters().health_counters();
         counters.merge_transport(transport_counters());
         update_radio_counters(counters);
@@ -184,14 +189,10 @@ pub async fn run(hw: RadioHardware) {
         reset_after_radio_failure(Diagnostic::Spi);
     }
     publish(RadioToHost::Ready {
-        mode: if cfg!(feature = "initiator") {
-            OperatingMode::Dw1000BenchInitiator
-        } else {
-            OperatingMode::Dw1000BenchResponder
-        },
+        mode: OperatingMode::Native,
         rx_delay,
         tx_delay,
-        node_address: OWN_INDEX as u16,
+        node_address: OWN_ADDRESS,
     });
     let initial_counters = wait.counters().health_counters();
     update_radio_counters(initial_counters);
@@ -201,8 +202,10 @@ pub async fn run(hw: RadioHardware) {
     });
 
     let config = radio_config();
-    let mut rx_buf = [0_u8; 128];
+    let mut rx_buf = [0_u8; AIR_FRAME_MAX_NO_FCS + PHY_FCS_LEN];
     let mut range_count = 0_u32;
+    let mut mac_sequence = 0_u8;
+    let mut next_exchange_id = 0_u16;
     // Preparation-path SPI errors get three attempts between completed ranges.
     // Errors from APIs that consume Ready or occur mid-transfer reset at once
     // because the driver cannot guarantee a safe typestate for re-entry.
@@ -210,16 +213,25 @@ pub async fn run(hw: RadioHardware) {
 
     if cfg!(feature = "initiator") {
         'transaction: loop {
+            let exchange_id = next_exchange_id;
+            next_exchange_id = next_exchange_id.wrapping_add(1);
             if let Err(error) = prepare_tx(&mut radio).await {
                 recover_exchange(error, &mut wait, &mut spi_errors_since_range);
                 Timer::after_millis(10).await;
                 continue 'transaction;
             }
-            let poll = Frame::poll(OWN_ADDRESS);
-            let mut sending = match radio
-                .send_raw(poll.as_bytes(), SendTime::Now, &config)
-                .await
-            {
+            let poll = encode_air(
+                &mut mac_sequence,
+                PEER_ADDRESS,
+                AirEnvelope::new(
+                    exchange_id,
+                    AirMessage::Poll {
+                        state: latest_ego_state(),
+                    },
+                ),
+            )
+            .unwrap_or_else(|error| reset_after_radio_failure(error));
+            let mut sending = match radio.send_raw(poll.bytes(), SendTime::Now, &config).await {
                 Ok(sending) => sending,
                 Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
@@ -256,47 +268,65 @@ pub async fn run(hw: RadioHardware) {
                     }
                 };
             radio = finish_receiving(receiving, &mut wait).await;
-            if length < FRAME_LEN {
-                publish_error(Diagnostic::ShortPollAck);
-                continue;
-            }
-            let ack = match Frame::decode(&rx_buf[..FRAME_LEN]) {
+            let response = match decode_air(&rx_buf, length) {
                 Ok(frame) => frame,
-                Err(_) => {
-                    publish_error(Diagnostic::FrameDecode);
+                Err(error) => {
+                    publish_error(error);
                     continue;
                 }
             };
-            publish(RadioToHost::Rx {
-                kind: ack.kind() as u8,
+            publish_rx(&response.envelope.message);
+            let (poll_rx, response_tx, peer_state) = match response.envelope.message {
+                AirMessage::Response {
+                    poll_rx,
+                    response_tx,
+                    state,
+                } if response.source == PEER_ADDRESS
+                    && response.envelope.exchange_id == exchange_id =>
+                {
+                    (poll_rx, response_tx, state)
+                }
+                _ => {
+                    publish_error(Diagnostic::UnexpectedAir);
+                    continue;
+                }
+            };
+            publish(RadioToHost::PeerState {
+                peer: response.source,
+                exchange_id,
+                state: peer_state,
             });
-            if ack.kind() != MessageKind::PollAck || ack.source() != PEER_ADDRESS {
-                continue;
-            }
 
-            let range_at_value = delayed_tx_time(poll_ack_rx.value(), REPLY_DELAY_US);
-            let predicted_range_tx = range_at_value.wrapping_add(tx_delay as u64) & TIMESTAMP_MASK;
-            let range = Frame::range(
-                OWN_ADDRESS,
-                poll_tx.value(),
-                poll_ack_rx.value(),
-                predicted_range_tx,
-            );
+            let final_at_value = delayed_tx_time(poll_ack_rx.value(), REPLY_DELAY_US);
+            let predicted_final_tx = final_at_value.wrapping_add(tx_delay as u64) & TIMESTAMP_MASK;
+            let final_frame = encode_air(
+                &mut mac_sequence,
+                PEER_ADDRESS,
+                AirEnvelope::new(
+                    exchange_id,
+                    AirMessage::Final {
+                        poll_tx: poll_tx.value(),
+                        response_rx: poll_ack_rx.value(),
+                        final_tx: predicted_final_tx,
+                    },
+                ),
+            )
+            .unwrap_or_else(|error| reset_after_radio_failure(error));
             if let Err(error) = prepare_tx(&mut radio).await {
                 recover_exchange(error, &mut wait, &mut spi_errors_since_range);
                 Timer::after_millis(10).await;
                 continue 'transaction;
             }
-            let range_at = RadioInstant::new(range_at_value)
+            let final_at = RadioInstant::new(final_at_value)
                 .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
             let mut sending = match radio
-                .send_raw(range.as_bytes(), SendTime::Delayed(range_at), &config)
+                .send_raw(final_frame.bytes(), SendTime::Delayed(final_at), &config)
                 .await
             {
                 Ok(sending) => sending,
                 Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
-            let range_tx = match wait_send(&mut sending, &mut wait).await {
+            let actual_final_tx = match wait_send(&mut sending, &mut wait).await {
                 Ok(timestamp) => timestamp,
                 Err(error) => {
                     recover_exchange(error, &mut wait, &mut spi_errors_since_range);
@@ -306,6 +336,11 @@ pub async fn run(hw: RadioHardware) {
                 }
             };
             radio = finish_sending(sending, &mut wait).await;
+            if !scheduled_tx_matches(predicted_final_tx, actual_final_tx.value()) {
+                publish_error(Diagnostic::DelayedSendTooLate);
+                Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
+                continue 'transaction;
+            }
 
             if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
                 recover_exchange(error, &mut wait, &mut spi_errors_since_range);
@@ -316,49 +351,65 @@ pub async fn run(hw: RadioHardware) {
                 Ok(receiving) => receiving,
                 Err(error) => reset_after_radio_failure(diagnostic(&error)),
             };
-            let (length, _) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
-                Ok(message) => message,
-                Err(error) if recoverable_receive_error(error) => {
-                    warn!("restarting exchange after RANGE_REPORT receive error");
-                    publish_error(error);
-                    wait.recovered();
-                    radio = finish_receiving(receiving, &mut wait).await;
-                    Timer::after_millis(10).await;
-                    continue 'transaction;
-                }
-                Err(error) => {
-                    reset_after_radio_failure(error);
-                }
-            };
+            let (length, _report_rx) =
+                match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
+                    Ok(message) => message,
+                    Err(error) if recoverable_receive_error(error) => {
+                        warn!("restarting exchange after REPORT receive error");
+                        publish_error(error);
+                        wait.recovered();
+                        radio = finish_receiving(receiving, &mut wait).await;
+                        Timer::after_millis(10).await;
+                        continue 'transaction;
+                    }
+                    Err(error) => {
+                        reset_after_radio_failure(error);
+                    }
+                };
             radio = finish_receiving(receiving, &mut wait).await;
-            if length < FRAME_LEN {
-                publish_error(Diagnostic::ShortRangeReport);
-                continue;
-            }
-            let report = match Frame::decode(&rx_buf[..FRAME_LEN]) {
+            let report = match decode_air(&rx_buf, length) {
                 Ok(frame) => frame,
-                Err(_) => {
-                    publish_error(Diagnostic::FrameDecode);
+                Err(error) => {
+                    publish_error(error);
                     continue;
                 }
             };
-            publish(RadioToHost::Rx {
-                kind: report.kind() as u8,
-            });
-            if report.kind() == MessageKind::RangeReport && report.source() == PEER_ADDRESS {
-                if let Some(millimetres) = report.distance_mm() {
-                    publish(RadioToHost::Range {
-                        peer: PEER_INDEX as u16,
-                        exchange_id: 0,
-                        range_event_time_dtu: range_tx.value(),
-                        millimetres,
-                        rssi_cdbm: i16::MIN,
-                        quality_flags: 0,
-                    });
-                    publish_health(&wait, &mut range_count);
-                    spi_errors_since_range = 0;
+            publish_rx(&report.envelope.message);
+            let final_rx = match report.envelope.message {
+                AirMessage::Report {
+                    final_rx,
+                    status: 0,
+                } if report.source == PEER_ADDRESS
+                    && report.envelope.exchange_id == exchange_id =>
+                {
+                    final_rx
                 }
-            }
+                _ => {
+                    publish_error(Diagnostic::UnexpectedAir);
+                    continue;
+                }
+            };
+            let Some(distance) = distance_metres(
+                [poll_tx.value(), poll_ack_rx.value(), predicted_final_tx],
+                ResponderTimestamps {
+                    poll_rx,
+                    poll_ack_tx: response_tx,
+                    range_rx: final_rx,
+                },
+            ) else {
+                publish_error(Diagnostic::InvalidDistance);
+                continue;
+            };
+            publish(RadioToHost::Range {
+                peer: report.source,
+                exchange_id,
+                range_event_time_dtu: actual_final_tx.value(),
+                millimetres: millimetres(distance),
+                rssi_cdbm: i16::MIN,
+                quality_flags: 0,
+            });
+            publish_health(&wait, &mut range_count);
+            spi_errors_since_range = 0;
             Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
         }
     }
@@ -392,41 +443,59 @@ pub async fn run(hw: RadioHardware) {
             }
         };
         radio = finish_receiving(receiving, &mut wait).await;
-        if length < FRAME_LEN {
-            publish_error(Diagnostic::ShortPoll);
-            continue;
-        }
-        let poll = match Frame::decode(&rx_buf[..FRAME_LEN]) {
+        let poll = match decode_air(&rx_buf, length) {
             Ok(frame) => frame,
-            Err(_) => {
-                publish_error(Diagnostic::FrameDecode);
+            Err(error) => {
+                publish_error(error);
                 continue;
             }
         };
-        publish(RadioToHost::Rx {
-            kind: poll.kind() as u8,
+        publish_rx(&poll.envelope.message);
+        let peer_state = match poll.envelope.message {
+            AirMessage::Poll { state } if poll.source == PEER_ADDRESS => state,
+            _ => {
+                publish_error(Diagnostic::UnexpectedAir);
+                continue;
+            }
+        };
+        let exchange_id = poll.envelope.exchange_id;
+        publish(RadioToHost::PeerState {
+            peer: poll.source,
+            exchange_id,
+            state: peer_state,
         });
-        if poll.kind() != MessageKind::Poll || poll.source() != PEER_ADDRESS {
-            continue;
-        }
 
-        let ack_at = delayed_tx_time(poll_rx.value(), REPLY_DELAY_US);
-        let ack_at = RadioInstant::new(ack_at)
+        let response_at_value = delayed_tx_time(poll_rx.value(), REPLY_DELAY_US);
+        let predicted_response_tx =
+            response_at_value.wrapping_add(tx_delay as u64) & TIMESTAMP_MASK;
+        let response_at = RadioInstant::new(response_at_value)
             .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
         if let Err(error) = prepare_tx(&mut radio).await {
             recover_exchange(error, &mut wait, &mut spi_errors_since_range);
             Timer::after_millis(10).await;
             continue 'responder;
         }
-        let ack = Frame::poll_ack(OWN_ADDRESS);
+        let response = encode_air(
+            &mut mac_sequence,
+            poll.source,
+            AirEnvelope::new(
+                exchange_id,
+                AirMessage::Response {
+                    poll_rx: poll_rx.value(),
+                    response_tx: predicted_response_tx,
+                    state: latest_ego_state(),
+                },
+            ),
+        )
+        .unwrap_or_else(|error| reset_after_radio_failure(error));
         let mut sending = match radio
-            .send_raw(ack.as_bytes(), SendTime::Delayed(ack_at), &config)
+            .send_raw(response.bytes(), SendTime::Delayed(response_at), &config)
             .await
         {
             Ok(sending) => sending,
             Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
-        let poll_ack_tx = match wait_send(&mut sending, &mut wait).await {
+        let actual_response_tx = match wait_send(&mut sending, &mut wait).await {
             Ok(timestamp) => timestamp,
             Err(error) => {
                 recover_exchange(error, &mut wait, &mut spi_errors_since_range);
@@ -435,6 +504,10 @@ pub async fn run(hw: RadioHardware) {
             }
         };
         radio = finish_sending(sending, &mut wait).await;
+        if !scheduled_tx_matches(predicted_response_tx, actual_response_tx.value()) {
+            publish_error(Diagnostic::DelayedSendTooLate);
+            continue 'responder;
+        }
 
         if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
             recover_exchange(error, &mut wait, &mut spi_errors_since_range);
@@ -445,10 +518,10 @@ pub async fn run(hw: RadioHardware) {
             Ok(receiving) => receiving,
             Err(error) => reset_after_radio_failure(diagnostic(&error)),
         };
-        let (length, range_rx) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
+        let (length, final_rx) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
             Ok(message) => message,
             Err(error) if recoverable_receive_error(error) => {
-                warn!("restarting exchange after RANGE receive error");
+                warn!("restarting exchange after FINAL receive error");
                 publish_error(error);
                 wait.recovered();
                 radio = finish_receiving(receiving, &mut wait).await;
@@ -459,46 +532,62 @@ pub async fn run(hw: RadioHardware) {
             }
         };
         radio = finish_receiving(receiving, &mut wait).await;
-        if length < FRAME_LEN {
-            publish_error(Diagnostic::ShortRange);
-            continue;
-        }
-        let range = match Frame::decode(&rx_buf[..FRAME_LEN]) {
+        let final_frame = match decode_air(&rx_buf, length) {
             Ok(frame) => frame,
-            Err(_) => {
-                publish_error(Diagnostic::FrameDecode);
+            Err(error) => {
+                publish_error(error);
                 continue;
             }
         };
-        publish(RadioToHost::Rx {
-            kind: range.kind() as u8,
-        });
-        if range.kind() != MessageKind::Range || range.source() != PEER_ADDRESS {
-            continue;
-        }
-        let Some(initiator_timestamps) = range.timestamps() else {
-            continue;
+        publish_rx(&final_frame.envelope.message);
+        let (poll_tx, response_rx, final_tx) = match final_frame.envelope.message {
+            AirMessage::Final {
+                poll_tx,
+                response_rx,
+                final_tx,
+            } if final_frame.source == poll.source
+                && final_frame.envelope.exchange_id == exchange_id =>
+            {
+                (poll_tx, response_rx, final_tx)
+            }
+            _ => {
+                publish_error(Diagnostic::UnexpectedAir);
+                continue;
+            }
         };
         let Some(distance) = distance_metres(
-            initiator_timestamps,
+            [poll_tx, response_rx, final_tx],
             ResponderTimestamps {
                 poll_rx: poll_rx.value(),
-                poll_ack_tx: poll_ack_tx.value(),
-                range_rx: range_rx.value(),
+                poll_ack_tx: predicted_response_tx,
+                range_rx: final_rx.value(),
             },
         ) else {
             publish_error(Diagnostic::InvalidDistance);
             continue;
         };
-        let millimetres = (distance * 1_000.0 + 0.5) as u32;
         if let Err(error) = prepare_tx(&mut radio).await {
             recover_exchange(error, &mut wait, &mut spi_errors_since_range);
             Timer::after_millis(10).await;
             continue 'responder;
         }
-        let report = Frame::range_report(OWN_ADDRESS, millimetres);
+        let report = encode_air(
+            &mut mac_sequence,
+            poll.source,
+            AirEnvelope::new(
+                exchange_id,
+                AirMessage::Report {
+                    final_rx: final_rx.value(),
+                    status: 0,
+                },
+            ),
+        )
+        .unwrap_or_else(|error| reset_after_radio_failure(error));
+        let report_at_value = delayed_tx_time(final_rx.value(), REPORT_TURNAROUND_US);
+        let report_at = RadioInstant::new(report_at_value)
+            .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
         let mut sending = match radio
-            .send_raw(report.as_bytes(), SendTime::Now, &config)
+            .send_raw(report.bytes(), SendTime::Delayed(report_at), &config)
             .await
         {
             Ok(sending) => sending,
@@ -509,16 +598,57 @@ pub async fn run(hw: RadioHardware) {
         }
         radio = finish_sending(sending, &mut wait).await;
         publish(RadioToHost::Range {
-            peer: PEER_INDEX as u16,
-            exchange_id: 0,
-            range_event_time_dtu: range_rx.value(),
-            millimetres,
+            peer: poll.source,
+            exchange_id,
+            range_event_time_dtu: final_rx.value(),
+            millimetres: millimetres(distance),
             rssi_cdbm: i16::MIN,
             quality_flags: 0,
         });
         publish_health(&wait, &mut range_count);
         spi_errors_since_range = 0;
     }
+}
+
+fn encode_air(
+    mac_sequence: &mut u8,
+    destination: NodeAddress,
+    envelope: AirEnvelope,
+) -> Result<air::EncodedAirFrame, Diagnostic> {
+    let sequence = *mac_sequence;
+    *mac_sequence = (*mac_sequence).wrapping_add(1);
+    air::encode(
+        OWN_ADDRESS,
+        Destination::Node(destination),
+        sequence,
+        &envelope,
+    )
+    .map_err(|_| Diagnostic::MalformedAir)
+}
+
+fn decode_air(buffer: &[u8], received_length: usize) -> Result<DecodedAirFrame, Diagnostic> {
+    let Some(frame_length) = received_length.checked_sub(PHY_FCS_LEN) else {
+        return Err(Diagnostic::MalformedAir);
+    };
+    if frame_length > AIR_FRAME_MAX_NO_FCS || frame_length > buffer.len() {
+        return Err(Diagnostic::MalformedAir);
+    }
+    air::decode(&buffer[..frame_length], OWN_ADDRESS).map_err(|_| Diagnostic::MalformedAir)
+}
+
+fn publish_rx(message: &AirMessage) {
+    publish(RadioToHost::Rx {
+        kind: match message {
+            AirMessage::Poll { .. } => 0,
+            AirMessage::Response { .. } => 1,
+            AirMessage::Final { .. } => 2,
+            AirMessage::Report { .. } => 3,
+        },
+    });
+}
+
+fn millimetres(distance: f64) -> u32 {
+    (distance * 1_000.0 + 0.5).clamp(0.0, u32::MAX as f64) as u32
 }
 
 fn recover_exchange(

@@ -20,8 +20,8 @@ pub mod time;
 pub use async_dw1000::AsyncDw1000;
 pub use config::*;
 pub use device::{
-    AntennaDelay, DeviceIdentity, Eui64, PanId, PeerSnapshot, RxFrame, ShortAddress, SignalMetrics,
-    SysStatus, Timestamps,
+    AntennaDelay, DelayedTransmit, DeviceIdentity, DxTimeDeadline, Eui64, OnAirTimestamp, PanId,
+    PeerSnapshot, RadioDebugState, RxFrame, ShortAddress, SignalMetrics, SysStatus, Timestamps,
 };
 pub use dw1000::Dw1000;
 pub use error::{Error, ProtocolError, RxError};

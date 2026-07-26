@@ -4,20 +4,20 @@ use crc::{CRC_32_ISO_HDLC, Crc};
 use hubpack::SerializedSize;
 use serde::{Deserialize, Serialize};
 
-use crate::EgoState;
+use crate::{EgoState, NodeAddress};
 
-pub const HOST_PROTOCOL_VERSION: u8 = 3;
+pub const HOST_PROTOCOL_VERSION: u8 = 4;
 pub const MAX_PEERS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
 pub struct RadioConfiguration {
-    pub node_address: u16,
+    pub node_address: NodeAddress,
     pub peer_count: u8,
-    pub peers: [u16; MAX_PEERS],
+    pub peers: [NodeAddress; MAX_PEERS],
 }
 
 impl RadioConfiguration {
-    pub fn peers(&self) -> Option<&[u16]> {
+    pub fn peers(&self) -> Option<&[NodeAddress]> {
         (self.peer_count as usize <= MAX_PEERS).then(|| &self.peers[..self.peer_count as usize])
     }
 
@@ -25,23 +25,13 @@ impl RadioConfiguration {
         let Some(peers) = self.peers() else {
             return false;
         };
-        if !is_unicast_address(self.node_address) {
-            return false;
-        }
         for (index, peer) in peers.iter().enumerate() {
-            if !is_unicast_address(*peer)
-                || *peer == self.node_address
-                || peers[..index].contains(peer)
-            {
+            if *peer == self.node_address || peers[..index].contains(peer) {
                 return false;
             }
         }
         true
     }
-}
-
-pub const fn is_unicast_address(address: u16) -> bool {
-    address < 0xfffe
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
@@ -71,8 +61,6 @@ impl HostToRadioEnvelope {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, SerializedSize)]
 #[repr(u8)]
 pub enum OperatingMode {
-    Dw1000BenchResponder,
-    Dw1000BenchInitiator,
     Native,
 }
 
@@ -91,10 +79,6 @@ pub enum Diagnostic {
     RxFrameFilteringRejection,
     Spi,
     FrameDecode,
-    ShortPoll,
-    ShortPollAck,
-    ShortRange,
-    ShortRangeReport,
     InvalidDistance,
     DelayedSendTooLate,
     DelayedSendPowerUpWarning,
@@ -126,23 +110,19 @@ impl Diagnostic {
             8 => Self::RxFrameFilteringRejection,
             9 => Self::Spi,
             10 => Self::FrameDecode,
-            11 => Self::ShortPoll,
-            12 => Self::ShortPollAck,
-            13 => Self::ShortRange,
-            14 => Self::ShortRangeReport,
-            15 => Self::InvalidDistance,
-            16 => Self::DelayedSendTooLate,
-            17 => Self::DelayedSendPowerUpWarning,
-            18 => Self::RadioState,
-            19 => Self::HostFrame,
-            20 => Self::InvalidConfiguration,
-            21 => Self::MalformedAir,
-            22 => Self::UnexpectedAir,
-            23 => Self::InvalidTimestamp,
-            24 => Self::Unknown,
-            25 => Self::UnsupportedInMode,
-            26 => Self::RadioReset,
-            27 => Self::WatchdogReset,
+            11 => Self::InvalidDistance,
+            12 => Self::DelayedSendTooLate,
+            13 => Self::DelayedSendPowerUpWarning,
+            14 => Self::RadioState,
+            15 => Self::HostFrame,
+            16 => Self::InvalidConfiguration,
+            17 => Self::MalformedAir,
+            18 => Self::UnexpectedAir,
+            19 => Self::InvalidTimestamp,
+            20 => Self::Unknown,
+            21 => Self::UnsupportedInMode,
+            22 => Self::RadioReset,
+            23 => Self::WatchdogReset,
             _ => return None,
         })
     }
@@ -194,7 +174,7 @@ pub enum RadioToHost {
         mode: OperatingMode,
         rx_delay: u16,
         tx_delay: u16,
-        node_address: u16,
+        node_address: NodeAddress,
     },
     Configured {
         configuration: RadioConfiguration,
@@ -203,7 +183,7 @@ pub enum RadioToHost {
         kind: u8,
     },
     Range {
-        peer: u16,
+        peer: NodeAddress,
         exchange_id: u16,
         range_event_time_dtu: u64,
         millimetres: u32,
@@ -211,7 +191,7 @@ pub enum RadioToHost {
         quality_flags: u16,
     },
     PeerState {
-        peer: u16,
+        peer: NodeAddress,
         exchange_id: u16,
         state: EgoState,
     },
@@ -344,37 +324,41 @@ fn validate_decoded(version: u8, rest: &[u8]) -> Result<(), HostFrameError> {
 mod tests {
     use super::*;
 
+    fn node(value: u16) -> NodeAddress {
+        NodeAddress::new(value).unwrap()
+    }
+
     #[test]
     fn configuration_rejects_reserved_duplicate_and_self_addresses() {
         assert!(
             RadioConfiguration {
-                node_address: 2,
+                node_address: node(2),
                 peer_count: 3,
-                peers: [0, 1, 3],
+                peers: [node(0), node(1), node(3)],
             }
             .is_valid()
         );
         assert!(
             !RadioConfiguration {
-                node_address: 2,
+                node_address: node(2),
                 peer_count: 2,
-                peers: [1, 1, 0],
+                peers: [node(1), node(1), node(0)],
             }
             .is_valid()
         );
         assert!(
             !RadioConfiguration {
-                node_address: 2,
+                node_address: node(2),
                 peer_count: 1,
-                peers: [2, 0, 0],
+                peers: [node(2), node(0), node(0)],
             }
             .is_valid()
         );
         assert!(
             !RadioConfiguration {
-                node_address: 0xffff,
-                peer_count: 0,
-                peers: [0; 3],
+                node_address: node(2),
+                peer_count: 4,
+                peers: [node(0); 3],
             }
             .is_valid()
         );
@@ -394,10 +378,6 @@ mod tests {
             Diagnostic::RxFrameFilteringRejection,
             Diagnostic::Spi,
             Diagnostic::FrameDecode,
-            Diagnostic::ShortPoll,
-            Diagnostic::ShortPollAck,
-            Diagnostic::ShortRange,
-            Diagnostic::ShortRangeReport,
             Diagnostic::InvalidDistance,
             Diagnostic::DelayedSendTooLate,
             Diagnostic::DelayedSendPowerUpWarning,
@@ -425,9 +405,9 @@ mod tests {
             42,
             HostToRadio::Configure {
                 configuration: RadioConfiguration {
-                    node_address: 2,
+                    node_address: node(2),
                     peer_count: 2,
-                    peers: [0, 4, 0],
+                    peers: [node(0), node(4), node(0)],
                 },
             },
         );
@@ -443,7 +423,7 @@ mod tests {
         let envelope = RadioToHostEnvelope::new(
             7,
             RadioToHost::Range {
-                peer: 4,
+                peer: node(4),
                 exchange_id: 0x1234,
                 range_event_time_dtu: 0x12_3456_789a,
                 millimetres: 2_345,
@@ -489,10 +469,10 @@ mod tests {
             (
                 "radio.ready",
                 RadioToHost::Ready {
-                    mode: OperatingMode::Dw1000BenchInitiator,
+                    mode: OperatingMode::Native,
                     rx_delay: 0x3ff0,
                     tx_delay: 0x3ff1,
-                    node_address: 2,
+                    node_address: node(2),
                 },
             ),
             (
@@ -503,7 +483,7 @@ mod tests {
             (
                 "radio.range",
                 RadioToHost::Range {
-                    peer: 4,
+                    peer: node(4),
                     exchange_id: 0x1234,
                     range_event_time_dtu: 0x01_0203_0405,
                     millimetres: 2_345,
@@ -514,7 +494,7 @@ mod tests {
             (
                 "radio.peer_state",
                 RadioToHost::PeerState {
-                    peer: 4,
+                    peer: node(4),
                     exchange_id: 0x1234,
                     state: golden_state(),
                 },
@@ -635,14 +615,14 @@ mod tests {
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/testdata/host_protocol_v3.frames"
+                "/testdata/host_protocol_v4.frames"
             );
             std::fs::write(path, &rendered).expect("write golden fixture");
             return;
         }
         assert_eq!(
             rendered,
-            include_str!("../testdata/host_protocol_v3.frames"),
+            include_str!("../testdata/host_protocol_v4.frames"),
             "golden fixture is stale; regenerate with \
              UPDATE_GOLDEN=1 cargo test -p mission10-uwb-protocol committed_fixture",
         );
@@ -650,9 +630,9 @@ mod tests {
 
     fn golden_configuration() -> RadioConfiguration {
         RadioConfiguration {
-            node_address: 2,
+            node_address: node(2),
             peer_count: 3,
-            peers: [0, 4, 0x8000],
+            peers: [node(0), node(4), node(0x8000)],
         }
     }
 

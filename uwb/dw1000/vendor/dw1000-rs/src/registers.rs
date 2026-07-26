@@ -40,10 +40,14 @@ pub enum Register {
     TxTime = 0x17,
     /// TX antenna delay.
     TxAntd = 0x18,
+    /// System state register.
+    SysState = 0x19,
     /// Channel control.
     ChanCtrl = 0x1F,
     /// User-defined SFD register.
     UsrSfd = 0x21,
+    /// External synchronization control.
+    ExtSync = 0x24,
     /// AGC tuning.
     AgcTune = 0x23,
     /// DRX tuning.
@@ -58,6 +62,8 @@ pub enum Register {
     FsCtrl = 0x2B,
     /// OTP interface.
     OtpIf = 0x2D,
+    /// Always-on system control.
+    Aon = 0x2C,
     /// LDE interface.
     LdeIf = 0x2E,
     /// Power management and system clocking.
@@ -81,6 +87,8 @@ pub const LEN_SYS_CTRL: usize = 4;
 pub const LEN_SYS_MASK: usize = 4;
 /// SYS_STATUS length.
 pub const LEN_SYS_STATUS: usize = 5;
+/// SYS_STATE length.
+pub const LEN_SYS_STATE: usize = 5;
 /// TX_FCTRL length.
 pub const LEN_TX_FCTRL: usize = 5;
 /// CHAN_CTRL length.
@@ -140,6 +148,12 @@ pub const OTP_ADDR_SUB: u16 = 0x04;
 pub const OTP_CTRL_SUB: u16 = 0x06;
 /// OTP data subaddress.
 pub const OTP_RDAT_SUB: u16 = 0x0A;
+/// OTP special-function subaddress.
+pub const OTP_SF_SUB: u16 = 0x12;
+/// Always-on configuration 1 subaddress.
+pub const AON_CFG1_SUB: u16 = 0x0A;
+/// External synchronization control subaddress.
+pub const EXT_SYNC_CTRL_SUB: u16 = 0x00;
 /// User SFD length subaddress.
 pub const SFD_LENGTH_SUB: u16 = 0x00;
 /// AGC tuning subaddresses.
@@ -158,6 +172,8 @@ pub const DRX_TUNE1B_SUB: u16 = 0x06;
 pub const DRX_TUNE2_SUB: u16 = 0x08;
 /// DRX tune 4H subaddress.
 pub const DRX_TUNE4H_SUB: u16 = 0x26;
+/// Digital receiver SFD timeout subaddress.
+pub const DRX_SFDTOC_SUB: u16 = 0x20;
 /// LDE config 1 subaddress.
 pub const LDE_CFG1_SUB: u16 = 0x0806;
 /// LDE config 2 subaddress.
@@ -203,10 +219,18 @@ pub const WAIT4RESP_BIT: u16 = 7;
 pub const RXENAB_BIT: u16 = 8;
 /// SYS_CTRL bits.
 pub const RXDLYS_BIT: u16 = 9;
+/// SYS_CTRL byte subaddress containing the host receive-buffer toggle.
+pub const SYS_CTRL_HRBT_SUB: u16 = 3;
+/// SYS_STATUS byte subaddress containing the host and IC receive-buffer pointers.
+pub const SYS_STATUS_BUFFER_POINTER_SUB: u16 = 3;
+/// Host-side receive-buffer pointer bit in SYS_STATUS byte 3.
+pub const HSRBP_BYTE_BIT: u8 = 6;
+/// IC-side receive-buffer pointer bit in SYS_STATUS byte 3.
+pub const ICRBP_BYTE_BIT: u8 = 7;
 /// SYS_MASK bit: TX frame sent interrupt.
 pub const MTXFRS_BIT: u16 = 7;
-/// SYS_MASK bit 3 (legacy mask setting kept for compatibility).
-pub const SYS_MASK_BIT3: u16 = 3;
+/// SYS_MASK bit: automatic-acknowledgement trigger interrupt.
+pub const MAAT_BIT: u16 = 3;
 /// SYS_MASK bit: RX frame ready interrupt.
 pub const MRXDFR_BIT: u16 = 13;
 /// SYS_MASK bit: RX frame good (FCS OK) interrupt.
@@ -221,6 +245,14 @@ pub const MRXPHE_BIT: u16 = 12;
 pub const MLDEERR_BIT: u16 = 18;
 /// SYS_MASK bit: receive timeout interrupt.
 pub const MRXRFTO_BIT: u16 = 17;
+/// SYS_MASK bit: receive-buffer overrun interrupt.
+pub const MRXOVRR_BIT: u16 = 20;
+/// SYS_MASK bit: receive preamble timeout interrupt.
+pub const MRXPTO_BIT: u16 = 21;
+/// SYS_MASK bit: receive SFD timeout interrupt.
+pub const MRXSFDTO_BIT: u16 = 26;
+/// SYS_MASK bit: automatic frame-filter rejection interrupt.
+pub const MAFFREJ_BIT: u16 = 29;
 /// CHAN_CTRL bits.
 pub const DWSFD_BIT: u16 = 17;
 /// CHAN_CTRL bits.
@@ -232,8 +264,16 @@ pub const RNSSFD_BIT: u16 = 21;
 pub mod status {
     use crate::device::SysStatus;
 
+    /// Automatic acknowledgement trigger.
+    pub const AUTOMATIC_ACK_TRIGGER: SysStatus = SysStatus(1u64 << 3);
     /// TX frame sent.
     pub const TX_FRAME_SENT: SysStatus = SysStatus(1u64 << 7);
+    /// Receive preamble detected.
+    pub const RX_PREAMBLE_DETECTED: SysStatus = SysStatus(1u64 << 8);
+    /// Receive start-frame delimiter detected.
+    pub const RX_SFD_DETECTED: SysStatus = SysStatus(1u64 << 9);
+    /// Receive PHY header detected.
+    pub const RX_HEADER_DETECTED: SysStatus = SysStatus(1u64 << 11);
     /// Receive data frame ready.
     pub const RX_FRAME_READY: SysStatus = SysStatus(1u64 << 13);
     /// Receive frame check good.
@@ -244,10 +284,22 @@ pub mod status {
     pub const RX_REED_SOLOMON_ERROR: SysStatus = SysStatus(1u64 << 16);
     /// Receive frame timeout.
     pub const RX_TIMEOUT: SysStatus = SysStatus(1u64 << 17);
+    /// Receive preamble timeout.
+    pub const RX_PREAMBLE_TIMEOUT: SysStatus = SysStatus(1u64 << 21);
+    /// Receive SFD timeout.
+    pub const RX_SFD_TIMEOUT: SysStatus = SysStatus(1u64 << 26);
+    /// Automatic frame-filter rejection.
+    pub const FRAME_FILTER_REJECTION: SysStatus = SysStatus(1u64 << 29);
     /// Leading-edge detection done.
     pub const LDE_DONE: SysStatus = SysStatus(1u64 << 10);
     /// Leading-edge detection error.
     pub const LDE_ERROR: SysStatus = SysStatus(1u64 << 18);
+    /// Receive-buffer overrun.
+    pub const RX_OVERRUN: SysStatus = SysStatus(1u64 << 20);
+    /// RF PLL lost lock.
+    pub const RF_PLL_LOSS: SysStatus = SysStatus(1u64 << 24);
+    /// Clock PLL lost lock.
+    pub const CLOCK_PLL_LOSS: SysStatus = SysStatus(1u64 << 25);
     /// RX PHY header error.
     pub const RX_HEADER_ERROR: SysStatus = SysStatus(1u64 << 12);
     /// TX frame begin.
@@ -256,6 +308,35 @@ pub mod status {
     pub const TX_PREAMBLE_SENT: SysStatus = SysStatus(1u64 << 5);
     /// TX PHY header sent.
     pub const TX_HEADER_SENT: SysStatus = SysStatus(1u64 << 6);
+    /// Receiver rejected a preamble.
+    pub const RX_PREAMBLE_REJECTION: SysStatus = SysStatus(1u64 << 33);
+
+    /// Events which end a receive attempt and require the receiver to be re-armed.
+    pub const RX_TERMINAL_EVENTS: SysStatus = SysStatus(
+        RX_FRAME_READY.0
+            | RX_HEADER_ERROR.0
+            | RX_FRAME_CHECK_ERROR.0
+            | RX_REED_SOLOMON_ERROR.0
+            | RX_TIMEOUT.0
+            | RX_PREAMBLE_TIMEOUT.0
+            | RX_SFD_TIMEOUT.0
+            | LDE_ERROR.0
+            | FRAME_FILTER_REJECTION.0
+            | RX_OVERRUN.0,
+    );
+
+    /// Receive-attempt failures within [`RX_TERMINAL_EVENTS`].
+    pub const RX_ERROR_EVENTS: SysStatus = SysStatus(RX_TERMINAL_EVENTS.0 & !RX_FRAME_READY.0);
+
+    /// Latched status from one receive attempt, suitable for write-one-to-clear.
+    pub const RX_CLEAR_EVENTS: SysStatus = SysStatus(
+        RX_PREAMBLE_DETECTED.0
+            | RX_SFD_DETECTED.0
+            | LDE_DONE.0
+            | RX_HEADER_DETECTED.0
+            | RX_FRAME_GOOD.0
+            | (RX_TERMINAL_EVENTS.0 & !RX_OVERRUN.0),
+    );
 }
 
 /// Converts a little-endian bitfield slice into `SysStatus`.

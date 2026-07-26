@@ -3,7 +3,9 @@
 use heapless::Vec;
 
 use crate::config::{RxOptions, TxOptions};
-use crate::device::{DeviceIdentity, Eui64, Peer, PeerSnapshot, RxFrame, ShortAddress, Timestamps};
+use crate::device::{
+    DelayedTransmit, DeviceIdentity, Eui64, Peer, PeerSnapshot, RxFrame, ShortAddress, Timestamps,
+};
 use crate::error::{Error, ProtocolError};
 use crate::protocol::{
     decode_poll_targets, decode_range_timings, encode_discovery_blink, encode_poll,
@@ -129,8 +131,18 @@ pub trait RangingRadio<SpiE, PinE> {
     fn read_frame<'a>(&mut self, buffer: &'a mut [u8]) -> Result<RxFrame<'a>, Error<SpiE, PinE>>;
     /// Reads the latest timestamps.
     fn read_timestamps(&mut self) -> Result<Timestamps, Error<SpiE, PinE>>;
-    /// Computes a delayed transmit time relative to now.
-    fn compute_delayed_time(&mut self, delay: DwTime) -> Result<DwTime, Error<SpiE, PinE>>;
+    /// Computes a delayed transmit schedule relative to now.
+    fn schedule_delayed_transmit(
+        &mut self,
+        delay: DwTime,
+    ) -> Result<DelayedTransmit, Error<SpiE, PinE>>;
+    /// Transmits at an already-computed delayed-transmit schedule.
+    fn transmit_at(
+        &mut self,
+        frame: &[u8],
+        schedule: DelayedTransmit,
+        wait_for_response: bool,
+    ) -> Result<(), Error<SpiE, PinE>>;
 }
 
 /// Async radio operations required by the ranging node.
@@ -148,8 +160,18 @@ pub trait AsyncRangingRadio<SpiE, PinE> {
     ) -> Result<RxFrame<'a>, Error<SpiE, PinE>>;
     /// Reads the latest timestamps.
     async fn read_timestamps(&mut self) -> Result<Timestamps, Error<SpiE, PinE>>;
-    /// Computes a delayed transmit time relative to now.
-    async fn compute_delayed_time(&mut self, delay: DwTime) -> Result<DwTime, Error<SpiE, PinE>>;
+    /// Computes a delayed transmit schedule relative to now.
+    async fn schedule_delayed_transmit(
+        &mut self,
+        delay: DwTime,
+    ) -> Result<DelayedTransmit, Error<SpiE, PinE>>;
+    /// Transmits at an already-computed delayed-transmit schedule.
+    async fn transmit_at(
+        &mut self,
+        frame: &[u8],
+        schedule: DelayedTransmit,
+        wait_for_response: bool,
+    ) -> Result<(), Error<SpiE, PinE>>;
 }
 
 impl<SPI, IRQ, RST, SpiE, PinE> RangingRadio<SpiE, PinE> for crate::dw1000::Dw1000<SPI, IRQ, RST>
@@ -174,8 +196,20 @@ where
         crate::dw1000::Dw1000::read_timestamps(self)
     }
 
-    fn compute_delayed_time(&mut self, delay: DwTime) -> Result<DwTime, Error<SpiE, PinE>> {
-        crate::dw1000::Dw1000::compute_delayed_time(self, delay)
+    fn schedule_delayed_transmit(
+        &mut self,
+        delay: DwTime,
+    ) -> Result<DelayedTransmit, Error<SpiE, PinE>> {
+        crate::dw1000::Dw1000::schedule_delayed_transmit(self, delay)
+    }
+
+    fn transmit_at(
+        &mut self,
+        frame: &[u8],
+        schedule: DelayedTransmit,
+        wait_for_response: bool,
+    ) -> Result<(), Error<SpiE, PinE>> {
+        crate::dw1000::Dw1000::transmit_at(self, frame, schedule, wait_for_response)
     }
 }
 
@@ -210,8 +244,21 @@ where
         crate::async_dw1000::AsyncDw1000::read_timestamps(self).await
     }
 
-    async fn compute_delayed_time(&mut self, delay: DwTime) -> Result<DwTime, Error<SpiE, PinE>> {
-        crate::async_dw1000::AsyncDw1000::compute_delayed_time(self, delay).await
+    async fn schedule_delayed_transmit(
+        &mut self,
+        delay: DwTime,
+    ) -> Result<DelayedTransmit, Error<SpiE, PinE>> {
+        crate::async_dw1000::AsyncDw1000::schedule_delayed_transmit(self, delay).await
+    }
+
+    async fn transmit_at(
+        &mut self,
+        frame: &[u8],
+        schedule: DelayedTransmit,
+        wait_for_response: bool,
+    ) -> Result<(), Error<SpiE, PinE>> {
+        crate::async_dw1000::AsyncDw1000::transmit_at(self, frame, schedule, wait_for_response)
+            .await
     }
 }
 
@@ -783,7 +830,8 @@ impl<const N: usize> RangingNode<N> {
         }; N];
         let destination = destination.unwrap_or(ShortAddress::BROADCAST);
         let delay = DwTime::from_micros(self.config.reply_delay_us as f32);
-        let range_sent = radio.compute_delayed_time(delay)?;
+        let schedule = radio.schedule_delayed_transmit(delay)?;
+        let range_sent = schedule.timestamp().value();
         let count = if destination.is_broadcast() {
             if self.poll_acknowledged.is_empty() {
                 for (index, peer) in self.peers.iter().enumerate() {
@@ -830,13 +878,7 @@ impl<const N: usize> RangingNode<N> {
         )?;
         self.last_tx_kind = Some(FrameKind::Range);
         self.last_tx_destination = destination;
-        radio.transmit(
-            &frame[..len],
-            TxOptions {
-                delayed_time: Some(delay),
-                wait_for_response: false,
-            },
-        )
+        radio.transmit_at(&frame[..len], schedule, false)
     }
 
     fn send_range_report<R, SpiE, PinE>(
@@ -1648,7 +1690,8 @@ impl<const N: usize> RangingNode<N> {
         }; N];
         let destination = destination.unwrap_or(ShortAddress::BROADCAST);
         let delay = DwTime::from_micros(self.config.reply_delay_us as f32);
-        let range_sent = radio.compute_delayed_time(delay).await?;
+        let schedule = radio.schedule_delayed_transmit(delay).await?;
+        let range_sent = schedule.timestamp().value();
         let count = if destination.is_broadcast() {
             if self.poll_acknowledged.is_empty() {
                 for (index, peer) in self.peers.iter().enumerate() {
@@ -1695,15 +1738,7 @@ impl<const N: usize> RangingNode<N> {
         )?;
         self.last_tx_kind = Some(FrameKind::Range);
         self.last_tx_destination = destination;
-        radio
-            .transmit(
-                &frame[..len],
-                TxOptions {
-                    delayed_time: Some(delay),
-                    wait_for_response: false,
-                },
-            )
-            .await
+        radio.transmit_at(&frame[..len], schedule, false).await
     }
 
     async fn send_range_report_async<R, SpiE, PinE>(

@@ -1,44 +1,18 @@
 pub mod board;
+pub mod oracle;
 pub mod ranging;
 
-pub const BENCH_PAN_ID: u16 = 0x4d10;
+pub use mission10_uwb_protocol::NodeAddress;
+
 pub const DEFAULT_ANTENNA_DELAY: u16 = 16_390;
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct NodeIndex(u8);
-
-impl NodeIndex {
-    pub const MAX: u8 = 15;
-
-    pub const fn new(value: u8) -> Option<Self> {
-        if value <= Self::MAX {
-            Some(Self(value))
-        } else {
-            None
-        }
-    }
-
-    pub const fn get(self) -> u8 {
-        self.0
-    }
+pub const fn short_address_for(address: NodeAddress) -> u16 {
+    address.get()
 }
 
-impl std::fmt::Display for NodeIndex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-pub const fn address_for(index: NodeIndex) -> [u8; 2] {
-    [0xa0 + index.get(), 0xc0 + index.get()]
-}
-
-pub const fn short_address_for(index: NodeIndex) -> u16 {
-    u16::from_le_bytes(address_for(index))
-}
-
-pub const fn eui_for(index: NodeIndex) -> [u8; 8] {
-    [0x7d, 0x00, 0x22, 0xea, 0x82, 0x60, 0x3b, 0x90 + index.get()]
+pub const fn eui_for(address: NodeAddress) -> [u8; 8] {
+    let [high, low] = address.get().to_be_bytes();
+    [0x7d, 0x00, 0x22, 0xea, 0x82, 0x60, high, low]
 }
 
 #[cfg(test)]
@@ -46,13 +20,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bench_addresses_match_the_existing_nodes() {
-        let node0 = NodeIndex::new(0).unwrap();
-        let node1 = NodeIndex::new(1).unwrap();
-        assert_eq!(address_for(node0), [0xa0, 0xc0]);
-        assert_eq!(address_for(node1), [0xa1, 0xc1]);
-        assert_eq!(short_address_for(node0), 0xc0a0);
+    fn node_addresses_map_to_short_addresses_and_unique_euis() {
+        let node0 = NodeAddress::new(0).unwrap();
+        let node1 = NodeAddress::new(1).unwrap();
+        let development = NodeAddress::new(0x8000).unwrap();
+        assert_eq!(short_address_for(node0), 0);
+        assert_eq!(short_address_for(node1), 1);
         assert_ne!(eui_for(node0), eui_for(node1));
-        assert_eq!(NodeIndex::new(16), None);
+        assert_eq!(&eui_for(development)[6..], &[0x80, 0x00]);
     }
 }

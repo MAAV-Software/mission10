@@ -15,7 +15,7 @@ use gpiocdev::line::{Bias, EdgeDetection, Value};
 use linux_embedded_hal::spidev::{SpiModeFlags, SpidevOptions};
 use linux_embedded_hal::{Delay, SPIError, SpidevDevice};
 
-use crate::{BENCH_PAN_ID, DEFAULT_ANTENNA_DELAY, NodeIndex, eui_for, short_address_for};
+use crate::{DEFAULT_ANTENNA_DELAY, NodeAddress, eui_for, short_address_for};
 
 pub const DEFAULT_SPI_PATH: &str = "/dev/spidev0.0";
 pub const DEFAULT_GPIO_CHIP: &str = "/dev/gpiochip0";
@@ -24,6 +24,16 @@ pub const DEFAULT_RESET_GPIO: u32 = 25;
 pub const DEFAULT_RUN_SPI_HZ: u32 = 20_000_000;
 const INIT_SPI_HZ: u32 = 2_000_000;
 const EXPECTED_DEVICE_ID: u32 = 0xdeca_0130;
+// Zero coarse and mixer gain: 8.5 dB below the channel-5/64-MHz reference setting.
+const CLOSE_RANGE_TX_POWER: u32 = 0xC0C0_C0C0;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum PhyProfile {
+    #[default]
+    Operational,
+    CloseRangeDiagnostic,
+    RobustDiagnostic,
+}
 
 #[derive(Clone)]
 pub(crate) struct SharedSpi(Arc<Mutex<SpidevDevice>>);
@@ -142,6 +152,9 @@ impl InputPin for IrqPin {
 
 impl IrqWait {
     pub(crate) fn wait(&self, timeout: Duration) -> Result<bool> {
+        if self.request.lone_value().context("read DW1000 IRQ level")? == Value::Active {
+            return Ok(true);
+        }
         if !self
             .request
             .wait_edge_event(timeout)
@@ -282,7 +295,11 @@ impl Default for HardwareConfig {
     }
 }
 
-pub fn open_and_initialize(config: &HardwareConfig, index: NodeIndex) -> Result<RadioHardware> {
+pub fn open_and_initialize(
+    config: &HardwareConfig,
+    address: NodeAddress,
+    profile: PhyProfile,
+) -> Result<RadioHardware> {
     if config.run_spi_hz == 0 {
         bail!("runtime SPI frequency must be positive");
     }
@@ -291,10 +308,15 @@ pub fn open_and_initialize(config: &HardwareConfig, index: NodeIndex) -> Result<
     let reset = OpenDrainReset::request(&config.gpio_chip, config.reset_gpio)?;
     let mut radio = Dw1000::new(spi.clone(), irq_pin, reset);
     let mut delay = Delay;
-    let radio_config = radio_config(index);
+    let radio_config = radio_config(address, profile);
     radio
         .init(&mut delay, &radio_config)
         .map_err(|error| anyhow::anyhow!("DW1000 initialization failed: {error:?}"))?;
+    if matches!(profile, PhyProfile::CloseRangeDiagnostic) {
+        radio
+            .set_transmit_power(CLOSE_RANGE_TX_POWER)
+            .map_err(|error| anyhow::anyhow!("set close-range DW1000 TX power: {error:?}"))?;
+    }
     spi.set_speed(config.run_spi_hz)?;
     let device_id = radio
         .read_device_id()
@@ -310,18 +332,24 @@ pub fn open_and_initialize(config: &HardwareConfig, index: NodeIndex) -> Result<
     })
 }
 
-fn radio_config(index: NodeIndex) -> RadioConfig {
+fn radio_config(address: NodeAddress, profile: PhyProfile) -> RadioConfig {
     let identity = DeviceIdentity::new(
-        PanId::new(BENCH_PAN_ID),
-        ShortAddress::new(short_address_for(index)),
-        Eui64::new(eui_for(index)),
+        PanId::new(mission10_uwb_protocol::air::PAN_ID),
+        ShortAddress::new(short_address_for(address)),
+        Eui64::new(eui_for(address)),
     );
+    let (data_rate, preamble_length) = match profile {
+        PhyProfile::Operational | PhyProfile::CloseRangeDiagnostic => {
+            (DataRate::Mbps6800, PreambleLength::Symbols128)
+        }
+        PhyProfile::RobustDiagnostic => (DataRate::Kbps110, PreambleLength::Symbols2048),
+    };
     RadioConfig {
         address: AddressConfig { identity },
         phy: PhyConfig {
-            data_rate: DataRate::Mbps6800,
+            data_rate,
             pulse_frequency: PulseFrequency::Mhz64,
-            preamble_length: PreambleLength::Symbols128,
+            preamble_length,
             channel: Channel::Channel5,
             preamble_code: Some(PreambleCode::Code10),
             smart_power: false,
@@ -365,13 +393,33 @@ mod tests {
     }
 
     #[test]
-    fn radio_config_matches_the_dwm3001_bench_phy() {
-        let config = radio_config(NodeIndex::new(0).unwrap());
+    fn radio_config_matches_the_dwm3001_native_phy() {
+        let config = radio_config(NodeAddress::new(0).unwrap(), PhyProfile::Operational);
         assert_eq!(config.phy.channel, Channel::Channel5);
         assert_eq!(config.phy.data_rate, DataRate::Mbps6800);
         assert_eq!(config.phy.pulse_frequency, PulseFrequency::Mhz64);
         assert_eq!(config.phy.preamble_length, PreambleLength::Symbols128);
         assert_eq!(config.phy.preamble_code, Some(PreambleCode::Code10));
         assert!(!config.receiver_auto_reenable);
+    }
+
+    #[test]
+    fn robust_diagnostic_phy_trades_airtime_for_link_margin() {
+        let config = radio_config(NodeAddress::new(0).unwrap(), PhyProfile::RobustDiagnostic);
+        assert_eq!(config.phy.channel, Channel::Channel5);
+        assert_eq!(config.phy.data_rate, DataRate::Kbps110);
+        assert_eq!(config.phy.pulse_frequency, PulseFrequency::Mhz64);
+        assert_eq!(config.phy.preamble_length, PreambleLength::Symbols2048);
+        assert_eq!(config.phy.preamble_code, Some(PreambleCode::Code10));
+    }
+
+    #[test]
+    fn close_range_profile_preserves_the_operational_phy() {
+        let operational = radio_config(NodeAddress::new(0).unwrap(), PhyProfile::Operational);
+        let close_range = radio_config(
+            NodeAddress::new(0).unwrap(),
+            PhyProfile::CloseRangeDiagnostic,
+        );
+        assert_eq!(close_range.phy, operational.phy);
     }
 }

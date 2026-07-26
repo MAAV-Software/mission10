@@ -11,8 +11,9 @@ use dw1000_rs::protocol::{
 };
 use dw1000_rs::ranging::AsyncRangingRadio;
 use dw1000_rs::{
-    DeviceIdentity, DwTime, Error, Eui64, PanId, RangingConfig, RangingEvent, RangingNode, Role,
-    RxFrame, RxOptions, ShortAddress, SignalMetrics, SysStatus, Timestamps, TxOptions,
+    DelayedTransmit, DeviceIdentity, DwTime, DxTimeDeadline, Error, Eui64, OnAirTimestamp, PanId,
+    RangingConfig, RangingEvent, RangingNode, Role, RxFrame, RxOptions, ShortAddress,
+    SignalMetrics, SysStatus, Timestamps, TxOptions,
 };
 use futures::executor::block_on;
 
@@ -85,11 +86,31 @@ impl AsyncRangingRadio<MockError, MockError> for MockRadio {
         Ok(self.next_timestamps.pop_front().unwrap())
     }
 
-    async fn compute_delayed_time(
+    async fn schedule_delayed_transmit(
         &mut self,
         _delay: DwTime,
-    ) -> Result<DwTime, Error<MockError, MockError>> {
-        Ok(self.delayed_times.pop_front().unwrap())
+    ) -> Result<DelayedTransmit, Error<MockError, MockError>> {
+        let timestamp = self.delayed_times.pop_front().unwrap();
+        Ok(DelayedTransmit::new(
+            DxTimeDeadline::new(timestamp),
+            OnAirTimestamp::new(timestamp),
+        ))
+    }
+
+    async fn transmit_at(
+        &mut self,
+        frame: &[u8],
+        schedule: DelayedTransmit,
+        wait_for_response: bool,
+    ) -> Result<(), Error<MockError, MockError>> {
+        self.transmitted.push((
+            frame.to_vec(),
+            TxOptions {
+                delayed_time: Some(schedule.timestamp().value()),
+                wait_for_response,
+            },
+        ));
+        Ok(())
     }
 }
 

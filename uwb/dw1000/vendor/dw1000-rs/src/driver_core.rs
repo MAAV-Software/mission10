@@ -6,26 +6,23 @@ use crate::config::{
     ConfigError, DataRate, PacSize, PreambleCode, PreambleLength, PulseFrequency, RadioConfig,
     ValidatedPhyConfig,
 };
-use crate::device::{AntennaDelay, DeviceIdentity, SysStatus};
+use crate::device::{
+    AntennaDelay, DelayedTransmit, DeviceIdentity, DxTimeDeadline, OnAirTimestamp, SysStatus,
+};
 use crate::error::RxError;
 use crate::registers::status;
 use crate::registers::{
     Register, DIS_DRXB_BIT, DIS_STXP_BIT, DWSFD_BIT, HIRQ_POL_BIT, LEN_RX_FINFO, LEN_SYS_MASK,
-    MLDEERR_BIT, MRXDFR_BIT, MRXFCE_BIT, MRXFCG_BIT, MRXFSL_BIT, MRXPHE_BIT, MTXFRS_BIT,
-    NO_SUBADDRESS, RNSSFD_BIT, RXAUTR_BIT, RXDLYS_BIT, RXENAB_BIT, RXM110K_BIT, SFCST_BIT,
-    SYS_MASK_BIT3, TNSSFD_BIT, TRXOFF_BIT, TXDLYS_BIT, TXSTRT_BIT, WAIT4RESP_BIT,
+    MAFFREJ_BIT, MLDEERR_BIT, MRXDFR_BIT, MRXFCE_BIT, MRXFCG_BIT, MRXFSL_BIT, MRXOVRR_BIT,
+    MRXPHE_BIT, MRXPTO_BIT, MRXRFTO_BIT, MRXSFDTO_BIT, MTXFRS_BIT, NO_SUBADDRESS, RNSSFD_BIT,
+    RXAUTR_BIT, RXDLYS_BIT, RXENAB_BIT, RXM110K_BIT, SFCST_BIT, TNSSFD_BIT, TRXOFF_BIT, TXDLYS_BIT,
+    TXSTRT_BIT, WAIT4RESP_BIT,
 };
 use crate::time::{DwTime, DISTANCE_PER_TICK_M};
 
 pub(crate) const LEN_UWB_FRAMES: usize = 127;
 
-const RECEIVE_RESTART_EVENTS: u64 = status::RX_FRAME_READY.0
-    | status::RX_FRAME_GOOD.0
-    | status::RX_FRAME_CHECK_ERROR.0
-    | status::RX_REED_SOLOMON_ERROR.0
-    | status::RX_TIMEOUT.0
-    | status::RX_HEADER_ERROR.0
-    | status::LDE_ERROR.0;
+const RECEIVE_RESTART_EVENTS: u64 = status::RX_TERMINAL_EVENTS.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClockMode {
@@ -119,13 +116,17 @@ impl DriverRuntime {
         len
     }
 
-    pub(crate) fn compute_delayed_time(&self, system_time: DwTime) -> DwTime {
-        let mut future = system_time;
-        let mut bytes = future.to_bytes();
+    pub(crate) fn delayed_deadline(&self, system_time: DwTime) -> DxTimeDeadline {
+        let mut bytes = system_time.to_bytes();
         bytes[0] = 0;
         bytes[1] &= 0xFE;
-        future = DwTime::from_bytes(&bytes);
-        future + DwTime::from_ticks(self.antenna_delay.raw() as i64)
+        DxTimeDeadline::new(DwTime::from_bytes(&bytes))
+    }
+
+    pub(crate) fn delayed_transmit(&self, system_time: DwTime) -> DelayedTransmit {
+        let deadline = self.delayed_deadline(system_time);
+        let timestamp = deadline.value() + DwTime::from_ticks(self.antenna_delay.raw() as i64);
+        DelayedTransmit::new(deadline, OnAirTimestamp::new(timestamp))
     }
 
     pub(crate) fn correct_receive_timestamp(
@@ -248,25 +249,20 @@ pub(crate) const fn cleared_interrupt_mask() -> [u8; LEN_SYS_MASK] {
     [0; LEN_SYS_MASK]
 }
 
-pub(crate) const fn receive_status_clear_mask() -> SysStatus {
-    SysStatus(
-        status::RX_FRAME_READY.0
-            | status::LDE_DONE.0
-            | status::LDE_ERROR.0
-            | status::RX_HEADER_ERROR.0
-            | status::RX_FRAME_CHECK_ERROR.0
-            | status::RX_FRAME_GOOD.0
-            | status::RX_REED_SOLOMON_ERROR.0
-            | status::RX_TIMEOUT.0,
-    )
-}
-
 pub(crate) const fn transmit_status_clear_mask() -> SysStatus {
     SysStatus(
         status::TX_FRAME_BEGIN.0
             | status::TX_PREAMBLE_SENT.0
             | status::TX_HEADER_SENT.0
             | status::TX_FRAME_SENT.0,
+    )
+}
+
+pub(crate) const fn trx_status_clear_mask() -> SysStatus {
+    SysStatus(
+        status::AUTOMATIC_ACK_TRIGGER.0
+            | transmit_status_clear_mask().0
+            | status::RX_CLEAR_EVENTS.0,
     )
 }
 
@@ -361,8 +357,12 @@ pub(crate) fn compose_base_register_fields(
     set_bit(sys_mask, MRXFCG_BIT, true);
     set_bit(sys_mask, MRXFCE_BIT, true);
     set_bit(sys_mask, MRXFSL_BIT, true);
+    set_bit(sys_mask, MRXRFTO_BIT, true);
     set_bit(sys_mask, MLDEERR_BIT, true);
-    set_bit(sys_mask, SYS_MASK_BIT3, true);
+    set_bit(sys_mask, MRXOVRR_BIT, true);
+    set_bit(sys_mask, MRXPTO_BIT, true);
+    set_bit(sys_mask, MRXSFDTO_BIT, true);
+    set_bit(sys_mask, MAFFREJ_BIT, true);
 }
 
 pub(crate) fn compose_phy_register_fields(
@@ -433,6 +433,7 @@ pub(crate) struct TuningValues {
     pub(crate) drx_tune1b: u16,
     pub(crate) drx_tune2: u32,
     pub(crate) drx_tune4h: u16,
+    pub(crate) drx_sfd_timeout: u16,
     pub(crate) rf_rxctrlh: u8,
     pub(crate) rf_txctrl: u32,
     pub(crate) tc_pgdelay: u8,
@@ -485,6 +486,8 @@ pub(crate) fn select_tuning_values(phy: ValidatedPhyConfig) -> Result<TuningValu
         PreambleLength::Symbols64 => 0x0010u16,
         _ => 0x0028u16,
     };
+    let drx_sfd_timeout = preamble_symbols(phy.preamble_length) + sfd_symbols(phy.data_rate) + 1
+        - phy.pac_size as u16;
 
     let rf_rxctrlh = match phy.channel {
         crate::config::Channel::Channel4 | crate::config::Channel::Channel7 => 0xBC,
@@ -535,6 +538,7 @@ pub(crate) fn select_tuning_values(phy: ValidatedPhyConfig) -> Result<TuningValu
         drx_tune1b,
         drx_tune2,
         drx_tune4h,
+        drx_sfd_timeout,
         rf_rxctrlh,
         rf_txctrl,
         tc_pgdelay,
@@ -544,6 +548,27 @@ pub(crate) fn select_tuning_values(phy: ValidatedPhyConfig) -> Result<TuningValu
         lde_repc,
         tx_power,
     })
+}
+
+const fn preamble_symbols(preamble: PreambleLength) -> u16 {
+    match preamble {
+        PreambleLength::Symbols64 => 64,
+        PreambleLength::Symbols128 => 128,
+        PreambleLength::Symbols256 => 256,
+        PreambleLength::Symbols512 => 512,
+        PreambleLength::Symbols1024 => 1024,
+        PreambleLength::Symbols1536 => 1536,
+        PreambleLength::Symbols2048 => 2048,
+        PreambleLength::Symbols4096 => 4096,
+    }
+}
+
+const fn sfd_symbols(rate: DataRate) -> u16 {
+    match rate {
+        DataRate::Mbps6800 => 8,
+        DataRate::Kbps850 => 16,
+        DataRate::Kbps110 => 64,
+    }
 }
 
 pub(crate) fn build_header(register: Register, subaddress: u16, write: bool) -> [u8; 3] {
@@ -720,9 +745,13 @@ fn signed_bias(value: u8, index: usize, zero: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::DriverRuntime;
+    use super::{compose_base_register_fields, select_tuning_values, DriverRuntime};
     use crate::config::{OperatingMode, RadioConfig};
     use crate::device::{AntennaDelay, DeviceIdentity, Eui64, PanId, ShortAddress};
+    use crate::registers::{
+        status, MAAT_BIT, MAFFREJ_BIT, MLDEERR_BIT, MRXDFR_BIT, MRXFCE_BIT, MRXFCG_BIT, MRXFSL_BIT,
+        MRXOVRR_BIT, MRXPHE_BIT, MRXPTO_BIT, MRXRFTO_BIT, MRXSFDTO_BIT, MTXFRS_BIT,
+    };
     use crate::time::DwTime;
 
     fn identity() -> DeviceIdentity {
@@ -731,6 +760,35 @@ mod tests {
             ShortAddress::new(3344),
             Eui64::new([0x82, 0x17, 0x5B, 0xD5, 0xA9, 0x9A, 0xE2, 0x9C]),
         )
+    }
+
+    #[test]
+    fn every_enabled_interrupt_is_owned_by_tx_or_rx_service() {
+        let mut sys_cfg = [0; 4];
+        let mut sys_mask = [0; 4];
+        compose_base_register_fields(&mut sys_cfg, &mut sys_mask, true, false, false);
+
+        let enabled = u32::from_le_bytes(sys_mask);
+        let owned_bits = [
+            MTXFRS_BIT,
+            MRXPHE_BIT,
+            MRXDFR_BIT,
+            MRXFCG_BIT,
+            MRXFCE_BIT,
+            MRXFSL_BIT,
+            MRXRFTO_BIT,
+            MLDEERR_BIT,
+            MRXOVRR_BIT,
+            MRXPTO_BIT,
+            MRXSFDTO_BIT,
+            MAFFREJ_BIT,
+        ];
+        let owned = owned_bits
+            .into_iter()
+            .fold(0_u32, |mask, bit| mask | (1_u32 << bit));
+        assert_eq!(enabled & !owned, 0);
+        assert_eq!(enabled & (1_u32 << MAAT_BIT), 0);
+        assert_ne!(enabled & status::RX_TERMINAL_EVENTS.0 as u32, 0);
     }
 
     #[test]
@@ -770,5 +828,24 @@ mod tests {
         super::compose_led_blink_enable(&mut pmsc_ledc, 0x20);
         assert_eq!(pmsc_ledc[0], 0x20);
         assert_eq!(pmsc_ledc[1] & 0x01, 0x01);
+    }
+
+    #[test]
+    fn derives_sfd_timeout_from_preamble_sfd_and_pac() {
+        let operational = RadioConfig::from_mode(identity(), OperatingMode::ShortDataFastAccuracy);
+        assert_eq!(
+            select_tuning_values(operational.validated_phy().unwrap())
+                .unwrap()
+                .drx_sfd_timeout,
+            129
+        );
+
+        let robust = RadioConfig::from_mode(identity(), OperatingMode::LongDataRangeAccuracy);
+        assert_eq!(
+            select_tuning_values(robust.validated_phy().unwrap())
+                .unwrap()
+                .drx_sfd_timeout,
+            2049
+        );
     }
 }

@@ -9,7 +9,7 @@ use smoltcp::wire::{
     Ieee802154FrameVersion as FrameVersion, Ieee802154Pan as Pan, Ieee802154Repr as MacRepr,
 };
 
-use crate::{EgoState, TIMESTAMP_MASK};
+use crate::{Destination, EgoState, NodeAddress, TIMESTAMP_MASK};
 
 pub const AIR_PROTOCOL_VERSION: u8 = 1;
 pub const PAN_ID: u16 = 0x4d10;
@@ -60,8 +60,7 @@ const _: () = assert!(MAC_HEADER_SIZE + AIR_ENVELOPE_MAX_SIZE <= AIR_FRAME_MAX_N
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AirEncodeError {
-    InvalidSource,
-    InvalidDestination,
+    BroadcastRanging,
     InvalidTimestamp,
     Hubpack,
 }
@@ -75,6 +74,7 @@ pub enum AirDecodeError {
     Pan,
     Addressing,
     Destination,
+    BroadcastRanging,
     Hubpack,
     TrailingData,
     ProtocolVersion(u8),
@@ -95,23 +95,20 @@ impl EncodedAirFrame {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedAirFrame {
-    pub source: u16,
-    pub destination: u16,
+    pub source: NodeAddress,
+    pub destination: Destination,
     pub mac_sequence: u8,
     pub envelope: AirEnvelope,
 }
 
 pub fn encode(
-    source: u16,
-    destination: u16,
+    source: NodeAddress,
+    destination: Destination,
     mac_sequence: u8,
     envelope: &AirEnvelope,
 ) -> Result<EncodedAirFrame, AirEncodeError> {
-    if !is_unicast(source) {
-        return Err(AirEncodeError::InvalidSource);
-    }
-    if destination != BROADCAST_ADDRESS && !is_unicast(destination) {
-        return Err(AirEncodeError::InvalidDestination);
+    if destination == Destination::Broadcast {
+        return Err(AirEncodeError::BroadcastRanging);
     }
     if !timestamps_valid(&envelope.message) {
         return Err(AirEncodeError::InvalidTimestamp);
@@ -126,9 +123,9 @@ pub fn encode(
         pan_id_compression: true,
         frame_version: FrameVersion::Ieee802154_2006,
         dst_pan_id: Some(Pan(PAN_ID)),
-        dst_addr: Some(short_address(destination)),
+        dst_addr: Some(short_address(destination.get())),
         src_pan_id: None,
-        src_addr: Some(short_address(source)),
+        src_addr: Some(short_address(source.get())),
     };
     debug_assert_eq!(repr.buffer_len(), MAC_HEADER_SIZE);
 
@@ -147,7 +144,7 @@ pub fn encode(
     Ok(result)
 }
 
-pub fn decode(bytes: &[u8], local_address: u16) -> Result<DecodedAirFrame, AirDecodeError> {
+pub fn decode(bytes: &[u8], local_address: NodeAddress) -> Result<DecodedAirFrame, AirDecodeError> {
     let frame = MacFrame::new_checked(bytes).map_err(|_| AirDecodeError::Mac)?;
     let repr = MacRepr::parse(&frame).map_err(|_| AirDecodeError::Mac)?;
     if repr.frame_type != FrameType::Data {
@@ -162,14 +159,18 @@ pub fn decode(bytes: &[u8], local_address: u16) -> Result<DecodedAirFrame, AirDe
     if repr.dst_pan_id != Some(Pan(PAN_ID)) {
         return Err(AirDecodeError::Pan);
     }
-    let source = decode_short(repr.src_addr).ok_or(AirDecodeError::Addressing)?;
-    let destination = decode_short(repr.dst_addr).ok_or(AirDecodeError::Addressing)?;
-    if !is_unicast(source) {
-        return Err(AirDecodeError::Addressing);
-    }
-    if destination != local_address && destination != BROADCAST_ADDRESS {
+    let source = decode_short(repr.src_addr)
+        .and_then(NodeAddress::new)
+        .ok_or(AirDecodeError::Addressing)?;
+    let destination_raw = decode_short(repr.dst_addr).ok_or(AirDecodeError::Addressing)?;
+    if destination_raw != local_address.get() && destination_raw != BROADCAST_ADDRESS {
         return Err(AirDecodeError::Destination);
     }
+    if destination_raw == BROADCAST_ADDRESS {
+        return Err(AirDecodeError::BroadcastRanging);
+    }
+    let destination =
+        Destination::Node(NodeAddress::new(destination_raw).ok_or(AirDecodeError::Addressing)?);
     let mac_sequence = repr.sequence_number.ok_or(AirDecodeError::Addressing)?;
     let payload = frame.payload().ok_or(AirDecodeError::FrameType)?;
     let (envelope, rest) =
@@ -189,10 +190,6 @@ pub fn decode(bytes: &[u8], local_address: u16) -> Result<DecodedAirFrame, AirDe
         mac_sequence,
         envelope,
     })
-}
-
-const fn is_unicast(address: u16) -> bool {
-    address < 0xfffe
 }
 
 const fn short_address(address: u16) -> Address {
@@ -231,7 +228,13 @@ const fn timestamps_valid(message: &AirMessage) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
+
+    fn node(value: u16) -> NodeAddress {
+        NodeAddress::new(value).unwrap()
+    }
 
     fn state() -> EgoState {
         EgoState {
@@ -248,13 +251,13 @@ mod tests {
 
     fn round_trip(message: AirMessage) {
         let envelope = AirEnvelope::new(0x1234, message);
-        let encoded = encode(2, 4, 9, &envelope).unwrap();
-        let decoded = decode(encoded.bytes(), 4).unwrap();
+        let encoded = encode(node(2), Destination::Node(node(4)), 9, &envelope).unwrap();
+        let decoded = decode(encoded.bytes(), node(4)).unwrap();
         assert_eq!(
             decoded,
             DecodedAirFrame {
-                source: 2,
-                destination: 4,
+                source: node(2),
+                destination: Destination::Node(node(4)),
                 mac_sequence: 9,
                 envelope,
             }
@@ -280,18 +283,102 @@ mod tests {
         });
     }
 
+    fn golden_cases() -> [(&'static str, AirMessage); 4] {
+        [
+            ("poll", AirMessage::Poll { state: state() }),
+            (
+                "response",
+                AirMessage::Response {
+                    poll_rx: 0x01_0203_0405,
+                    response_tx: 0x11_1213_1415,
+                    state: state(),
+                },
+            ),
+            (
+                "final",
+                AirMessage::Final {
+                    poll_tx: 0x01_0203_0405,
+                    response_rx: 0x11_1213_1415,
+                    final_tx: 0x21_2223_2425,
+                },
+            ),
+            (
+                "report",
+                AirMessage::Report {
+                    final_rx: 0x31_3233_3435,
+                    status: 0x1234,
+                },
+            ),
+        ]
+    }
+
+    fn golden_frames() -> String {
+        let mut rendered = String::new();
+        for (sequence, (name, message)) in golden_cases().into_iter().enumerate() {
+            let frame = encode(
+                node(2),
+                Destination::Node(node(4)),
+                sequence as u8,
+                &AirEnvelope::new(0x5678, message),
+            )
+            .unwrap();
+            write!(rendered, "{name}=").unwrap();
+            for byte in frame.bytes() {
+                write!(rendered, "{byte:02x}").unwrap();
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    #[test]
+    fn every_air_message_matches_committed_golden_bytes() {
+        let rendered = golden_frames();
+        if std::env::var_os("PRINT_AIR_GOLDEN").is_some() {
+            println!("{rendered}");
+            return;
+        }
+        assert_eq!(rendered, include_str!("../testdata/air_protocol_v1.frames"));
+    }
+
+    #[test]
+    fn committed_air_golden_bytes_decode_independently() {
+        for (sequence, ((expected_name, expected_message), line)) in golden_cases()
+            .into_iter()
+            .zip(include_str!("../testdata/air_protocol_v1.frames").lines())
+            .enumerate()
+        {
+            let (name, encoded) = line.split_once('=').unwrap();
+            assert_eq!(name, expected_name);
+            let bytes = encoded
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digits = core::str::from_utf8(pair).unwrap();
+                    u8::from_str_radix(digits, 16).unwrap()
+                })
+                .collect::<Vec<_>>();
+            let decoded = decode(&bytes, node(4)).unwrap();
+            assert_eq!(decoded.source, node(2));
+            assert_eq!(decoded.destination, Destination::Node(node(4)));
+            assert_eq!(decoded.mac_sequence, sequence as u8);
+            assert_eq!(decoded.envelope.exchange_id, 0x5678);
+            assert_eq!(decoded.envelope.message, expected_message);
+        }
+    }
+
     #[test]
     fn mac_header_is_short_addressed_compressed_2006_data() {
         let frame = encode(
-            0x1234,
-            0x5678,
+            node(0x8000),
+            Destination::Node(node(0x8001)),
             0x9a,
             &AirEnvelope::new(7, AirMessage::Poll { state: state() }),
         )
         .unwrap();
         assert_eq!(
             &frame.bytes()[..9],
-            &[0x41, 0x98, 0x9a, 0x10, 0x4d, 0x78, 0x56, 0x34, 0x12]
+            &[0x41, 0x98, 0x9a, 0x10, 0x4d, 0x01, 0x80, 0x00, 0x80]
         );
     }
 
@@ -304,12 +391,15 @@ mod tests {
                 status: 0,
             },
         );
-        let frame = encode(1, 2, 3, &envelope).unwrap();
-        assert_eq!(decode(frame.bytes(), 4), Err(AirDecodeError::Destination));
+        let frame = encode(node(1), Destination::Node(node(2)), 3, &envelope).unwrap();
+        assert_eq!(
+            decode(frame.bytes(), node(4)),
+            Err(AirDecodeError::Destination)
+        );
         assert_eq!(
             encode(
-                1,
-                2,
+                node(1),
+                Destination::Node(node(2)),
                 3,
                 &AirEnvelope::new(
                     0,
@@ -321,6 +411,38 @@ mod tests {
             ),
             Err(AirEncodeError::InvalidTimestamp)
         );
+        assert_eq!(
+            encode(node(1), Destination::Broadcast, 3, &envelope),
+            Err(AirEncodeError::BroadcastRanging)
+        );
+    }
+
+    #[test]
+    fn every_ranging_message_rejects_broadcast_destination() {
+        for message in golden_cases().map(|(_, message)| message) {
+            assert_eq!(
+                encode(
+                    node(1),
+                    Destination::Broadcast,
+                    3,
+                    &AirEnvelope::new(0, message),
+                ),
+                Err(AirEncodeError::BroadcastRanging)
+            );
+
+            let mut frame = encode(
+                node(1),
+                Destination::Node(node(2)),
+                3,
+                &AirEnvelope::new(0, message),
+            )
+            .unwrap();
+            frame.bytes[5..7].copy_from_slice(&BROADCAST_ADDRESS.to_le_bytes());
+            assert_eq!(
+                decode(frame.bytes(), node(2)),
+                Err(AirDecodeError::BroadcastRanging)
+            );
+        }
     }
 
     #[test]
@@ -332,16 +454,16 @@ mod tests {
                 status: 0,
             },
         );
-        let frame = encode(1, 2, 3, &envelope).unwrap();
+        let frame = encode(node(1), Destination::Node(node(2)), 3, &envelope).unwrap();
 
         let mut wrong_pan = frame;
         wrong_pan.bytes[4] ^= 1;
-        assert_eq!(decode(wrong_pan.bytes(), 2), Err(AirDecodeError::Pan));
+        assert_eq!(decode(wrong_pan.bytes(), node(2)), Err(AirDecodeError::Pan));
 
         let mut wrong_version = frame;
         wrong_version.bytes[MAC_HEADER_SIZE] = AIR_PROTOCOL_VERSION + 1;
         assert_eq!(
-            decode(wrong_version.bytes(), 2),
+            decode(wrong_version.bytes(), node(2)),
             Err(AirDecodeError::ProtocolVersion(AIR_PROTOCOL_VERSION + 1))
         );
 
@@ -349,7 +471,7 @@ mod tests {
         trailing.bytes[trailing.length] = 0xaa;
         trailing.length += 1;
         assert_eq!(
-            decode(trailing.bytes(), 2),
+            decode(trailing.bytes(), node(2)),
             Err(AirDecodeError::TrailingData)
         );
     }

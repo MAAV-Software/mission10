@@ -11,7 +11,7 @@ import zlib
 from collections.abc import Iterator
 from typing import BinaryIO
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 MAX_PEERS = 3
 MAX_FRAME_SIZE = 64
 EGO_STATE_FORMAT = "<QIhhh3i3hBH"
@@ -30,10 +30,6 @@ DIAGNOSTIC_NAMES = (
     "rx_frame_filtering_rejection",
     "spi",
     "frame_decode",
-    "short_poll",
-    "short_poll_ack",
-    "short_range",
-    "short_range_report",
     "invalid_distance",
     "delayed_send_too_late",
     "delayed_send_power_up_warning",
@@ -48,6 +44,10 @@ DIAGNOSTIC_NAMES = (
     "radio_reset",
     "watchdog_reset",
 )
+
+
+def is_node_address(address: int) -> bool:
+    return 0 <= address <= 4 or 0x8000 <= address <= 0x80FF
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,12 +69,12 @@ class RadioConfiguration:
     peers: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        if not 0 <= self.node_address < 0xFFFE:
-            raise ValueError("node address is reserved")
+        if not is_node_address(self.node_address):
+            raise ValueError("node address is outside the Mission 10 namespaces")
         if len(self.peers) > MAX_PEERS:
             raise ValueError(f"at most {MAX_PEERS} peers are supported")
-        if any(not 0 <= peer < 0xFFFE for peer in self.peers):
-            raise ValueError("peer address is reserved")
+        if any(not is_node_address(peer) for peer in self.peers):
+            raise ValueError("peer address is outside the Mission 10 namespaces")
         if self.node_address in self.peers or len(set(self.peers)) != len(self.peers):
             raise ValueError("peers must be unique and distinct from the node")
 
@@ -285,8 +285,10 @@ def frames(stream: BinaryIO) -> Iterator[bytes]:
 
 def _address(value: str) -> int:
     address = int(value, 0)
-    if not 0 <= address <= 0xFFFF:
-        raise argparse.ArgumentTypeError("address must fit in 16 bits")
+    if not is_node_address(address):
+        raise argparse.ArgumentTypeError(
+            "address must be aircraft 0..4 or development 0x8000..0x80ff"
+        )
     return address
 
 

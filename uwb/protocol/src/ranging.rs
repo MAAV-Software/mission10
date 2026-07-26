@@ -1,9 +1,23 @@
 pub const TIMESTAMP_MASK: u64 = (1_u64 << 40) - 1;
 pub const DTU_PER_US: u64 = 63_897;
 pub const DTU_METRES: f64 = 0.004_691_763_978_615_9;
+pub const MAX_SCHEDULED_TX_ERROR_DTU: u64 = 512;
+/// Give the initiator time to re-arm RX after it transmits Final.
+pub const REPORT_TURNAROUND_US: u32 = 2_000;
 
 pub const fn wrapping_delta(later: u64, earlier: u64) -> u64 {
     later.wrapping_sub(earlier) & TIMESTAMP_MASK
+}
+
+pub const fn scheduled_tx_matches(expected: u64, actual: u64) -> bool {
+    let forward = wrapping_delta(actual, expected);
+    let backward = wrapping_delta(expected, actual);
+    let error = if forward < backward {
+        forward
+    } else {
+        backward
+    };
+    error <= MAX_SCHEDULED_TX_ERROR_DTU
 }
 
 /// Round a delayed-transmit timestamp to the resolution required by DX_TIME.
@@ -50,6 +64,14 @@ mod tests {
         let scheduled = delayed_tx_time(TIMESTAMP_MASK - 1_000, 2_000);
         assert_eq!(scheduled & 0x1ff, 0);
         assert!(scheduled <= TIMESTAMP_MASK);
+    }
+
+    #[test]
+    fn scheduled_transmit_tolerance_handles_boundaries_and_wraparound() {
+        assert!(scheduled_tx_matches(1_000, 1_512));
+        assert!(!scheduled_tx_matches(1_000, 1_513));
+        assert!(scheduled_tx_matches(TIMESTAMP_MASK - 10, 9));
+        assert!(!scheduled_tx_matches(TIMESTAMP_MASK - 10, 1_000));
     }
 
     #[test]

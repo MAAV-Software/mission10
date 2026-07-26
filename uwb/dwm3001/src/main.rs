@@ -1,11 +1,6 @@
 #![no_std]
 #![no_main]
 
-#[cfg(not(feature = "dw1000-bench"))]
-compile_error!(
-    "the native DWM3001 peer FSM is intentionally gated until the second board is available"
-);
-
 mod board;
 mod host;
 mod ranging;
