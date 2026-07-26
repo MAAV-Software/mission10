@@ -1,0 +1,435 @@
+"""ROS rim for the mission engine: subscriptions in, setpoints out.
+
+The rim owns transport and nothing else. It samples flight state, joins
+detections to the pose at their image stamp, ticks `MissionEngine`, and
+publishes the setpoint the engine returns. Every decision — phase changes,
+aborts, dip policy, coverage — belongs to the pure core.
+
+Operator gates follow the survey mission's shape, so one publish drives
+either node:
+
+    /start_mission   arm and climb to the survey altitude (base controller)
+    /begin_survey    freeze the anchor and run the engine (also /begin_orbit)
+    /end_mission     abandon the remaining lanes and egress
+    /abort_mission   AUTO.LAND in place, now (base controller)
+
+Two guards run here because they need sensors the core does not model, and
+both trace to the 2026-07-24 wall encounters
+(`reference/flight_bags/analyses/20260725_drone4_wall_impacts/REPORT.md`):
+
+  - the tag anchor (`core/anchor.py`), which measures flight-layer drift
+    against re-observed ground tags and aborts on sustained disagreement;
+  - the horizontal fence and mission timeout, which the core applies to both
+    the estimate and the command (`MissionConfig`).
+
+The anchor runs open-loop in this version: it measures, reports, and aborts,
+and it never corrects the EKF. Feeding the anchor to EKF2 as external vision
+is the next rung and is gated on the open-loop characterisation this node
+produces (`doc/rfd-vio-to-ev.md`, `doc/measurement-ownership.md`).
+"""
+from __future__ import annotations
+
+import json
+import math
+import socket
+import time
+from pathlib import Path
+
+import rclpy
+from rclpy.executors import ExternalShutdownException
+from std_msgs.msg import Bool
+from vision_msgs.msg import Detection2DArray
+
+from px4_msgs.msg import DistanceSensor, VehicleAttitude, VehicleLocalPosition
+from px4_offboard.controller import ACTIVE, OffboardController
+
+from mission_engine.core.anchor import (
+    AnchorConfig,
+    CorrectionConfig,
+    SetpointCorrection,
+    TagAnchorMap,
+)
+from mission_engine.core.config import CameraModel
+from mission_engine.core.dumpproto import build_payload, encode_frame
+from mission_engine.core.ingest import PoseHistory, PoseSnapshot, make_observation
+from mission_engine.core.mission import (
+    ABORT,
+    DONE,
+    DUMP,
+    LAND,
+    MissionConfig,
+    MissionEngine,
+)
+
+TAG_PREFIX = "tag36h11:"
+
+
+class EngineNode(OffboardController):
+    """Streams `MissionEngine` setpoints and feeds it detections."""
+
+    def __init__(self) -> None:
+        super().__init__("mission_engine")
+
+        # field geometry, relative to the frozen post-climb anchor
+        self.declare_parameter("lane_length_m", 10.0)
+        self.declare_parameter("n_lanes", 3)
+        self.declare_parameter("lane_spacing_m", 3.0)
+        self.declare_parameter("lane_heading_deg", 180.0)  # cardinal south
+        self.declare_parameter("lanes_offset_ne", [0.0, -3.0])
+        self.declare_parameter("survey_alt_m", 4.0)
+        self.declare_parameter("lane_speed_mps", 1.0)
+        # envelope
+        self.declare_parameter("fence_radius_m", 12.0)
+        self.declare_parameter("mission_timeout_s", 300.0)
+        self.declare_parameter("max_dips", 0)
+        self.declare_parameter("detector_silence_s", 0.0)  # 0 disables the guard
+        # camera
+        self.declare_parameter("detections_topic", "/detections/down")
+        self.declare_parameter("camera_fx_px", 1298.69385194)
+        self.declare_parameter("camera_width_px", 1640)
+        self.declare_parameter("camera_height_px", 1232)
+        self.declare_parameter("camera_roll_deg", 0.0)
+        self.declare_parameter("camera_tilt_deg", 0.0)
+        # anchor guard
+        self.declare_parameter("anchor_gate_m", 1.5)
+        self.declare_parameter("anchor_persist_s", 1.0)
+        self.declare_parameter("anchor_max_radial_m", 3.0)
+        self.declare_parameter("anchor_aborts", True)
+        # anchor correction. Off by default: this moves the airframe, so a
+        # flight enables it only after an open-loop flight has characterised
+        # the anchor on the day's tag layout.
+        self.declare_parameter("anchor_corrects", False)
+        self.declare_parameter("anchor_correction_rate_mps", 0.30)
+        self.declare_parameter("anchor_correction_max_m", 5.0)
+        # dump
+        self.declare_parameter("drone_id", "drone4")
+        self.declare_parameter("mission_id", "")
+        self.declare_parameter("dump_dir", "/tmp")
+        self.declare_parameter("dump_host", "")
+        self.declare_parameter("dump_port", 5010)
+
+        # The base controller defaults `wait_for_start` to False, which arms
+        # and climbs the moment the node starts. This node is gated on
+        # /start_mission by design, so it holds the gate closed whatever the
+        # parameter says: a missing line in a parameter file must not be able
+        # to launch an aircraft.
+        if not self.wait_for_start:
+            self.get_logger().warn(
+                "wait_for_start was false; the engine gates on /start_mission "
+                "regardless and will not arm until it is published"
+            )
+            self.wait_for_start = True
+            self._start_ok = False
+
+        p = self.get_parameter
+        self.cam = self._camera_model()
+        self.camera_roll = math.radians(float(p("camera_roll_deg").value))
+        self.detections_topic = str(p("detections_topic").value)
+        self.anchor_aborts = bool(p("anchor_aborts").value)
+        self.drone_id = str(p("drone_id").value)
+        self.mission_id = str(p("mission_id").value) or time.strftime("%Y%m%d_%H%M%S")
+        self.dump_dir = Path(str(p("dump_dir").value))
+
+        self.anchor = TagAnchorMap(
+            AnchorConfig(
+                gate_m=float(p("anchor_gate_m").value),
+                gate_persist_s=float(p("anchor_persist_s").value),
+                max_radial_m=float(p("anchor_max_radial_m").value),
+                max_agl_m=float(p("survey_alt_m").value) + 2.0,
+            )
+        )
+        self.anchor_corrects = bool(p("anchor_corrects").value)
+        self.correction = SetpointCorrection(
+            CorrectionConfig(
+                max_rate_mps=float(p("anchor_correction_rate_mps").value),
+                max_correction_m=float(p("anchor_correction_max_m").value),
+            )
+        )
+        self.poses = PoseHistory(horizon_s=5.0)
+        self.engine: MissionEngine | None = None
+        self.q = (1.0, 0.0, 0.0, 0.0)
+        self._agl = None
+        self._agl_t = 0.0
+        self._anchor_ne = None
+        self._begun = False
+        self._dumped = False
+        self._land_requested = False
+        self._last_phase = ""
+
+        self.create_subscription(
+            Detection2DArray, self.detections_topic, self._detections_cb, 10
+        )
+        self.create_subscription(
+            DistanceSensor, self._topic("out/distance_sensor"), self._dist_cb, 10
+        )
+        self.create_subscription(Bool, "begin_survey", self._begin_cb, 10)
+        self.create_subscription(Bool, "begin_orbit", self._begin_cb, 10)
+
+        self.get_logger().info(
+            f"mission_engine rim up: detections={self.detections_topic} "
+            f"fence={p('fence_radius_m').value} m "
+            f"anchor_gate={p('anchor_gate_m').value} m "
+            f"anchor_aborts={self.anchor_aborts}"
+        )
+
+    # ------------------------------------------------------------ config
+
+    def _camera_model(self) -> CameraModel:
+        width = int(self.get_parameter("camera_width_px").value)
+        fx = float(self.get_parameter("camera_fx_px").value)
+        return CameraModel(
+            width_px=width,
+            height_px=int(self.get_parameter("camera_height_px").value),
+            hfov_deg=math.degrees(2.0 * math.atan(0.5 * width / fx)),
+            tilt_deg=float(self.get_parameter("camera_tilt_deg").value),
+        )
+
+    def _mission_config(self) -> MissionConfig:
+        p = self.get_parameter
+        offset = [float(v) for v in p("lanes_offset_ne").value]
+        anchor = self._anchor_ne
+        return MissionConfig(
+            lanes_origin=(anchor[0] + offset[0], anchor[1] + offset[1]),
+            lane_length=float(p("lane_length_m").value),
+            n_lanes=int(p("n_lanes").value),
+            lane_spacing=float(p("lane_spacing_m").value),
+            lane_heading_deg=float(p("lane_heading_deg").value),
+            survey_alt_m=float(p("survey_alt_m").value),
+            lane_speed=float(p("lane_speed_mps").value),
+            egress_ne=(anchor[0], anchor[1]),
+            max_dips=int(p("max_dips").value),
+            detector_silence_s=float(p("detector_silence_s").value),
+            fence_radius_m=float(p("fence_radius_m").value),
+            mission_timeout_s=float(p("mission_timeout_s").value),
+        )
+
+    # ------------------------------------------------------------ inputs
+
+    def _att_cb(self, msg: VehicleAttitude) -> None:
+        super()._att_cb(msg)
+        q = [float(v) for v in msg.q]  # PX4 order w, x, y, z, body -> NED
+        if sum(v * v for v in q) > 0.25:
+            self.q = (q[0], q[1], q[2], q[3])
+
+    def _pos_cb(self, msg: VehicleLocalPosition) -> None:
+        super()._pos_cb(msg)
+        if bool(msg.dist_bottom_valid) and math.isfinite(msg.dist_bottom):
+            self._agl = float(msg.dist_bottom)
+            self._agl_t = self._now_us() * 1e-6
+        if self.engine is not None:
+            self.engine.note_reset_counter(int(msg.xy_reset_counter))
+        self._push_pose()
+
+    def _dist_cb(self, msg: DistanceSensor) -> None:
+        d = float(msg.current_distance)
+        if msg.min_distance <= d <= msg.max_distance:
+            # dToF measures along body -z; level it with the current attitude.
+            tilt = self._tilt_from_level()
+            self._agl = d * math.cos(tilt)
+            self._agl_t = self._now_us() * 1e-6
+
+    def _tilt_from_level(self) -> float:
+        """Angle between body -z and the local vertical, from the attitude."""
+        w, x, y, z = self.q
+        down_z = 1.0 - 2.0 * (x * x + y * y)  # body-down expressed in NED, z part
+        return math.acos(max(-1.0, min(1.0, down_z)))
+
+    def _agl_now(self) -> float:
+        """Metres above ground; falls back to the pad-relative altitude."""
+        now = self._now_us() * 1e-6
+        if self._agl is not None and now - self._agl_t < 1.0:
+            return self._agl
+        return max(0.0, -(self.z - self._launch_z))
+
+    def _push_pose(self) -> None:
+        t = self._now_us() * 1e-6
+        if not all(math.isfinite(v) for v in (self.x, self.y, self.z)):
+            return
+        snap = PoseSnapshot(
+            t=t,
+            pos=(float(self.x), float(self.y), float(self.z - self._launch_z)),
+            q=self.q,
+            agl=self._agl_now(),
+        )
+        try:
+            self.poses.append(snap)
+        except ValueError:
+            pass  # a clock step; the next sample re-establishes the buffer
+
+    def _unroll(self, u: float, v: float) -> tuple[float, float]:
+        """Undo the camera's roll about the optical axis. Rotating a pixel
+        about the principal point is exactly equivalent to rolling a pinhole
+        camera, so the shared `CameraModel` needs no mount-specific field."""
+        if self.camera_roll == 0.0:
+            return (u, v)
+        c, s = math.cos(-self.camera_roll), math.sin(-self.camera_roll)
+        du, dv = u - self.cam.cx, v - self.cam.cy
+        return (self.cam.cx + c * du - s * dv, self.cam.cy + s * du + c * dv)
+
+    def _detections_cb(self, msg: Detection2DArray) -> None:
+        t_img = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        snap = self.poses.nearest(t_img)
+        if snap is None:
+            return
+        if self.engine is not None:
+            self.engine.note_detector_alive(self._now_us() * 1e-6)
+        for det in msg.detections:
+            if not det.results:
+                continue
+            hyp = det.results[0].hypothesis
+            tag_id = str(det.id) if str(det.id).startswith(TAG_PREFIX) else None
+            pixel = self._unroll(float(det.bbox.center.position.x), float(det.bbox.center.position.y))
+            obs = make_observation(
+                self.cam,
+                snap,
+                t_img,
+                pixel,
+                float(hyp.score),
+                str(hyp.class_id),
+                tag_id=tag_id,
+            )
+            if obs is None:
+                continue
+            if self.engine is not None:
+                self.engine.log.ingest(obs)
+            if tag_id is not None:
+                self._observe_anchor(t_img, tag_id, obs.ground_local, snap)
+
+    def _observe_anchor(self, t_img, tag_id, fix, snap: PoseSnapshot) -> None:
+        # The fix is back-projected through the raw flight-layer position, so
+        # the anchor keeps measuring the true error even while the rim is
+        # compensating for it. Correcting a setpoint does not move EKF2.
+        nadir = (snap.pos[0], snap.pos[1])
+        self.anchor.observe(t_img, tag_id, fix, nadir, snap.agl or 0.0)
+        reason = self.anchor.disagreement(t_img)
+        if reason is None or self.engine is None:
+            return
+        if self.engine.phase in (ABORT, LAND, DONE):
+            return
+        if self.anchor_corrects:
+            # A drift being compensated is not a fault, so the guard moves to
+            # the drift the rim has declined to compensate.
+            if self.correction.saturated:
+                over = f"drift exceeds the {self.correction.cfg.max_correction_m:.1f} m correction limit: {reason}"
+                self.get_logger().error(f"ABORT: {over}")
+                self.engine.request_abort(over)
+            else:
+                self._log_throttled(f"correcting: {reason}")
+        elif self.anchor_aborts:
+            self.get_logger().error(f"ABORT: {reason}")
+            self.engine.request_abort(reason)
+        else:
+            self._log_throttled(f"anchor disagreement (guard disarmed): {reason}")
+
+    def _begin_cb(self, msg: Bool) -> None:
+        if not msg.data or self._begun:
+            return
+        if self.state != ACTIVE:
+            self.get_logger().warn("begin_survey before the climb finished; ignored.")
+            return
+        self._begun = True
+        self._anchor_ne = (float(self.x), float(self.y))
+        self.engine = MissionEngine(self._mission_config())
+        self.engine.start()
+        self.get_logger().info(
+            f"survey begun: anchor N {self._anchor_ne[0]:.2f} E {self._anchor_ne[1]:.2f}, "
+            f"{self.engine.cfg.n_lanes} lanes x {self.engine.cfg.lane_length:.1f} m "
+            f"at {self.engine.cfg.lane_heading_deg:.0f}°"
+        )
+
+    def on_return_home(self) -> None:
+        if self.engine is not None:
+            self.engine.request_abort("operator end_mission")
+
+    def on_active_start(self) -> None:
+        self.get_logger().info("climb complete; waiting for begin_survey.")
+
+    # ------------------------------------------------------------ output
+
+    def compute_setpoint(self):
+        if self.engine is None:
+            return None
+        t = self._now_us() * 1e-6
+        # The offset converts both ways around the tick. Correcting only the
+        # emitted setpoint would leave the engine reading a drifted position
+        # and steering against its own correction.
+        self.correction.update(t, self.anchor.drift(t) if self.anchor_corrects else None)
+        n, e = self.correction.to_plan((float(self.x), float(self.y)))
+        sp = self.engine.tick(t, (n, e, float(self.z - self._launch_z)))
+        self._on_phase(self.engine.phase)
+        if sp is None:
+            return None
+        out_n, out_e = self.correction.to_flight((sp.pos[0], sp.pos[1]))
+        if sp.vel is None:
+            return (out_n, out_e, sp.pos[2], sp.yaw)
+        return (out_n, out_e, sp.pos[2], sp.yaw, sp.vel[0], sp.vel[1], sp.vel[2])
+
+    def _on_phase(self, phase: str) -> None:
+        if phase != self._last_phase:
+            self._last_phase = phase
+            reason = self.engine.abort_reason
+            self.get_logger().info(
+                f"phase -> {phase}" + (f" ({reason})" if reason else "")
+            )
+        if phase == DUMP and not self._dumped:
+            self._dump()
+        if phase in (LAND, DONE) and not self._land_requested:
+            # PX4 owns the touchdown; the engine's LAND descent is the fake's.
+            self._land_requested = True
+            self.get_logger().info("engine reached LAND; handing off to NAV_LAND.")
+            self.request_land()
+
+    def _dump(self) -> None:
+        self._dumped = True
+        payload = build_payload(
+            self.engine.log,
+            drone_id=self.drone_id,
+            mission_id=self.mission_id,
+            t_takeoff=self.engine.t_takeoff or 0.0,
+            t_dump=self._now_us() * 1e-6,
+            coverage=self.engine.coverage_report(),
+            stats=dict(self.engine.stats(), anchor=self.anchor.report()),
+        )
+        path = self.dump_dir / f"minefield_{self.drone_id}_{self.mission_id}.json"
+        try:
+            path.write_text(json.dumps(payload, indent=2))
+            self.get_logger().info(f"dump written to {path}")
+        except OSError as exc:
+            self.get_logger().error(f"dump artifact not written: {exc}")
+        ok = self._send_dump(encode_frame(payload))
+        self.engine.notify_dump_result(ok)
+
+    def _send_dump(self, frame: bytes) -> bool:
+        """One connection, one frame, one ack (regroup dump protocol). With no
+        master configured the local artifact is the delivery."""
+        host = str(self.get_parameter("dump_host").value)
+        if not host:
+            return True
+        port = int(self.get_parameter("dump_port").value)
+        try:
+            with socket.create_connection((host, port), timeout=3.0) as sock:
+                sock.sendall(frame)
+                ack = sock.recv(16)
+            if ack.strip() == b"ok":
+                self.get_logger().info(f"dump acked by {host}:{port}")
+                return True
+            self.get_logger().warn(f"dump refused by {host}:{port}: {ack!r}")
+        except OSError as exc:
+            self.get_logger().warn(f"dump to {host}:{port} failed: {exc}")
+        return False
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = EngineNode()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()

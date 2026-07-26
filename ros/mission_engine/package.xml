@@ -7,6 +7,13 @@
   <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
   <license>MPL-2.0</license>
 
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>px4_msgs</exec_depend>
+  <exec_depend>px4_offboard</exec_depend>
+
   <export>
     <build_type>ament_python</build_type>
   </export>

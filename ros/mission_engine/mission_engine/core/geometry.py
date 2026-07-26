@@ -58,21 +58,33 @@ def serpentine(
     length: float,
     n_lanes: int,
     lane_spacing: float,
+    heading_rad: float = 0.0,
 ) -> List[Lane]:
-    """Boustrophedon lanes: run north-south along `length`, offset east by
-    `lane_spacing` per lane, direction alternating so lane ends adjoin.
-    `origin` is the south-west corner of the lane pattern."""
+    """Boustrophedon lanes: run along `heading_rad` for `length`, offset 90°
+    right of it by `lane_spacing` per lane, direction alternating so lane ends
+    adjoin. `origin` is the corner the first lane starts from. The default
+    heading runs the lanes north and steps them east."""
     if n_lanes < 1:
         raise ValueError(f"n_lanes must be >= 1, got {n_lanes}")
     if length <= 0.0 or lane_spacing <= 0.0:
         raise ValueError(f"length/lane_spacing must be positive, got {length}/{lane_spacing}")
+    fwd = (math.cos(heading_rad), math.sin(heading_rad))
+    right = (-fwd[1], fwd[0])  # 90° clockwise in NED; east when heading is north
     lanes: List[Lane] = []
     for i in range(n_lanes):
-        east = origin[1] + i * lane_spacing
+        base = (
+            origin[0] + i * lane_spacing * right[0],
+            origin[1] + i * lane_spacing * right[1],
+        )
         if i % 2 == 0:
-            lanes.append(Lane(index=i, start=(origin[0], east), heading=0.0, length=length))
+            lanes.append(Lane(index=i, start=base, heading=heading_rad, length=length))
         else:
             lanes.append(
-                Lane(index=i, start=(origin[0] + length, east), heading=math.pi, length=length)
+                Lane(
+                    index=i,
+                    start=(base[0] + length * fwd[0], base[1] + length * fwd[1]),
+                    heading=heading_rad + math.pi,
+                    length=length,
+                )
             )
     return lanes

@@ -43,6 +43,7 @@ class MissionConfig:
     lane_length: float = 20.0
     n_lanes: int = 3
     lane_spacing: float = 6.0
+    lane_heading_deg: float = 0.0  # 0 runs the lanes north and steps them east
     survey_alt_m: float = 6.0  # AGL, positive
     lane_speed: float = 2.0
     # transit / vertical
@@ -59,12 +60,24 @@ class MissionConfig:
     detector_silence_s: float = 5.0
     reset_storm_count: int = 3
     dump_retry_limit: int = 3
+    # Horizontal envelope around the sync point, applied to both the estimate
+    # and the commanded target; 0 disables. The estimate side catches an
+    # estimator runaway, the command side catches a schedule that leaves the
+    # configured field. Neither catches an estimate that is confidently wrong
+    # while the airframe is elsewhere — the tag anchor owns that class
+    # (core/anchor.py).
+    fence_radius_m: float = 0.0
+    # Wall clock from takeoff; 0 disables. A survey that cannot finish must
+    # come home rather than hold its setpoint indefinitely.
+    mission_timeout_s: float = 0.0
 
     def __post_init__(self) -> None:
         if self.survey_alt_m <= 0.0 or self.lane_speed <= 0.0:
             raise ValueError("survey_alt_m and lane_speed must be positive")
         if self.reach_tol_m <= 0.0 or self.track_gate_m < self.reach_tol_m:
             raise ValueError("need 0 < reach_tol_m <= track_gate_m")
+        if self.fence_radius_m < 0.0 or self.mission_timeout_s < 0.0:
+            raise ValueError("fence_radius_m and mission_timeout_s must not be negative")
 
 
 @dataclass
@@ -82,7 +95,11 @@ class MissionEngine:
         self.cfg = cfg
         self.log = log if log is not None else MineLog()
         self.lanes: List[Lane] = serpentine(
-            cfg.lanes_origin, cfg.lane_length, cfg.n_lanes, cfg.lane_spacing
+            cfg.lanes_origin,
+            cfg.lane_length,
+            cfg.n_lanes,
+            cfg.lane_spacing,
+            math.radians(cfg.lane_heading_deg),
         )
         self.phase = PREFLIGHT
         self.abort_reason: Optional[str] = None
@@ -121,6 +138,10 @@ class MissionEngine:
     def operator_abort(self) -> None:
         self._abort("operator")
 
+    def request_abort(self, reason: str) -> None:
+        """Abort from a guard the rim owns (tag anchor, link health)."""
+        self._abort(reason)
+
     def notify_dump_result(self, ok: bool) -> None:
         if self.phase != DUMP:
             return
@@ -142,7 +163,7 @@ class MissionEngine:
     def _alt_target(self) -> float:
         return -self.cfg.survey_alt_m  # NED
 
-    def _check_aborts(self, t: float) -> None:
+    def _check_aborts(self, t: float, pos: Vec3) -> None:
         if self.phase not in (TAKEOFF, LANE, VERIFY_DIP):
             return
         if (
@@ -152,6 +173,20 @@ class MissionEngine:
             self._abort(f"detector silent > {self.cfg.detector_silence_s} s")
         if self.ekf_resets_seen >= self.cfg.reset_storm_count:
             self._abort("EKF reset storm")
+        if self.cfg.mission_timeout_s > 0.0 and self.t_takeoff is not None:
+            elapsed = t - self.t_takeoff
+            if elapsed > self.cfg.mission_timeout_s:
+                self._abort(f"mission timeout at {elapsed:.0f} s")
+        r = self._fence_radius(pos[0], pos[1])
+        if r is not None:
+            self._abort(f"estimate {r:.1f} m outside the {self.cfg.fence_radius_m:.0f} m fence")
+
+    def _fence_radius(self, n: float, e: float) -> Optional[float]:
+        """Distance beyond the fence, or None while inside it."""
+        if self.cfg.fence_radius_m <= 0.0 or self._home_ne is None:
+            return None
+        r = math.hypot(n - self._home_ne[0], e - self._home_ne[1])
+        return r if r > self.cfg.fence_radius_m else None
 
     def _toward(self, pos: Vec3, target: Vec3, speed: float, dt: float) -> Setpoint:
         """Position setpoint stepped along the line to `target` — a smooth
@@ -176,9 +211,20 @@ class MissionEngine:
     # ------------------------------------------------------------ tick
 
     def tick(self, t: float, pos: Vec3) -> Optional[Setpoint]:
+        sp = self._tick(t, pos)
+        if sp is not None and self.phase in (TAKEOFF, LANE, VERIFY_DIP):
+            r = self._fence_radius(sp.pos[0], sp.pos[1])
+            if r is not None:
+                self._abort(
+                    f"command {r:.1f} m outside the {self.cfg.fence_radius_m:.0f} m fence"
+                )
+                return self._tick(t, pos)
+        return sp
+
+    def _tick(self, t: float, pos: Vec3) -> Optional[Setpoint]:
         dt = 0.0 if self._last_t is None else max(t - self._last_t, 0.0)
         self._last_t = t
-        self._check_aborts(t)
+        self._check_aborts(t, pos)
 
         if self.phase == PREFLIGHT:
             return None

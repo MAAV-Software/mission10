@@ -1,0 +1,66 @@
+# Mission engine for the REAL drone at M-Air. First flight of the tag anchor.
+#
+# The field geometry mirrors the proven survey config
+# (flight_intelligent/config/survey_mair_real.yaml): a centred 4 x 4 m
+# serpentine on the post-climb anchor, rotated to cardinal south. Its 2.83 m
+# corner radius leaves recovery room under the net.
+#
+# The anchor observes and does nothing else on this flight. It neither
+# corrects the setpoints nor aborts:
+#
+#   - The flight-1 replay measured the drift that EKF2 produced while it
+#     fused GNSS position (TAG_ANCHOR_REPLAY.md). This flight fuses GNSS
+#     velocity only, so the drift changes character and the measured gate
+#     and correction numbers do not transfer to it.
+#   - The shipped 1.5 m / 1.0 s gate trips 29 times on the flight-1 data. A
+#     gate that fires spuriously under the net is itself a hazard.
+#
+# Set the gate and enable the correction from data this flight records under
+# the fusion configuration that will actually fly.
+/**:
+  ros__parameters:
+    # base controller: real preflight, safety pilot on RC, and no motion until
+    # the operator publishes /start_mission
+    wait_for_start: true
+    force_arm: false
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20        # 1.0 s at 20 Hz; rfd-mission-execution 3
+    takeoff_altitude_m: 2.0
+    takeoff_acceptance_m: 0.25
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+
+    # field, relative to the frozen post-climb anchor
+    lane_length_m: 4.0
+    n_lanes: 3
+    lane_spacing_m: 2.0
+    lane_heading_deg: 180.0     # cardinal south, PX4 NED convention
+    lanes_offset_ne: [-2.0, -2.0]
+    survey_alt_m: 2.0
+    lane_speed_mps: 1.0
+
+    # guards the core applies to the estimate and the command
+    fence_radius_m: 6.0
+    mission_timeout_s: 300.0
+    max_dips: 0
+    detector_silence_s: 0.0     # 0 disables the guard
+
+    # the nadir detector, which the flight recorder runs on its own frames
+    detections_topic: /detections/down
+    camera_fx_px: 1298.69385194
+    camera_width_px: 1640
+    camera_height_px: 1232
+    camera_roll_deg: 0.0
+    camera_tilt_deg: 0.0
+
+    # the tag anchor: measure and report only
+    anchor_aborts: false
+    anchor_corrects: false
+    anchor_gate_m: 1.5
+    anchor_persist_s: 1.0
+    anchor_max_radial_m: 3.0
+    anchor_correction_rate_mps: 0.30
+    anchor_correction_max_m: 5.0
+
+    drone_id: drone4
+    dump_dir: /home/maav/recordings
