@@ -1,4 +1,5 @@
 import rclpy
+import queue
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from px4_msgs.msg import SensorGps
@@ -6,8 +7,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 
 class MissionNode(Node):
-    def __init__(self):
+    def __init__(self, mission_node_lock, mission_node_cv):
         super().__init__("mission_node")
+
+        self.mission_node_lock = mission_node_lock
+        self.mission_node_cv = mission_node_cv
+        self.timestamp_queue = queue.Queue
 
         self.start_publisher = self.create_publisher(
             Bool,
@@ -27,19 +32,23 @@ class MissionNode(Node):
             qos_profile
         )
 
-        self.gps_data = []
+        self.gps_data = {}
 
     def gps_callback(self, msg):
-        gps_point = {
-            "timestamp": msg.timestamp,
-            "latitude": msg.latitude_deg,
-            "longitude": msg.longitude_deg,
-            "altitude": msg.altitude_msl_m
-        }
+        with self.mission_node_lock:
+            gps_point = {
+                "timestamp": msg.timestamp,
+                "latitude": msg.latitude_deg,
+                "longitude": msg.longitude_deg,
+                "altitude": msg.altitude_msl_m
+            }
 
-        self.gps_data.append(gps_point)
+            self.gps_data[msg.timestamp] = gps_point
+            self.timestamp_queue.put(msg.timestamp)
 
-        print(gps_point)
+            print(gps_point)
+
+            self.mission_node_cv.notify()
 
     def start_mission(self):
         msg = Bool()

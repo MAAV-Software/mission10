@@ -4,7 +4,10 @@ import json
 import threading
 from pathlib import Path
 import time
-import subprocess
+import queue
+import math
+import numpy as np
+from pyproj import Transformer, CRS
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
@@ -21,8 +24,8 @@ class ManagerDrone:
 
         self.host = host
         self.port = port
-        self.coords = []
-        self.detected_mine_data = {}
+        self.mission_node = None
+        self.detected_mine_data = []
         self.exp_drones = {}
         self.drone_last_seen = {}
         self.finished_drones = 0
@@ -32,12 +35,160 @@ class ManagerDrone:
         self.mission_status = "pre-mission"
         self.next_action = "scout"
 
+        self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
+        self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
+
+        # self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6418", always_xy=True) 
+        # self.from_spcs = Transformer.from_crs("EPSG:6418", "EPSG:4326", always_xy=True)     # if we were in Huntsville, AL
+
+        self.mine_data_lock = threading.Lock()
+        self.mine_data_cv = threading.Condition()
+        self.receiving_cv = threading.Condition()
+        self.receiving_state = False
+
         with open(bounds_path, "r") as f:
             for line in f:
                 line_contents = line.strip().split()
                 self.bounds.append(( float(line_contents[0]), float(line_contents[1]) ))
 
+        self.camera_HFOV = 0
+        self.camera_VFOV = 0
+        self.base_altitude = 0
+
+        with open(Path(__file__).parent.parent / "constants/camera_specs.txt", "r") as f:
+            for line in f:
+                line_contents = line.strip().split()
+                self.camera_HFOV= float(line_contents[0])
+                self.cammera_VFOV = float(line_contents[1])
+                break
+        
+        with open(Path(__file__).parent.parent / "constants/altitude.txt", "r") as f:
+            for line in f:
+                line_contents = line.strip().split()
+                self.base_altitude = float(line_contents[0])
+                break
+
         self.run_drone()
+
+    def rotate_coords(self, pt_latitude, pt_longitude):
+
+        def convert_to_spcs(latlon, transformer):
+            x, y = transformer.transform(latlon[1], latlon[0])
+            return (x, y)
+
+        def convert_from_spcs(spcs, transformer):
+            lon, lat = transformer.transform(spcs[0], spcs[1])
+            return (lat, lon)
+
+        def rotate_point(pivot, point, theta):
+            dx = point[0] - pivot[0]
+            dy = point[1] - pivot[1]
+            x_rot = dx * math.cos(theta) - dy * math.sin(theta)
+            y_rot = dx * math.sin(theta) + dy * math.cos(theta)
+            return (x_rot + pivot[0], y_rot + pivot[1])
+
+        def calc_theta(tl, tr):
+            return math.atan2(tr[1] - tl[1], tr[0] - tl[0])
+
+        rand_latlon = []
+        rand_latlon.append(pt_latitude)
+        rand_latlon.append(pt_longitude)
+
+        tl = [self.bounds[0][0], self.bounds[0][1]]
+        tr = [self.bounds[1][0], self.bounds[1][1]]
+
+        #convert to SPCS coordinates
+        tl_spcs = convert_to_spcs(tl, self.to_spcs)
+        tr_spcs = convert_to_spcs(tr, self.to_spcs)
+
+        #calcu theta w top left and top right corners
+        theta = calc_theta(tl_spcs, tr_spcs)
+        # print("theta: ", math.degrees(theta), " degrees"
+
+        rand_spcs = convert_to_spcs(rand_latlon, self.to_spcs)
+
+        # print("orig point: ", rand_latlon)
+
+        #rotate by theta
+        rand_rotated = rotate_point(tl_spcs, rand_spcs, -1 * theta) # Use -1 to rotate against the over-rotation
+        rand_rotated_latlon = convert_from_spcs(rand_rotated, self.from_spcs)
+
+        return (rand_rotated_latlon[0], rand_rotated_latlon[1])
+
+    def get_mine_loc_in_img(self, timestamp):
+        if True:
+            # Will need to reference the timestamp to know which frame to look at
+            return (0.5, 0.5, 0.5, 0.5)
+        else:
+            return (-1, -1, -1, -1)
+
+    def find_mines(self):
+        # Initialize the camera interface
+
+        # Start the CV detection pipelien
+        while not self.shutdown_flag:
+            # If there are detections, append that to self.detected_mine_data
+
+            next_timestamp = 0
+            absolute_height = 0
+            pt_latitude = 0
+            pt_longitude = 0
+
+            with self.mine_data_cv:
+                while self.mission_node.timestamp_queue.qsize == 0:
+                    self.mine_data_cv.wait()
+
+
+            with self.receiving_cv:
+                while self.receiving_state:
+                    self.receiving_cv.wait()
+
+            with self.mine_data_lock:
+
+                next_timestamp = self.mission_node.timestamp_queue.get()
+                absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
+                pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
+                pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
+
+            # Get the location of the mines within the image (bounding box or smth I dunno)
+
+            mine_x_min, mine_x_max, mine_y_min, mine_y_max = self.get_mine_loc_in_img()
+
+            if mine_x_min == -1:
+                continue
+
+            pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
+
+            # Get the dimension of the camera frame
+            hor_rad = math.radians(self.camera_HFOV)
+            img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad) 
+            
+            vert_rad = math.radians(self.camera_VFOV)
+            img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad)
+
+            img_height_cm = (img_height_m) / 100 #convert to cm
+            img_width_cm = (img_width_m) / 100
+            
+            # mine_x_min, mine_y_min, mine_x_max, mine_y_max = (0.11155333116319445, 0.15966543579101564, 0.19914363606770832, 0.22527638753255208)
+            mine_x , mine_y = (mine_x_min + mine_x_max ) / 2, (mine_y_min + mine_y_max ) / 2
+            mine_x_relative = mine_x - 0.5
+            mine_y_relative = mine_y - 0.5
+            
+            scaled_x = mine_x_relative * img_width_cm
+            scaled_y = mine_y_relative * img_height_cm
+
+            #from 4/5 onwards
+            scaled_x_meters = scaled_x / 100 #convert to meters
+            scaled_y_meters = scaled_y / 100
+
+            change_in_lat = scaled_y_meters/111320 #find change in latitude from center to point
+            change_in_long = scaled_x_meters/(111320*np.cos(math.radians(pt_latitude)))
+
+            new_lat = change_in_lat + pt_latitude #calculate new lat/long
+            new_long = change_in_long + pt_longitude
+
+            with self.mine_data_lock:
+                self.detected_mine_data.append((new_lat, new_long))
 
 
     def tcp_server(self):
@@ -125,8 +276,6 @@ class ManagerDrone:
             self.handle_coordinates(message_dict)
         elif message_dict["message_type"] == "registration":
             self.handle_registration(message_dict)
-        elif message_dict["message_type"] == "finished":
-            self.handle_finished(message_dict)
         elif message_dict["message_type"] == "heartbeat":
             self.handle_heartbeat(message_dict)
         elif message_dict["message_type"] == "run_drones":
@@ -163,22 +312,24 @@ class ManagerDrone:
 	
         rclpy.init()
 
-        node = MissionNode()
+        node = MissionNode(self.mine_data_lock, self.mine_data_cv)
+        self.mission_node = node
 
-        try:
-            # Start the mission
-            node.start_mission()
+        while not self.shutdown_flag:
+            try:
+                # Start the mission
+                self.mission_node.start_mission()
 
-            # Continue processing GPS messages
-            rclpy.spin(node)
+                # Continue processing GPS messages
+                rclpy.spin(node)
 
-        except KeyboardInterrupt:
-            pass
+            except KeyboardInterrupt:
+                pass
 
-        finally:
-            print(f"Collected {len(node.gps_data)} GPS points")
-            node.destroy_node()
-            rclpy.shutdown()
+            finally:
+                print(f"Collected {len(node.gps_data)} GPS points")
+                node.destroy_node()
+                rclpy.shutdown()
 
         
 
@@ -192,15 +343,12 @@ class ManagerDrone:
 
     # adds one pair of coords
     def handle_coordinates(self, message_dict):
-        worker_host = message_dict["host"]
-        worker_port = message_dict["port"]
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((worker_host, worker_port)) 
-            self.coords.append(message_dict["coords"])
-            message = json.dumps({
-                "message_type": "coords_ack"
-            })
-            sock.sendall(message.encode('utf-8'))
+        with self.mine_data_lock:
+            worker_host = message_dict["host"]
+            worker_port = message_dict["port"]
+            drone_key = str(worker_host) + "_" + str(worker_port)
+            if drone_key in self.exp_drones:
+                self.detected_mine_data.append(message_dict["coords"])
     
     def handle_registration(self, message_dict):
         drone_host = message_dict["drone_host"]
@@ -241,12 +389,16 @@ class ManagerDrone:
         tcp_thread = threading.Thread(target=self.tcp_server)
         tcp_thread.start()
 
+        find_mines_thread = threading.Thread(target=self.find_mines)
+        find_mines_thread.start()
+
         tcp_thread.join()
         udp_thread.join()
+        find_mines_thread.join()
         
 
         with open(aggregate_path, "w") as f: # Write the coords into it
-            for coord in self.coords:
-                f.write(f"{coord[0]},{coord[1]}\n")
+            for coord in self.detected_mine_data:
+                f.write(f"{coord["latitude"]},{coord["longitude"]}\n")
     
             
