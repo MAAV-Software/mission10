@@ -11,13 +11,16 @@
     takeoff_timeout_s: 40.0
     status_stale_timeout_s: 5.0
     drone_count: 4
-    orbit_center_e_m: 0.0
-    orbit_center_n_m: 4.6
+    # The original open-world choreography used an east-west spawn line and a
+    # northward center offset. Rotate the whole geometry 90 degrees clockwise
+    # for M-Air's north-south line. This direction keeps every path clear of the
+    # world-origin exclusion zone used by the unnamed-pose truth splitter.
+    orbit_center_e_m: 4.6
+    orbit_center_n_m: 0.0
     orbit_radius_m: 4.6
     orbit_speed_mps: 2.0
-    orbit_revolutions: 10.0
     phase_step_deg: 90.0
-    phase0_deg: -90.0
+    phase0_deg: -180.0
     # Per-drone orbit speed modulation (see phased_orbit_setpoint). Offline-
     # optimized to lift the orbit min sep above the constant-speed floor on the
     # same circles. Zero amp = steady orbit. Both lists must be length drone_count.
@@ -25,6 +28,12 @@
     orbit_mod_phase_deg: [358.0, 204.0, 72.0, 254.0]
     insertion_spin_deg: 235.0
     to_center_time_s: 3.0
+    # Random-spawn SITL inserts a world-frame convergence onto the fixed 3 m
+    # launch line before this center transit. The launch file enables it and
+    # injects each slot; fixed-spawn and real-flight configs remain unchanged.
+    staging_enabled: false
+    staging_speed_mps: 2.0
+    staging_acceptance_m: 0.35
     spiral_time_s: 10.0
     # staggered peel-off return: drones curl into their centers one at a time
     # (order high->low by default), validated ~3.0 m min sep, smooth/no reversal.
@@ -35,14 +44,16 @@
     peel_order: ""
     orbit_auto_start: false
     yaw_mode: tangent
-    # Buffered Voronoi cell safety net (mechanism and radius sizing in _bvc_clip).
-    bvc_enabled: true
-    bvc_safety_radius_m: 0.75
-    bvc_lookahead_m: 0.3
-    # EKF global origin (MAAV field, drone-0 spawn); set once at link-up so
+    # Active horizontal deconfliction: the protected footprint is inflated per
+    # peer by localization uncertainty and closing-speed response distance.
+    orca_protected_radius_m: 1.25
+    orca_response_time_s: 0.6
+    orca_horizon_s: 5.0
+    orca_max_speed_mps: 3.0
+    # EKF global origin (M-Air pad); set once at link-up so
     # AUTO.RTL/Land and failsafes work with the local-only EV estimate. The launch
     # overrides this per drone with its own spawn LLA (home_gps + pose offset) so
     # global positions are physically true; these are the single-drone fallback.
-    origin_lat: 42.2658783
-    origin_lon: -83.7487304
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
     origin_alt: 0.0

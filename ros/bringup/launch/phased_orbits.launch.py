@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -26,6 +27,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
+    LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
     Shutdown,
@@ -95,8 +97,17 @@ def _setup(context, *args, **kwargs):
     publish_ev = LaunchConfiguration("publish_ev").perform(context)
     wait_for_start = LaunchConfiguration("wait_for_start").perform(context)
     mission_config = LaunchConfiguration("mission_config").perform(context)
-    world = LaunchConfiguration("world").perform(context)
+    mission_executable = LaunchConfiguration("mission_executable").perform(context).strip()
+    world_override = LaunchConfiguration("world").perform(context).strip()
     boot_timeout = float(LaunchConfiguration("boot_timeout_s").perform(context))
+    random_spawn = LaunchConfiguration("random_spawn").perform(context).lower() in (
+        "1", "true", "yes", "on")
+    spawn_seed_raw = LaunchConfiguration("spawn_seed").perform(context).strip()
+    spawn_seed = int(spawn_seed_raw) if spawn_seed_raw else None
+    effective_fleet = LaunchConfiguration("effective_fleet").perform(context).strip()
+    uwb_far_rate = float(LaunchConfiguration("uwb_far_rate_hz").perform(context))
+    uwb_near_rate = float(LaunchConfiguration("uwb_near_rate_hz").perform(context))
+    uwb_near_range = float(LaunchConfiguration("uwb_near_range_m").perform(context))
 
     config_file = LaunchConfiguration("fleet_config").perform(context).strip()
     if not config_file:
@@ -105,7 +116,8 @@ def _setup(context, *args, **kwargs):
         mission_config = os.path.join(
             get_package_share_directory("flight_intelligent"), "config", "phased_orbits.yaml")
 
-    fleet = load_fleet(config_file)
+    fleet = load_fleet(config_file, random_spawn=random_spawn, spawn_seed=spawn_seed)
+    world = world_override or fleet.get("world", "default")
     vehicles = fleet["vehicles"]
     home_gps = fleet.get("home_gps", {})
     if num > len(vehicles):
@@ -118,6 +130,8 @@ def _setup(context, *args, **kwargs):
             "px4_dir": px4_dir,
             "fleet_config": config_file,
             "world": world,
+            "random_spawn": str(random_spawn).lower(),
+            "spawn_seed": str(fleet.get("_random_spawn", {}).get("seed", "")),
         }.items(),
     )
 
@@ -128,6 +142,9 @@ def _setup(context, *args, **kwargs):
     # spawned at runtime. Bridge it once, split per drone into
     # ground_truth/odometry, then feed each gt_to_ev.
     spawn_xy = [tuple(float(v) for v in vehicles[i].get("pose", "0,0,0,0,0,0").split(",")[:2])
+                for i in range(num)]
+    stage_xy = [tuple(float(v) for v in vehicles[i].get(
+        "staging_pose", vehicles[i].get("pose", "0,0,0,0,0,0")).split(",")[:2])
                 for i in range(num)]
     ev_nodes.append(Node(
         package="ros_gz_bridge", executable="parameter_bridge", name="world_pose_bridge",
@@ -146,6 +163,7 @@ def _setup(context, *args, **kwargs):
     for i in range(num):
         namespace = namespaces[i]
         east, north = spawn_xy[i]
+        stage_east, stage_north = stage_xy[i]
         peers = [namespaces[j] for j in range(num) if j != i]
         ev_nodes.append(Node(
             package="sim_truth_ev", executable="gt_to_ev", name=f"gt_to_ev_{i}",
@@ -156,20 +174,67 @@ def _setup(context, *args, **kwargs):
                 "publish": publish_ev.lower() in ("1", "true", "yes", "on"),
             }],
         ))
-        mission_nodes.append(Node(
-            package="flight_intelligent",
-            executable="phased_orbits_mission",
-            name=f"phased_orbits_mission_{i}",
-            output="screen",
-            parameters=[mission_config, {
-                "vehicle_namespace": namespace,
+        overrides = {
+            "vehicle_namespace": namespace,
+            "wait_for_start": wait_for_start.lower() in ("1", "true", "yes", "on"),
+            **_spawn_origin(home_gps, vehicles[i].get("pose", "0,0,0,0,0,0")),
+        }
+        if mission_executable == "phased_orbits_mission":
+            # fleet choreography params the other mission nodes don't declare
+            overrides.update({
                 "drone_index": i,
                 "drone_count": num,
-                "wait_for_start": wait_for_start.lower() in ("1", "true", "yes", "on"),
                 "spawn_e_m": east,
                 "spawn_n_m": north,
+                "stage_e_m": stage_east,
+                "stage_n_m": stage_north,
+                "staging_enabled": random_spawn,
                 "peer_namespaces": peers if peers else [""],
-                **_spawn_origin(home_gps, vehicles[i].get("pose", "0,0,0,0,0,0")),
+            })
+        mission_nodes.append(Node(
+            package="flight_intelligent",
+            executable=mission_executable,
+            name=f"{mission_executable}_{i}",
+            output="screen",
+            parameters=[mission_config, overrides],
+        ))
+
+    common_uwb_parameters = {
+        "vehicle_namespaces": namespaces,
+        "spawn_e_m": [e for e, _ in spawn_xy],
+        "spawn_n_m": [n for _, n in spawn_xy],
+    }
+    ev_nodes.append(Node(
+        package="sim_uwb",
+        executable="uwb_range_sim",
+        name="uwb_range_sim",
+        output="screen",
+        parameters=[{
+            **common_uwb_parameters,
+            "far_rate_hz": uwb_far_rate,
+            "near_rate_hz": uwb_near_rate,
+            "near_range_m": uwb_near_range,
+            "dropout_probability": 0.0,
+        }],
+    ))
+    ev_nodes.append(Node(
+        package="sim_uwb",
+        executable="relative_truth_monitor",
+        name="relative_truth_monitor",
+        output="screen",
+        parameters=[common_uwb_parameters],
+    ))
+    for i, namespace in enumerate(namespaces):
+        peers = [namespaces[j] for j in range(num) if j != i]
+        mission_nodes.append(Node(
+            package="flight_intelligent",
+            executable="relative_localization",
+            name=f"relative_localization_{i}",
+            output="screen",
+            parameters=[{
+                "vehicle_namespace": namespace,
+                "drone_index": i,
+                "peer_namespaces": peers if peers else [""],
             }],
         ))
 
@@ -188,7 +253,23 @@ def _setup(context, *args, **kwargs):
                     for i in range(num)],
         timeout_s=boot_timeout)
 
+    # Runtime consumers such as sep_monitor must use the randomized poses rather
+    # than the checked-in staging layout. Keep the effective manifest in /tmp so
+    # teardown can remove it and every diagnostic shares this run's seed.
+    if effective_fleet:
+        serializable = {key: value for key, value in fleet.items() if not key.startswith("_")}
+        with open(effective_fleet, "w") as stream:
+            yaml.safe_dump(serializable, stream, sort_keys=False)
+
+    spawn_summary = "; ".join(
+        f"{namespaces[i]}=({spawn_xy[i][0]:+.2f},{spawn_xy[i][1]:+.2f})"
+        for i in range(num))
+    mode_summary = (
+        f"random spawn seed={fleet['_random_spawn']['seed']}"
+        if random_spawn else "fixed spawn")
+
     return [
+        LogInfo(msg=f"{mode_summary}: {spawn_summary}"),
         sitl,
         ev_gate,
         RegisterEventHandler(OnProcessExit(target_action=ev_gate, on_exit=_on_ready("ev_gate", ev_nodes))),
@@ -204,9 +285,16 @@ def generate_launch_description():
         DeclareLaunchArgument("px4_dir", default_value=os.environ.get("PX4_DIR", "")),
         DeclareLaunchArgument("fleet_config", default_value=""),
         DeclareLaunchArgument("mission_config", default_value=""),
+        DeclareLaunchArgument("mission_executable", default_value="phased_orbits_mission"),
         DeclareLaunchArgument("publish_ev", default_value="true"),
         DeclareLaunchArgument("world", default_value="",
                               description="gz world override (e.g. 'windy'); empty uses fleet.yaml."),
+        DeclareLaunchArgument("random_spawn", default_value="false"),
+        DeclareLaunchArgument("spawn_seed", default_value=""),
+        DeclareLaunchArgument("effective_fleet", default_value="/tmp/maav_sitl_effective_fleet.yaml"),
+        DeclareLaunchArgument("uwb_far_rate_hz", default_value="5.0"),
+        DeclareLaunchArgument("uwb_near_rate_hz", default_value="40.0"),
+        DeclareLaunchArgument("uwb_near_range_m", default_value="3.0"),
         DeclareLaunchArgument("wait_for_start", default_value="true"),
         DeclareLaunchArgument("boot_timeout_s", default_value="180.0"),
         OpaqueFunction(function=_setup),

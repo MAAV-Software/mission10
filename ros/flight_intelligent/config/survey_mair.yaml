@@ -1,0 +1,38 @@
+# Single-drone survey in the M-Air netted cage (world: mair). Serpentine +
+# cross-hatch over an 8 x 10 m field centered on the pad, then a 2 m cube
+# circuit over the pad. Its 6.40 m corner radius remains comfortably inside
+# the M-Air net. The survey plane is 4 m high and the cube tops out at 6 m.
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20  # 1.0 s at 20 Hz; rfd-mission-execution §3
+    wait_for_start: true
+    force_arm: true            # SITL: bypass preflight
+    takeoff_altitude_m: 4.0
+    takeoff_acceptance_m: 0.5
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    field_e0_m: -4.0
+    field_n0_m: -5.0
+    lane_axis_deg: 0.0         # lanes run east, stepping north
+    field_length_m: 8.0
+    field_width_m: 10.0
+    lane_spacing_m: 2.0
+    speed_mps: 1.5
+    revisit_gap_s: 8.0         # > minelog's 5 s pass convention
+    crosshatch: true
+    cube_side_m: 2.0
+    cube_speed_mps: 1.0
+    yaw_mode: track            # face the direction of travel (slew-limited)
+    yaw_rate_max_dps: 45.0
+    to_home_time_s: 4.0
+    land_xy_acceptance_m: 0.35
+    land_vxy_acceptance_mps: 0.20
+    land_settle_time_s: 1.0
+    survey_auto_start: false
+    anchor_frame_after_climb: true
+    # SITL EV estimate has no global anchor; set one at link-up (M-Air pad).
+    set_global_origin_on_link: true
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
+    origin_alt: 0.0

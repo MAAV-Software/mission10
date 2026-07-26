@@ -1,0 +1,54 @@
+# Single-drone survey for the REAL drone at M-Air (no sim). Same schedule as
+# the SITL config (survey_mair.yaml); only the environment changes, exactly as
+# for the orbit mission:
+#   - force_arm false                 -> real preflight + safety pilot on RC
+#   - set_global_origin_on_link false -> GPS provides the EKF origin; sending
+#                                        SET_GPS_GLOBAL_ORIGIN can shove the
+#                                        local frame mid-air
+# Flight controller side (NOT set here): GPS airframe, RC/datalink/battery
+# failsafes, geofence (alt < ~12 m + tight radius) as the net backstop.
+#
+# Frame: launch-relative on the post-climb anchor, rotated to cardinal south
+# after takeoff. The reduced flight-test survey is a centered 4 x 4 m
+# serpentine with no crosshatch; its 2.83 m corner radius leaves substantial
+# recovery room. The survey plane is 2 m high and the 2 m cube tops out at 4 m.
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20  # 1.0 s at 20 Hz; rfd-mission-execution §3
+    wait_for_start: true
+    force_arm: false
+    takeoff_altitude_m: 2.0
+    takeoff_acceptance_m: 0.25
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    field_e0_m: -2.0
+    field_n0_m: -2.0
+    lane_axis_deg: 0.0
+    field_length_m: 4.0
+    field_width_m: 4.0
+    lane_spacing_m: 2.0
+    speed_mps: 1.5
+    revisit_gap_s: 8.0
+    crosshatch: false
+    cube_side_m: 2.0
+    cube_speed_mps: 1.0
+    yaw_mode: track
+    yaw_rate_max_dps: 45.0
+    to_home_time_s: 4.0
+    land_xy_acceptance_m: 0.25
+    land_vxy_acceptance_mps: 0.20
+    land_settle_time_s: 1.0
+    survey_auto_start: false
+    align_to_launch_yaw: false
+    post_takeoff_yaw_alignment: true
+    post_takeoff_yaw_deg: 180.0  # cardinal south, PX4 NED convention
+    post_takeoff_yaw_tolerance_deg: 5.0
+    post_takeoff_yaw_settle_s: 1.0
+    anchor_frame_after_climb: true
+    set_global_origin_on_link: false
+    # Ignored while set_global_origin_on_link=false; kept for documentation
+    # (the M-Air pad) and as the fallback on a GPS-denied estimate.
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
+    origin_alt: 0.0

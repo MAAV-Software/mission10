@@ -1,5 +1,13 @@
 """Reusable PX4 offboard plumbing: namespacing, the offboard handshake,
-vehicle-state tracking, link-health watchdog, and the start/end gate.
+vehicle-state tracking, link-health watchdog, and the operator gates.
+
+Three gates arrive as `std_msgs/Bool` on global (un-namespaced) topics, so one
+publish reaches every drone at once. `/start_mission` releases the handshake.
+`/abort_mission` lands in place immediately, from any state. `/end_mission` means
+come home: the base only latches it and calls `on_return_home()`, leaving the
+mission to fly its own return, since what "home" means is choreography the base
+knows nothing about. A mission that wants PX4 AUTO.RTL overrides that hook to
+call `begin_return()`.
 
 A mission subclasses `OffboardController` and overrides `compute_setpoint`,
 returning the next NED position+yaw target each control tick (or None to hold
@@ -15,6 +23,7 @@ import math
 
 import rclpy
 from rclpy.clock import Clock
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -47,6 +56,7 @@ TAKEOFF = "takeoff"
 ENGAGE = "engage"
 ACTIVE = "active"
 RETURNING = "returning"
+LAND_REQUESTED = "land_requested"
 LANDING = "landing"
 DONE = "done"
 
@@ -92,18 +102,21 @@ class OffboardController(Node):
         self._offboard_pub = self.create_publisher(OffboardControlMode, self._topic("in/offboard_control_mode"), sensor_qos)
         self._traj_pub = self.create_publisher(TrajectorySetpoint, self._topic("in/trajectory_setpoint"), sensor_qos)
 
-        # legacy + _v1 names cover px4_msgs topic-version differences
+        # Keep legacy names for existing images and add the v1.18 message versions.
         self.create_subscription(VehicleStatus, self._topic("out/vehicle_status"), self._status_cb, sensor_qos)
         self.create_subscription(VehicleStatus, self._topic("out/vehicle_status_v1"), self._status_cb, sensor_qos)
+        self.create_subscription(VehicleStatus, self._topic("out/vehicle_status_v4"), self._status_cb, sensor_qos)
         self.create_subscription(VehicleLocalPosition, self._topic("out/vehicle_local_position"), self._pos_cb, sensor_qos)
         self.create_subscription(VehicleLocalPosition, self._topic("out/vehicle_local_position_v1"), self._pos_cb, sensor_qos)
         self.create_subscription(VehicleAttitude, self._topic("out/vehicle_attitude"), self._att_cb, sensor_qos)
         self.create_subscription(VehicleCommandAck, self._topic("out/vehicle_command_ack"), self._ack_cb, sensor_qos)
+        self.create_subscription(VehicleCommandAck, self._topic("out/vehicle_command_ack_v1"), self._ack_cb, sensor_qos)
         self.create_subscription(VehicleGlobalPosition, self._topic("out/vehicle_global_position"), self._gpos_cb, sensor_qos)
         self.create_subscription(VehicleGlobalPosition, self._topic("out/vehicle_global_position_v1"), self._gpos_cb, sensor_qos)
 
         self.create_subscription(Bool, "start_mission", self._start_cb, 10)
         self.create_subscription(Bool, "end_mission", self._end_cb, 10)
+        self.create_subscription(Bool, "abort_mission", self._abort_cb, 10)
 
         self.nav_state = VehicleStatus.NAVIGATION_STATE_MAX
         self.arm_state = VehicleStatus.ARMING_STATE_DISARMED
@@ -112,22 +125,31 @@ class OffboardController(Node):
         self.vx = self.vy = self.vz = 0.0  # NED m/s
         self.yaw = 0.0
         self._launch_xy = None
+        self._launch_z = 0.0
+        self._launch_z_latched = False
+        self._launch_yaw = 0.0
+        self._launch_yaw_latched = False
+        self._z_valid = False
+        self._attitude_seen = False
 
         self._status_seen = False
         self._last_status_us = 0
         self._prestream_count = 0
         self._start_ok = not self.wait_for_start
-        self._end_requested = False
+        self._abort_requested = False
+        self._home_requested = False
         self._last_log_us = 0
         self._last_command_us = 0
         self._takeoff_started_us = 0
         self._link_acquired_fired = False
         self._heartbeat_velocity = False
-        self._global_pos_valid = False
+        self._global_xy_valid = False
+        self._global_alt_valid = False
         self._pending_origin = None
         self._origin_send_us = 0
         self._origin_start_us = 0
         self._origin_confirmed = False
+        self._handoff_hold = None
 
         self.state = WAIT_LINK
         self._timer = self.create_timer(1.0 / self.rate_hz, self._tick)
@@ -144,10 +166,12 @@ class OffboardController(Node):
         return None
 
     def request_land(self):
-        self._end_requested = True
+        """Land in place, at the current position. A mission calls this once its
+        own return has already put the vehicle where it wants to touch down."""
+        self._abort_requested = True
 
     def begin_return(self):
-        if self.state not in (RETURNING, LANDING, DONE):
+        if self.state not in (RETURNING, LAND_REQUESTED, LANDING, DONE):
             self._begin_return()
 
     def command_takeoff(self, altitude_m: float | None = None):
@@ -173,7 +197,7 @@ class OffboardController(Node):
     def _send_pending_origin(self):
         if self._pending_origin is None:
             return
-        if self._global_pos_valid:
+        if self._global_xy_valid:
             self._pending_origin = None
             if not self._origin_confirmed:
                 self._origin_confirmed = True
@@ -183,7 +207,7 @@ class OffboardController(Node):
         if elapsed > ORIGIN_CONFIRM_TIMEOUT_S:
             raise RuntimeError(
                 f"EKF global origin not accepted after {elapsed:.0f}s "
-                f"(vehicle_global_position.lat_lon_valid still false); RTL/Land unavailable."
+                f"(vehicle_global_position.lat_lon_valid still false); global modes unavailable."
             )
         now = self._now_us()
         if now - self._origin_send_us < ORIGIN_RESEND_INTERVAL_S * 1_000_000:
@@ -215,6 +239,15 @@ class OffboardController(Node):
     def on_active_start(self):
         """Mission hook called once when OFFBOARD setpoints become active."""
 
+    def on_return_home(self):
+        """Mission hook called once when /end_mission arrives.
+
+        Deliberately empty rather than defaulting to `begin_return()`: PX4 AUTO.RTL
+        climbs to RTL_RETURN_ALT (60 m by default) before it transits, which is a
+        net strike under the ~12 m geofence the real-flight config assumes. A
+        mission that wants RTL opts in by overriding this with `begin_return()`.
+        """
+
     # plumbing
 
     def _topic(self, suffix: str) -> str:
@@ -233,15 +266,23 @@ class OffboardController(Node):
     def _pos_cb(self, msg: VehicleLocalPosition):
         self.x, self.y, self.z = msg.x, msg.y, msg.z
         self.vx, self.vy, self.vz = msg.vx, msg.vy, msg.vz
+        self._z_valid = bool(msg.z_valid)
         if self._launch_xy is None and all(math.isfinite(v) for v in (msg.x, msg.y)):
             self._launch_xy = (float(msg.x), float(msg.y))
 
     def _att_cb(self, msg: VehicleAttitude):
         w, x, y, z = msg.q  # PX4 order w, x, y, z
-        self.yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        if math.isfinite(yaw) and sum(float(v) * float(v) for v in msg.q) > 0.25:
+            self.yaw = yaw
+            self._attitude_seen = True
 
     def _gpos_cb(self, msg: VehicleGlobalPosition):
-        self._global_pos_valid = bool(msg.lat_lon_valid)
+        # A manually supplied origin can make latitude/longitude valid without
+        # producing a trustworthy global altitude. Keep these separate: origin
+        # confirmation only needs XY, but AUTO.RTL requires both.
+        self._global_xy_valid = bool(msg.lat_lon_valid)
+        self._global_alt_valid = bool(getattr(msg, "alt_valid", False))
 
     def _ack_cb(self, msg: VehicleCommandAck):
         if msg.result != VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED:
@@ -255,9 +296,19 @@ class OffboardController(Node):
             self.get_logger().info("start_mission received.")
 
     def _end_cb(self, msg: Bool):
-        if msg.data and not self._end_requested:
-            self._end_requested = True
-            self.get_logger().info("end_mission received, landing.")
+        # Latched, and not as a safety gate: a mission's return is a scheduled
+        # choreography, and re-entering it partway through would fling the vehicle
+        # back to where the schedule starts. sitl.sh publishes --times 5, so the
+        # repeats arrive as a matter of course.
+        if msg.data and not self._home_requested:
+            self._home_requested = True
+            self.get_logger().info("end_mission received, returning home.")
+            self.on_return_home()
+
+    def _abort_cb(self, msg: Bool):
+        if msg.data and not self._abort_requested:
+            self._abort_requested = True
+            self.get_logger().info("abort_mission received, landing in place.")
 
     @property
     def is_armed(self) -> bool:
@@ -288,13 +339,11 @@ class OffboardController(Node):
             self._last_command_us = now
             self._publish_command(command, **params)
 
-    def _publish_heartbeat(self, position=True, velocity=None):
-        if velocity is None:
-            velocity = self._heartbeat_velocity
+    def _publish_heartbeat(self):
         off = OffboardControlMode()
         off.timestamp = int(Clock().now().nanoseconds / 1000)
-        off.position = position
-        off.velocity = velocity
+        off.position = not self._heartbeat_velocity
+        off.velocity = self._heartbeat_velocity
         off.acceleration = False
         off.attitude = False
         off.body_rate = False
@@ -304,7 +353,11 @@ class OffboardController(Node):
         self._heartbeat_velocity = False
         traj = TrajectorySetpoint()
         traj.timestamp = int(Clock().now().nanoseconds / 1000)
-        traj.position[0], traj.position[1], traj.position[2] = float(x), float(y), float(z)
+        # Mission z is relative to the pad; PX4's local datum need not be zero
+        # on the ground, so restore the launch offset at the publication seam.
+        traj.position[0], traj.position[1], traj.position[2] = (
+            float(x), float(y), float(z) + self._launch_z
+        )
         for i in range(3):
             traj.velocity[i] = float("nan")
             traj.acceleration[i] = float("nan")
@@ -316,7 +369,9 @@ class OffboardController(Node):
         self._heartbeat_velocity = True
         traj = TrajectorySetpoint()
         traj.timestamp = int(Clock().now().nanoseconds / 1000)
-        traj.position[0], traj.position[1], traj.position[2] = float(x), float(y), float(z)
+        traj.position[0], traj.position[1], traj.position[2] = (
+            float(x), float(y), float(z) + self._launch_z
+        )
         traj.velocity[0], traj.velocity[1], traj.velocity[2] = float(vx), float(vy), float(vz)
         for i in range(3):
             traj.acceleration[i] = float("nan")
@@ -325,8 +380,45 @@ class OffboardController(Node):
         self._traj_pub.publish(traj)
 
     def _hold_setpoint(self):
+        self.publish_position_setpoint(
+            *self._takeoff_hold(),
+            self._launch_yaw if self._launch_yaw_latched else self.yaw,
+        )
+
+    def _takeoff_target_z(self):
+        return self._launch_z - abs(self.takeoff_altitude_m)
+
+    def _takeoff_hold(self):
         lx, ly = self._launch_xy if self._launch_xy else (self.x, self.y)
-        self.publish_position_setpoint(lx, ly, -abs(self.takeoff_altitude_m))
+        return lx, ly, -abs(self.takeoff_altitude_m)
+
+    def _latch_launch_reference(self) -> bool:
+        """Latch the converged pad altitude and operator-set heading pre-arm."""
+        if self._launch_z_latched and self._launch_yaw_latched:
+            return True
+        if self._z_valid and math.isfinite(self.z) and self._attitude_seen:
+            self._launch_z = float(self.z)
+            self._launch_z_latched = True
+            self._launch_yaw = float(self.yaw)
+            self._launch_yaw_latched = True
+            self.get_logger().info(
+                f"latched launch-z datum {self._launch_z:+.3f} m; "
+                f"holding operator-set heading {math.degrees(self._launch_yaw):.1f} deg NED"
+            )
+            return True
+        return False
+
+    def _capture_handoff_hold(self):
+        self._heartbeat_velocity = False
+        hold_yaw = self._launch_yaw if self._launch_yaw_latched else self.yaw
+        self._handoff_hold = (
+            float(self.x), float(self.y), float(self.z - self._launch_z), float(hold_yaw)
+        )
+
+    def _publish_handoff_hold(self):
+        if self._handoff_hold is None:
+            self._capture_handoff_hold()
+        self.publish_position_setpoint(*self._handoff_hold)
 
     def _log_throttled(self, msg: str, period_us: int = 1_000_000):
         now = self._now_us()
@@ -339,7 +431,11 @@ class OffboardController(Node):
     def _tick(self):
         self._send_pending_origin()
         # OFFBOARD drops without an OffboardControlMode stream at >=2 Hz
-        if self.state in (PRESTREAM, TAKEOFF, ENGAGE, ACTIVE):
+        awaiting_rtl = (
+            self.state == RETURNING
+            and self.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+        )
+        if self.state in (PRESTREAM, TAKEOFF, ENGAGE, ACTIVE, LAND_REQUESTED) or awaiting_rtl:
             self._publish_heartbeat()
 
         if self.state == WAIT_LINK:
@@ -360,6 +456,19 @@ class OffboardController(Node):
             self._hold_setpoint()
             self._prestream_count += 1
             if self._prestream_count >= self.prestream_cycles:
+                # Never arm without a valid pad-relative altitude datum.
+                if not self._latch_launch_reference():
+                    max_wait = self.prestream_cycles + int(
+                        self.rate_hz * self.takeoff_timeout_s
+                    )
+                    if self._prestream_count > max_wait:
+                        raise RuntimeError(
+                            "launch reference never latched (z/attitude invalid); refusing to arm"
+                        )
+                    self._log_throttled(
+                        "waiting for valid z + attitude to latch launch reference before takeoff"
+                    )
+                    return
                 self._takeoff_started_us = self._now_us()
                 self.get_logger().info("commanding OFFBOARD takeoff.")
                 self.command_offboard_mode()
@@ -368,7 +477,7 @@ class OffboardController(Node):
 
         elif self.state == TAKEOFF:
             self._hold_setpoint()
-            if self._end_requested:
+            if self._abort_requested:
                 self._begin_landing()
                 return
             self.command_arm()
@@ -376,7 +485,7 @@ class OffboardController(Node):
                 VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF,
                 param7=self.takeoff_altitude_m,
             )
-            target_z = -abs(self.takeoff_altitude_m)
+            target_z = self._takeoff_target_z()
             altitude_error = abs(self.z - target_z)
             elapsed_s = (self._now_us() - self._takeoff_started_us) / 1_000_000.0
             if altitude_error <= self.takeoff_acceptance_m or elapsed_s >= self.takeoff_timeout_s:
@@ -392,7 +501,7 @@ class OffboardController(Node):
 
         elif self.state == ENGAGE:
             self._hold_setpoint()
-            if self._end_requested:
+            if self._abort_requested:
                 self._begin_landing()
                 return
             self.command_offboard_mode()
@@ -405,7 +514,7 @@ class OffboardController(Node):
                 self._log_throttled(f"engaging: armed={self.is_armed} nav_state={self.nav_state}")
 
         elif self.state == ACTIVE:
-            if self._end_requested:
+            if self._abort_requested:
                 self._begin_landing()
                 return
             sp = self.compute_setpoint()
@@ -422,9 +531,14 @@ class OffboardController(Node):
                     raise ValueError("setpoint must be (x, y, z, yaw) or (x, y, z, yaw, vx, vy, vz)")
 
         elif self.state == RETURNING:
-            if self._end_requested:
+            if self._abort_requested:
                 self._begin_landing()
                 return
+            if self.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+                # Keep the last safe local setpoint alive until PX4 actually
+                # accepts AUTO.RTL. Merely sending the command is not a mode
+                # transition, and dropping this stream causes Offboard loss.
+                self._publish_handoff_hold()
             self._publish_command_throttled(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH)
             if not self.is_armed:
                 self.state = DONE
@@ -432,19 +546,45 @@ class OffboardController(Node):
             else:
                 self._log_throttled(f"returning via RTL: nav_state={self.nav_state}")
 
+        elif self.state == LAND_REQUESTED:
+            if not self.is_armed:
+                self.state = DONE
+                self.get_logger().info("landed and disarmed.")
+            elif self.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LAND:
+                self.state = LANDING
+                self.get_logger().info("PX4 accepted NAV_LAND; AUTO.LAND active.")
+            else:
+                # NAV_LAND can be temporarily rejected. Hold autonomously in
+                # Offboard and retry instead of falling through to RC Position.
+                self._publish_handoff_hold()
+                self._publish_command_throttled(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+                self._log_throttled(
+                    f"waiting for AUTO.LAND acceptance: nav_state={self.nav_state}"
+                )
+
         elif self.state == LANDING:
             if not self.is_armed:
                 self.state = DONE
                 self.get_logger().info("landed and disarmed.")
 
     def _begin_return(self):
+        if not (self._global_xy_valid and self._global_alt_valid):
+            self.get_logger().warn(
+                "AUTO.RTL unavailable without valid global XY + altitude; "
+                "requesting local NAV_LAND instead."
+            )
+            self._begin_landing()
+            return
+        self._capture_handoff_hold()
         self.state = RETURNING
         self.get_logger().info("commanding AUTO.RTL.")
         self.command_return()
 
     def _begin_landing(self):
-        self.state = LANDING
-        self.get_logger().info("commanding NAV_LAND.")
+        self._capture_handoff_hold()
+        self.state = LAND_REQUESTED
+        self._last_command_us = self._now_us()
+        self.get_logger().info("requesting NAV_LAND while maintaining Offboard hold.")
         self._publish_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
 
 
@@ -453,11 +593,11 @@ def main(args=None):
     node = OffboardController()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

@@ -19,7 +19,6 @@
     orbit_center_n_m: 0.0      # orbit the takeoff pad (was 4.6 = downrange offset)
     orbit_radius_m: 4.6
     orbit_speed_mps: 2.0
-    orbit_revolutions: 10.0
     phase_step_deg: 90.0
     phase0_deg: -90.0
     # Single drone: no inter-drone deconfliction to do, so steady orbit (zero amp).
@@ -36,10 +35,11 @@
     peel_order: ""
     orbit_auto_start: false
     yaw_mode: tangent
-    # BVC safety net no-ops with no peers (mission self-disables on empty peer set).
-    bvc_enabled: true
-    bvc_safety_radius_m: 0.75
-    bvc_lookahead_m: 0.3
+    # No peers in this single-drone profile; active ORCA naturally no-ops.
+    orca_protected_radius_m: 1.25
+    orca_response_time_s: 0.6
+    orca_horizon_s: 5.0
+    orca_max_speed_mps: 3.0
     # EKF global origin = M-Air net center (the pad), so AUTO.RTL/Land return there.
     origin_lat: 42.294438798326105
     origin_lon: -83.7104553367608

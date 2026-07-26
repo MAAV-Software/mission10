@@ -1,0 +1,20 @@
+# Relative state estimated by one observer from UWB range + shared-ENU motion.
+builtin_interfaces/Time stamp
+uint8 observer_id
+uint8 peer_id
+uint8 STATUS_UNOBSERVABLE=0
+uint8 STATUS_AMBIGUOUS=1
+uint8 STATUS_TRACKING=2
+uint8 status
+float32[2] position_enu_m
+float32[2] velocity_enu_mps
+float32[4] covariance_xy
+bool alternate_valid
+float32[2] alternate_position_enu_m
+float32[4] alternate_covariance_xy
+float32 range_m
+float32 range_rate_mps
+float32 residual_rms_m
+float32 observability
+float32 confidence_radius_95_m
+uint16 sample_count

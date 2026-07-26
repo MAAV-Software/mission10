@@ -1,18 +1,37 @@
-# PX4 SITL fleet for gz Harmonic.
+# Four-drone PX4 SITL fleet for the M-Air netted cage.
 # pose is PX4_GZ_MODEL_POSE: "east,north,z,roll,pitch,yaw" (metres, radians).
-world: default
+world: mair
 model: x500            # ground-truth pose comes from the world PosePublisher (split per drone), feeding EV + UWB range
 autostart: 4023        # 4023_gz_x500_ev: EKF2 fuses external vision, GPS velocity-only (set 4001 for a GPS-only baseline)
 agent_port: 8888
 home_gps:
-  lat: 42.2658783
-  lon: -83.7487304
+  lat: 42.294438798326105
+  lon: -83.7104553367608
   alt_m: 0.0
+# Used only when the launch argument random_spawn:=true (or
+# `scripts/sitl.sh up-random [seed]`). The checked-in poses below remain the
+# fixed choreography staging slots; the seeded sampler replaces only the
+# physical Gazebo spawn poses for that run.
+random_spawn:
+  seed: 0
+  cage_width_east_west_m: 24.384
+  cage_length_north_south_m: 36.576
+  cage_yaw_rad: -0.006981317
+  wall_clearance_m: 2.0
+  min_separation_m: 3.0
+  # world_truth_to_odom currently rejects unnamed transforms near the origin.
+  origin_clearance_m: 1.0
+  max_attempts_per_vehicle: 10000
 vehicles:
-  # spawn on the hover spots: 3 m apart on the line (rules: 10 ft separation).
-  # each drone's launch-relative orbit is identical (center 4.6 m downrange),
-  # differing only by phase; spawn offsets reconstruct the world phased orbits.
-  - {namespace: px4_0, pose: "0,0,0,0,0,0"}
-  - {namespace: px4_1, pose: "3,0,0,0,0,0"}
-  - {namespace: px4_2, pose: "6,0,0,0,0,0"}
-  - {namespace: px4_3, pose: "9,0,0,0,0,0"}
+  # The cage is 24.384 m east-west by 36.576 m north-south, so the 3 m hover
+  # line follows its long axis and is centered north-south. The clockwise
+  # rotation in phased_orbits.yaml keeps the entire maneuver east of
+  # the pad/world origin: world_truth_to_odom deliberately rejects transforms
+  # within 0.8 m of the origin to filter unnamed link poses. A 1.0 m east
+  # offset also leaves about 2.0 m from the orbit centerline to the east net.
+  # Namespace order runs north-to-south because this is a rigid clockwise
+  # rotation of the original choreography; its validated separation is unchanged.
+  - {namespace: px4_0, pose: "1.0,4.5,0,0,0,0"}
+  - {namespace: px4_1, pose: "1.0,1.5,0,0,0,0"}
+  - {namespace: px4_2, pose: "1.0,-1.5,0,0,0,0"}
+  - {namespace: px4_3, pose: "1.0,-4.5,0,0,0,0"}

@@ -14,5 +14,8 @@ setup(
     maintainer_email="131201352+calgary-kirisame@users.noreply.github.com",
     description="gz-truth pairwise UWB range and peer-state simulator.",
     license="MPL-2.0",
-    entry_points={"console_scripts": ["uwb_range_sim = sim_uwb.uwb_range_sim:main"]},
+    entry_points={"console_scripts": [
+        "uwb_range_sim = sim_uwb.uwb_range_sim:main",
+        "relative_truth_monitor = sim_uwb.relative_truth_monitor:main",
+    ]},
 )
