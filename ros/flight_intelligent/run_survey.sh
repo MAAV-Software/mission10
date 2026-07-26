@@ -16,12 +16,13 @@
 set -euo pipefail
 set +u; source /opt/ros/jazzy/setup.bash; set -u
 
-SRC="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../ros" && pwd)"
-CONFIG="${CONFIG:-$SRC/flight_intelligent/config/survey_mair_real.yaml}"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${SRC:-$(cd -- "$HERE/.." && pwd)}"
+CONFIG="${CONFIG:-$HERE/config/survey_mair_real.yaml}"
 NODE="${NODE:-survey_mission_0}"
 
 [ -f "$CONFIG" ] || { echo "no parameter file at $CONFIG" >&2; exit 1; }
 
-export PYTHONPATH="${PYTHONPATH:-}:$SRC/mission_engine:$SRC/flight_intelligent:$SRC/px4_offboard:$SRC/flight_lib"
-exec python3 "$SRC/flight_intelligent/flight_intelligent/survey_mission.py" \
+export PYTHONPATH="${PYTHONPATH:-}:$HERE:$SRC/px4_offboard:$SRC/flight_lib"
+exec python3 "$HERE/flight_intelligent/survey_mission.py" \
   --ros-args -r "__node:=$NODE" --params-file "$CONFIG" "$@"

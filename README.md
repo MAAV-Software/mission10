@@ -6,7 +6,7 @@ Software stack for IARC Mission 10. This workspace contains mission nodes, launc
 
 | Path | What it is |
 |---|---|
-| `ros/flight_lib` | Pure-python flight algorithms (orbits, deconfliction, BVC, relative localization). No ROS needed! |
+| `ros/flight_lib` | Pure-python flight algorithms (orbits, ORCA, braking, relative localization). No ROS needed! |
 | `ros/px4_offboard` | Reusable PX4 offboard plumbing: DDS handshake, namespacing, setpoint streaming. |
 | `ros/flight_intelligent` | Mission nodes built on the two above (`phased_orbits_mission`). |
 | `ros/bringup` | Fleet configs + launch: SITL fleet, EV bridges, mission nodes, readiness gates. |
@@ -14,11 +14,12 @@ Software stack for IARC Mission 10. This workspace contains mission nodes, launc
 | `ros/px4_msgs` | Vendored PX4 messages, pinned to the PX4 fork (`scripts/sync_px4_msgs.sh`). |
 | `ros/sim_truth_ev` | Sim twin: gz ground truth → PX4 external vision, with fault injection. |
 | `ros/sim_uwb` | Sim twin: pairwise UWB ranges from gz truth + noise/dropout. |
-| `ros/uwb` | Real-hardware UWB: DW1000 driver, ranging core, ROS range node. |
-| `uwb/` | DWM3001CDK software, typed host protocol, and bring-up tools. |
+| `uwb/` | Real-hardware UWB: DWM3001C software, direct DW1000 backend, shared protocol, and bring-up tools. |
+| `ros/mission_engine` | Survey execution, tag detection, observation association, and mission result handling. |
+| `ros/jarvis_web` | Operator phone webapp: voice commands in, mission gates out, and result display. |
 | `ros/ros_gz_marker_bridge` | ROS → gz visual marker bridge (visualization only). |
 | `models/yolo` | PFM-1 mine detector pipeline: synthetic datagen → training → Hailo export. |
-| `operator/` | Operator phone webapp. |
+| `tools/flight_recorder` | Standalone dual-camera + PX4/IMU MCAP field recorder for CM5 aircraft. |
 | `scripts/` | `sitl.sh` (bringup wrapper), visualization overlays, px4_msgs sync. |
 | `flake.nix`, `nix/` | Workstation dev environment (ROS 2 Jazzy + gz via nix-ros-overlay). Drones run apt. |
 
@@ -52,10 +53,3 @@ scripts/sitl.sh down                       # teardown
 ```sh
 PYTHONPATH=ros/flight_lib python3 -m pytest ros/flight_lib/test -q
 ```
-
-## Known gaps
-
-- `ros/mission_engine` does not exist yet. `models/yolo/datagen` was written
-  against its geometry core (`CameraModel`, `project_raw`, `serpentine`) so
-  that training-time and runtime geometry cannot drift; the datagen and its
-  tests import it and stay red until the package lands.
