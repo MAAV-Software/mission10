@@ -159,8 +159,14 @@ class EngineNode(OffboardController):
         self.create_subscription(
             Detection2DArray, self.detections_topic, self._detections_cb, 10
         )
+        # The raw dToF, on PX4's BEST_EFFORT profile. The anchor audits EKF2,
+        # so its height must not come from EKF2: `dist_bottom` is a fused
+        # product of the estimator under test, this is the sensor.
         self.create_subscription(
-            DistanceSensor, self._topic("out/distance_sensor"), self._dist_cb, 10
+            DistanceSensor,
+            self._topic("out/distance_sensor"),
+            self._dist_cb,
+            self.sensor_qos,
         )
         self.create_subscription(Bool, "begin_survey", self._begin_cb, 10)
         self.create_subscription(Bool, "begin_orbit", self._begin_cb, 10)
