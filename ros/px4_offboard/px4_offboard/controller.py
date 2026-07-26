@@ -91,7 +91,10 @@ class OffboardController(Node):
         self.wait_for_start = bool(self.get_parameter("wait_for_start").value)
         self.status_stale_timeout_s = float(self.get_parameter("status_stale_timeout_s").value)
 
-        sensor_qos = QoSProfile(
+        # PX4 publishes every uORB topic BEST_EFFORT over uXRCE-DDS. A RELIABLE
+        # subscription is silently incompatible with it and receives nothing,
+        # so subclasses take this profile for any /fmu/out topic they add.
+        sensor_qos = self.sensor_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
             history=QoSHistoryPolicy.KEEP_LAST,
