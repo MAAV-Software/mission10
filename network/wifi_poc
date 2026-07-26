@@ -1,0 +1,181 @@
+#!/bin/bash
+set -euo pipefail
+
+# This proof of concept connects drone1 to the access point on drone2.
+
+readonly INTERFACE="wlan0"
+readonly SSID="MAAV-drone2"
+readonly PASSPHRASE="maav-drone2-bench-2026"
+readonly CHANNEL="6"
+readonly FREQUENCY_MHZ="2437"
+readonly ACCESS_POINT_BSSID="88:a2:9e:55:d1:58"
+readonly ACCESS_POINT_ADDRESS="10.77.0.1/24"
+readonly STATION_ADDRESS="10.77.0.11/24"
+readonly RUNTIME_DIRECTORY="/run/maav-wifi-poc"
+
+require_root() {
+    if [[ "$EUID" -ne 0 ]]; then
+        echo "Run this command as root." >&2
+        exit 1
+    fi
+}
+
+prepare_interface() {
+    local address="$1"
+
+    nmcli device disconnect "$INTERFACE" >/dev/null 2>&1 || true
+    nmcli device set "$INTERFACE" managed no
+    ip link set dev "$INTERFACE" down
+    ip address flush dev "$INTERFACE"
+    ip link set dev "$INTERFACE" up
+    iw dev "$INTERFACE" set power_save off
+    ip address add "$address" dev "$INTERFACE"
+}
+
+write_access_point_config() {
+    cat >"$RUNTIME_DIRECTORY/hostapd.conf" <<EOF
+interface=$INTERFACE
+driver=nl80211
+ctrl_interface=$RUNTIME_DIRECTORY/hostapd
+country_code=US
+ieee80211d=1
+ssid=$SSID
+hw_mode=g
+channel=$CHANNEL
+ieee80211n=1
+wmm_enabled=1
+beacon_int=100
+dtim_period=2
+max_num_sta=4
+ap_max_inactivity=300
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=$PASSPHRASE
+ieee80211w=0
+EOF
+}
+
+write_station_config() {
+    install -d -m 0700 "$RUNTIME_DIRECTORY/wpa_supplicant"
+
+    cat >"$RUNTIME_DIRECTORY/wpa_supplicant.conf" <<EOF
+ctrl_interface=$RUNTIME_DIRECTORY/wpa_supplicant
+update_config=0
+country=US
+ap_scan=1
+disable_scan_offload=1
+freq_list=$FREQUENCY_MHZ
+mac_addr=0
+preassoc_mac_addr=0
+
+network={
+    ssid="$SSID"
+    scan_ssid=0
+    bssid=$ACCESS_POINT_BSSID
+    scan_freq=$FREQUENCY_MHZ
+    freq_list=$FREQUENCY_MHZ
+    proto=RSN
+    key_mgmt=WPA-PSK
+    auth_alg=OPEN
+    pairwise=CCMP
+    group=CCMP
+    psk="$PASSPHRASE"
+    ieee80211w=0
+}
+EOF
+}
+
+run_access_point() {
+    prepare_interface "$ACCESS_POINT_ADDRESS"
+    write_access_point_config
+    exec hostapd "$RUNTIME_DIRECTORY/hostapd.conf"
+}
+
+run_station() {
+    local control_socket
+    local supplicant_pid
+
+    prepare_interface "$STATION_ADDRESS"
+    write_station_config
+
+    wpa_supplicant \
+        -D nl80211 \
+        -i "$INTERFACE" \
+        -c "$RUNTIME_DIRECTORY/wpa_supplicant.conf" &
+    supplicant_pid="$!"
+
+    trap 'kill "$supplicant_pid" 2>/dev/null || true' INT TERM
+
+    control_socket="$RUNTIME_DIRECTORY/wpa_supplicant/$INTERFACE"
+    for _ in {1..100}; do
+        if [[ -S "$control_socket" ]]; then
+            wpa_cli \
+                -p "$RUNTIME_DIRECTORY/wpa_supplicant" \
+                -i "$INTERFACE" \
+                scan_interval 1
+            wait "$supplicant_pid"
+            return
+        fi
+
+        if ! kill -0 "$supplicant_pid" 2>/dev/null; then
+            wait "$supplicant_pid"
+        fi
+
+        sleep 0.1
+    done
+
+    echo "The wpa_supplicant control socket did not start." >&2
+    kill "$supplicant_pid" 2>/dev/null || true
+    wait "$supplicant_pid" || true
+    exit 1
+}
+
+run_node() {
+    require_root
+    umask 077
+    mkdir -p "$RUNTIME_DIRECTORY"
+
+    case "$(hostname)" in
+        drone1)
+            run_station
+            ;;
+        drone2)
+            run_access_point
+            ;;
+        *)
+            echo "This proof supports drone1 and drone2." >&2
+            exit 1
+            ;;
+    esac
+}
+
+clean_interface() {
+    require_root
+    ip address flush dev "$INTERFACE" || true
+    ip link set dev "$INTERFACE" down || true
+}
+
+show_status() {
+    echo "Host: $(hostname)"
+    iw dev "$INTERFACE" info
+    iw dev "$INTERFACE" link || true
+    ip -4 address show dev "$INTERFACE"
+}
+
+case "${1:-}" in
+    run)
+        run_node
+        ;;
+    clean)
+        clean_interface
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: $0 {run|clean|status}" >&2
+        exit 2
+        ;;
+esac

@@ -1,0 +1,14 @@
+[Unit]
+Description=MAAV Wi-Fi proof of concept
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/home/maav/wifi_poc run
+ExecStopPost=/home/maav/wifi_poc clean
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
