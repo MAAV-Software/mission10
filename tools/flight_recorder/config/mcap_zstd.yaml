@@ -1,0 +1,5 @@
+# rosbag2 mcap storage plugin options -> mcap::McapWriterOptions.
+# Per-chunk zstd; "Default" maps to zstd's default level (~3). The achieved
+# ratio depends on camera format and scene content.
+compression: "Zstd"
+compressionLevel: "Default"
