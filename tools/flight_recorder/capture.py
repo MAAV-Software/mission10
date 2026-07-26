@@ -482,7 +482,7 @@ def capture_imx219_worker(
 def capture_camera_pipe(
     connection, status_connection, process, bag, clock_mapper, stats, *,
     width, height, frame_id, image_topic, info_topic, camera_info,
-    max_exposure_us, errors, errors_lock,
+    max_exposure_us, errors, errors_lock, sink=None,
 ):
     """Record packed CM2 YUYV frames received from its tuning-isolated process."""
     global _running
@@ -530,6 +530,11 @@ def capture_camera_pipe(
             camera_info.header.stamp = st
             camera_info.header.frame_id = frame_id
             bag.write(info_topic, serialize_message(camera_info), ts_ns)
+
+            # The recording is complete at this point. A sink is a tap on the
+            # frame we already hold; it cannot block here and cannot fail here.
+            if sink is not None:
+                sink.submit(img, ts_ns)
     except Exception as exc:
         if _running:
             with errors_lock:
@@ -558,6 +563,12 @@ def main():
                     help="hard CM2 daylight shutter ceiling (default: 1000 us)")
     ap.add_argument("--no-down-camera", action="store_true",
                     help="record only the legacy forward OV9281 stream")
+    ap.add_argument("--detect", action="store_true",
+                    help="also run the AprilTag detector on nadir frames "
+                         "and publish/record /detections/down")
+    ap.add_argument("--detect-topic", default="/detections/down")
+    ap.add_argument("--detect-queue", type=int, default=2,
+                    help="nadir frames the detector may fall behind by")
     ap.add_argument("--split-mb", type=int, default=0,
                     help="split bag into N-MB mcap chunks (0=single file)")
     ap.add_argument("--storage-config", default="",
@@ -578,6 +589,10 @@ def main():
         ap.error("--down-max-exposure-us must be positive")
     if not args.no_down_camera and args.cam == args.down_cam:
         ap.error("forward and downward camera indices must differ")
+    if args.detect and args.no_down_camera:
+        ap.error("--detect needs the downward camera")
+    if args.detect_queue < 1:
+        ap.error("--detect-queue must be at least 1")
 
     ov_clock_mapper = ClockMapper(max_step_ns=int(args.max_clock_step_ms * 1e6))
     down_clock_mapper = ClockMapper(max_step_ns=int(args.max_clock_step_ms * 1e6))
@@ -590,6 +605,8 @@ def main():
     if not args.no_down_camera:
         bag.topic("/camera_down/image_raw", "sensor_msgs/msg/Image")
         bag.topic("/camera_down/camera_info", "sensor_msgs/msg/CameraInfo")
+    if args.detect:
+        bag.topic(args.detect_topic, "vision_msgs/msg/Detection2DArray")
     bag.topic("/imu", "sensor_msgs/msg/Imu")
     bag.topic("/capture/realtime_minus_boottime_ns", "std_msgs/msg/Int64")
     for name, type_str, _ in PX4_SUBS:
@@ -655,6 +672,31 @@ def main():
     threads = []
     errors = []
     errors_lock = threading.Lock()
+
+    # The nadir detector, when asked for. The recording is the product, so a
+    # detector that will not load is reported and the capture proceeds without
+    # it; it never costs the flight its bag.
+    detector_sink = None
+    if args.detect:
+        try:
+            from frame_sinks import DetectorSink
+            from mission_engine.rim.tag_detector import TagDetector, detect_image
+            from vision_msgs.msg import Detection2DArray
+
+            tag_detector = TagDetector()
+            publisher = node.create_publisher(Detection2DArray, args.detect_topic, 10)
+            detector_sink = DetectorSink(
+                detector=lambda img: detect_image(tag_detector, img),
+                publish=publisher.publish,
+                bag=bag,
+                topic=args.detect_topic,
+                depth=args.detect_queue,
+            )
+            print(f"recorder: nadir detector -> {args.detect_topic} "
+                  f"(queue {args.detect_queue})", file=sys.stderr, flush=True)
+        except Exception as exc:
+            errors.append(f"detector: {exc}")
+            print(f"recorder: DETECTOR DISABLED: {exc}", file=sys.stderr, flush=True)
     down_process = None
     down_frames = None
     down_status = None
@@ -794,6 +836,7 @@ def main():
                     "max_exposure_us": args.down_max_exposure_us,
                     "errors": errors,
                     "errors_lock": errors_lock,
+                    "sink": detector_sink,
                 },
                 name="capture-imx219",
             ))
@@ -838,6 +881,10 @@ def main():
                 camera.close()
             except Exception:
                 pass
+        if detector_sink is not None:
+            # Drain the sink before the writer and the node go: it holds
+            # frames it still owes the bag, and it publishes through the node.
+            detector_sink.close()
         try:
             node.destroy_node()  # stop ROS callbacks before finalizing the writer
         except Exception:
@@ -865,6 +912,11 @@ def main():
                     f"{mapper.max_offset_delta_ns / 1e6:.3f} ms",
                     file=sys.stderr,
                 )
+        if detector_sink is not None:
+            print(f"  {detector_sink.summary()}", file=sys.stderr)
+            if detector_sink.last_fault:
+                print(f"  last detector fault: {detector_sink.last_fault}",
+                      file=sys.stderr)
         for error in errors:
             print(f"  ERROR: {error}", file=sys.stderr)
     return 4 if errors else 0

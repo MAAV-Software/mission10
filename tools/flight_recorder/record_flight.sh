@@ -22,7 +22,8 @@
 #   TAG      name suffix (default: intel_flight)
 # Env: SPLIT_MB (default 256), FPS (OV9281, default 30),
 #      NO_DOWN_CAMERA (1 = OV9281 only), DOWN_FPS (IMX219, default 10),
-#      MINHZ (IMU gate, default 120),
+#      MINHZ (IMU gate, default 120), DETECT (1 = run the nadir AprilTag detector),
+#      MISSION_ENGINE (package path the detector comes from),
 #      RAMDIR (/dev/shm/maavrec), EMMCDIR (/home/maav/recordings), USBDIR (/mnt/recordings)
 set -euo pipefail
 
@@ -38,7 +39,11 @@ IMU_GATE_ATTEMPTS="${IMU_GATE_ATTEMPTS:-3}"
 SPLIT_MB="${SPLIT_MB:-256}"
 COMPRESS="${COMPRESS:-zstd}"     # lossless per-chunk compression | none
 STOP_ON_DISARM="${STOP_ON_DISARM:-0}"  # 1 = recorder self-stops when PX4 disarms (mission end)
+DETECT="${DETECT:-0}"                  # 1 = run the nadir AprilTag detector on the captured frames
 RECORDER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Default to the sibling package in this checkout, so a clone needs no
+# configuration. Set MISSION_ENGINE when the recorder is copied out on its own.
+MISSION_ENGINE="${MISSION_ENGINE:-$RECORDER_DIR/../../ros/mission_engine}"
 EMMCDIR="${EMMCDIR:-/home/maav/recordings}"
 USBDIR="${USBDIR:-/mnt/recordings}"
 RAMDIR="${RAMDIR:-/dev/shm/maavrec}"
@@ -68,6 +73,14 @@ mkdir -p "$EMMCDIR" "$RAMDIR"
 SCFG=""; [ "$COMPRESS" = zstd ] && SCFG="$RECORDER_DIR/config/mcap_zstd.yaml"
 DISARM=""; [ "$STOP_ON_DISARM" = 1 ] && DISARM="--stop-on-disarm"
 DOWN_CAMERA_ARG=""; [ "$NO_DOWN_CAMERA" = 1 ] && DOWN_CAMERA_ARG="--no-down-camera"
+# The detector is the mission engine's, running on the frames the recorder
+# already holds. It is a tap: the bag is written before it runs.
+DETECT_ARG=""
+if [ "$DETECT" = 1 ]; then
+  [ -d "$MISSION_ENGINE" ] || { echo "mission_engine not at $MISSION_ENGINE" >&2; exit 1; }
+  export PYTHONPATH="${PYTHONPATH:-}:$MISSION_ENGINE"
+  DETECT_ARG="--detect"
+fi
 echo ">> tiers=$TIERS  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  compress=${COMPRESS}"
 if [ -n "$MID" ]; then
   echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  eMMC=$EMMCDIR ($(free_gb "$EMMCDIR")G)  USB=$USBDIR ($(free_gb "$USBDIR")G)"
@@ -121,10 +134,10 @@ fi
 echo ">>        start BEFORE arming; Ctrl-C AFTER landing."
 set +e
 if [ -n "$SECS" ]; then
-  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM; rc=$?
+  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 124 ] && rc=0; [ "$rc" -eq 130 ] && rc=0
 else
-  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM; rc=$?
+  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 130 ] && rc=0
 fi
 set -e

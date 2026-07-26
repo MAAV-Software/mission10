@@ -1,11 +1,20 @@
 # Flight recorder
 
-This standalone CM5 utility records synchronized field evidence into one MCAP
-bag during manual, open-loop, or autonomous flights. Its scope is independent
-field-data acquisition. This boundary follows the flight/map
-separation in [`rfd-mission-execution`](../../../doc/rfd-mission-execution.md):
-the recorder preserves raw measurements and flight state. Mission decisions and
-processed map records remain within the mission engine.
+This CM5 utility records synchronized field evidence into one MCAP bag during
+manual, open-loop, or autonomous flights. Its scope is field-data acquisition.
+This boundary follows the flight/map separation in
+[`rfd-mission-execution`](../../../doc/rfd-mission-execution.md): the recorder
+preserves raw measurements and flight state. Mission decisions and processed
+map records remain within the mission engine.
+
+The recorder owns the cameras, so it is also the frame source for the sensing
+stack. One capture serves every consumer of the nadir view
+([`rfd-single-camera-sensing`](../../../doc/rfd-single-camera-sensing.md) 3.1).
+`--detect` attaches the mission engine's AprilTag detector to those frames and
+avoids a DDS hop for 20 MB/s of imagery. The bag is always written first, in
+the capture thread. A sink is optional, runs on its own thread behind a
+bounded queue, and cannot stop a recording. Run the recorder without `--detect`
+to keep it free of the mission engine.
 
 ## Recorded streams
 
@@ -89,8 +98,26 @@ mount exists. Without it, the recorder uses RAM to eMMC. Useful overrides:
 DOWN_FPS=10 FPS=30 SPLIT_MB=256 COMPRESS=zstd ./record_flight.sh "" test
 CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight
 STOP_ON_DISARM=1 ./record_flight.sh "" autonomous
+DETECT=1 ./record_flight.sh "" tag_anchor
 ./record_flight.sh 60 timed_test
 ```
+
+## Detect tags during the flight
+
+`DETECT=1` runs the mission engine's AprilTag detector on the nadir frames. It
+publishes `vision_msgs/Detection2DArray` on `/detections/down` for the mission
+engine, and records the same messages in the bag. Each detection keeps its
+source image header, so a detection joins to flight state on the image stamp.
+
+`MISSION_ENGINE` gives the package path, `/home/maav/maav_survey/src/mission_engine`
+by default. The recorder reports the detector at startup and prints its frame,
+tag, drop, and latency counts in the capture summary. A detector that will not
+load, or that faults during the flight, is reported and the recording
+continues.
+
+Detection costs about 90 ms of one core per 1640 × 1232 frame, against the
+100 ms frame interval at `DOWN_FPS=10`. The queue holds two frames and drops
+the oldest when the detector falls behind.
 
 For a short, single-tier capture:
 
@@ -103,6 +130,7 @@ RECDIR=/home/maav/recordings ./record_session.sh 30 bench
 From this directory:
 
 ```sh
-python3 -m py_compile camera_tuning.py capture.py focus_stream.py imu_rate.py tier_drain.py
+python3 -m py_compile camera_tuning.py capture.py frame_sinks.py focus_stream.py imu_rate.py tier_drain.py
 bash -n record_flight.sh record_session.sh
+python3 -m pytest test_image_formats.py test_frame_sinks.py -q
 ```
