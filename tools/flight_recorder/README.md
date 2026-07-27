@@ -114,7 +114,8 @@ By default, the recorder writes one unsplit MCAP directly to
 from RAM to eMMC. Useful overrides:
 
 ```sh
-DOWN_FPS=10 FPS=30 COMPRESS=zstd ./record_flight.sh "" test
+DOWN_FPS=10 FPS=30 ./record_flight.sh "" test
+COMPRESS=zstd ./record_flight.sh "" deliberate_low_rate_compressed_test
 SPLIT_MB=2048 ./record_flight.sh "" deliberate_split_test
 CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight
 OV_MAX_EXPOSURE_US=1000 ./record_flight.sh "" vio_daylight
@@ -122,6 +123,12 @@ STOP_ON_DISARM=1 ./record_flight.sh "" autonomous
 DETECT=1 ./record_flight.sh "" tag_anchor
 ./record_flight.sh 60 timed_test
 ```
+
+Recording is uncompressed by default. Native-resolution, high-rate dual-camera
+capture can outrun live zstd compression and cause rosbag cache loss even when
+the USB device has enough write bandwidth. Use `COMPRESS=zstd` only for a
+deliberate low-rate capture whose resulting topic rates and loss counters are
+checked after finalization.
 
 ## Detect tags during the flight
 

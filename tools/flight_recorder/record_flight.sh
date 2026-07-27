@@ -20,6 +20,7 @@
 #   TAG      name suffix (default: intel_flight)
 # Env: SPLIT_MB (default 0 with USB, 256 without), FPS (OV9281, default 30),
 #      NO_DOWN_CAMERA (1 = OV9281 only), DOWN_FPS (IMX219, default 10),
+#      COMPRESS (default none; zstd is opt-in for low-rate captures),
 #      MINHZ (IMU gate, default 120), DETECT (1 = run the nadir AprilTag detector),
 #      MISSION_ENGINE (package path the detector comes from),
 #      RAMDIR (/dev/shm/maavrec), EMMCDIR (/home/maav/recordings), USBDIR (/mnt/recordings)
@@ -36,7 +37,7 @@ MINHZ="${MINHZ:-120}"
 IMU_GATE_SECS="${IMU_GATE_SECS:-5}"
 IMU_GATE_ATTEMPTS="${IMU_GATE_ATTEMPTS:-3}"
 SPLIT_MB="${SPLIT_MB:-}"
-COMPRESS="${COMPRESS:-zstd}"     # lossless per-chunk compression | none
+COMPRESS="${COMPRESS:-none}"     # none (default) | zstd (low-rate captures only)
 STOP_ON_DISARM="${STOP_ON_DISARM:-0}"  # 1 = recorder self-stops when PX4 disarms (mission end)
 DETECT="${DETECT:-0}"                  # 1 = run the nadir AprilTag detector on the captured frames
 RECORDER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
