@@ -12,13 +12,13 @@ class MissionNode(Node):
 
         self.mission_node_lock = mission_node_lock
         self.mission_node_cv = mission_node_cv
-        self.timestamp_queue = queue.Queue
+        self.timestamp_queue = queue.Queue()
 
-        self.start_publisher = self.create_publisher(
-            Bool,
-            "/start_mission",
-            10
-        )
+        # self.start_publisher = self.create_publisher(
+        #     Bool,
+        #     "/start_mission",
+        #     10
+        # )
 
         qos_profile = QoSProfile(
                 reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -35,7 +35,10 @@ class MissionNode(Node):
         self.gps_data = {}
 
     def gps_callback(self, msg):
+        print("GPS CALLBACK FIRED")
+        print("Waiting for the mission_node_lock")
         with self.mission_node_lock:
+            print("Acquired the mission_node_lock")
             gps_point = {
                 "timestamp": msg.timestamp,
                 "latitude": msg.latitude_deg,
@@ -50,12 +53,24 @@ class MissionNode(Node):
 
             self.mission_node_cv.notify()
 
+    # def start_mission(self):
+    #     msg = Bool()
+    #     msg.data = True
+
+    #     while self.count_publishers("/fmu/out/vehicle_gps_position") == 0:
+    #         rclpy.spin_once(self, timeout_sec=0.1)
+
+    #     self.start_publisher.publish(msg)
+    #     self.get_logger().info("Mission started!")
+
     def start_mission(self):
-        msg = Bool()
-        msg.data = True
+        self.get_logger().info("Waiting for GPS publisher...")
 
-        while self.start_publisher.get_subscription_count() == 0:
+        while self.count_publishers("/fmu/out/vehicle_gps_position") == 0:
             rclpy.spin_once(self, timeout_sec=0.1)
+            print(f"Number of publishers is {self.count_publishers('/fmu/out/vehicle_gps_position')}")
 
-        self.start_publisher.publish(msg)
+        print("SUBSCRIBERS:", self.count_subscribers("/fmu/out/vehicle_gps_position"))
+        print("PUBLISHERS:", self.count_publishers("/fmu/out/vehicle_gps_position"))
+        self.get_logger().info("GPS publisher found!")
         self.get_logger().info("Mission started!")
