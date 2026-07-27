@@ -211,14 +211,15 @@ class SyncMonitor:
 
 
 class Bag:
-    def __init__(self, uri, split_bytes=0, storage_config=""):
+    def __init__(
+        self, uri, split_bytes=0, storage_config="", cache_bytes=512 * 1024 * 1024
+    ):
         self.w = rosbag2_py.SequentialWriter()
-        # max_cache_size>0 enables rosbag2's async writer (CacheConsumer thread):
-        # write() buffers into RAM and a background thread drains to disk, so the
-        # capture loop never blocks on the periodic ~0.5s eMMC ext4 journal-commit
-        # stalls that otherwise overflow the camera buffers and drop frames.
-        # Verified bench A/B: 7 stalls / 26 dropped frames -> 0. Default (0) is
-        # synchronous direct-to-storage. buffer_count bumped 6->12 as headroom.
+        # max_cache_size>0 enables rosbag2's async CacheConsumer. This protects
+        # direct-to-disk callers from storage stalls, but rosbag2 Jazzy dumps the
+        # whole cache synchronously inside write() at every split. RAM-staged
+        # recording therefore sets this to zero; its storage is already fast and
+        # the synchronous split flush otherwise overflows the camera buffers.
         # max_bagfile_size>0 splits the bag into <uri>_N.mcap chunks; the tiered
         # drainer (tier_drain.py) relocates each COMPLETED chunk RAM->eMMC->USB
         # while recording continues, so max recording time is bounded by the sum
@@ -227,7 +228,7 @@ class Bag:
         # mono8, compressed once here in RAM so every downstream tier carries
         # fewer bytes (more buffer-seconds AND less USB deficit). See mcap_zstd.yaml.
         so = rosbag2_py.StorageOptions(uri=uri, storage_id="mcap",
-                                       max_cache_size=512*1024*1024,
+                                       max_cache_size=cache_bytes,
                                        max_bagfile_size=split_bytes)
         if storage_config:
             so.storage_config_uri = storage_config
@@ -571,6 +572,8 @@ def main():
                     help="nadir frames the detector may fall behind by")
     ap.add_argument("--split-mb", type=int, default=0,
                     help="split bag into N-MB mcap chunks (0=single file)")
+    ap.add_argument("--cache-mb", type=int, default=512,
+                    help="rosbag async cache size in MB (0=synchronous writer)")
     ap.add_argument("--storage-config", default="",
                     help="mcap storage plugin yaml (e.g. config/mcap_zstd.yaml)")
     ap.add_argument("--stop-on-disarm", action="store_true",
@@ -593,13 +596,16 @@ def main():
         ap.error("--detect needs the downward camera")
     if args.detect_queue < 1:
         ap.error("--detect-queue must be at least 1")
+    if args.cache_mb < 0:
+        ap.error("--cache-mb must be nonnegative")
 
     ov_clock_mapper = ClockMapper(max_step_ns=int(args.max_clock_step_ms * 1e6))
     down_clock_mapper = ClockMapper(max_step_ns=int(args.max_clock_step_ms * 1e6))
     sync_monitor = SyncMonitor(max_rtt_us=int(args.max_sync_rtt_ms * 1000))
 
     bag = Bag(args.out, split_bytes=args.split_mb * 1024 * 1024,
-              storage_config=args.storage_config)
+              storage_config=args.storage_config,
+              cache_bytes=args.cache_mb * 1024 * 1024)
     bag.topic("/camera/image_raw", "sensor_msgs/msg/Image")
     bag.topic("/camera/camera_info", "sensor_msgs/msg/CameraInfo")
     if not args.no_down_camera:

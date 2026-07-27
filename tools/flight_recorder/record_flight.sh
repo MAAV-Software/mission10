@@ -18,7 +18,7 @@
 # Usage: record_flight.sh [SECONDS] [TAG]
 #   SECONDS  hard cap (default: none -- run until SIGINT at landing)
 #   TAG      name suffix (default: intel_flight)
-# Env: SPLIT_MB (default 256), FPS (OV9281, default 30),
+# Env: SPLIT_MB (default 256), CACHE_MB (default 0), FPS (OV9281, default 30),
 #      NO_DOWN_CAMERA (1 = OV9281 only), DOWN_FPS (IMX219, default 10),
 #      MINHZ (IMU gate, default 120), DETECT (1 = run the nadir AprilTag detector),
 #      MISSION_ENGINE (package path the detector comes from),
@@ -35,6 +35,7 @@ MINHZ="${MINHZ:-120}"
 IMU_GATE_SECS="${IMU_GATE_SECS:-5}"
 IMU_GATE_ATTEMPTS="${IMU_GATE_ATTEMPTS:-3}"
 SPLIT_MB="${SPLIT_MB:-256}"
+CACHE_MB="${CACHE_MB:-0}"         # tmpfs is fast; avoid rosbag's blocking split flush
 COMPRESS="${COMPRESS:-zstd}"     # lossless per-chunk compression | none
 STOP_ON_DISARM="${STOP_ON_DISARM:-0}"  # 1 = recorder self-stops when PX4 disarms (mission end)
 DETECT="${DETECT:-0}"                  # 1 = run the nadir AprilTag detector on the captured frames
@@ -84,7 +85,7 @@ if [ "$DETECT" = 1 ]; then
   export PYTHONPATH="${PYTHONPATH:-}:$MISSION_ENGINE"
   DETECT_ARG="--detect"
 fi
-echo ">> tiers=$TIERS  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  compress=${COMPRESS}"
+echo ">> tiers=$TIERS  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  cache=${CACHE_MB}MB  compress=${COMPRESS}"
 echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  $FINAL_LABEL=$FINAL_ROOT ($(free_gb "$FINAL_ROOT")G, final)"
 
 # --- drainer lifecycle: a flag file marks "recording in progress" ---
@@ -128,10 +129,10 @@ fi
 echo ">>        start BEFORE arming; Ctrl-C AFTER landing."
 set +e
 if [ -n "$SECS" ]; then
-  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --cache-mb "$CACHE_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 124 ] && rc=0; [ "$rc" -eq 130 ] && rc=0
 else
-  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --cache-mb "$CACHE_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 130 ] && rc=0
 fi
 set -e
@@ -162,7 +163,7 @@ SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
     echo "- camera_calibration: drone4 OV9281 and CM2 uncalibrated; K[0]=0 in CameraInfo"
   fi
   echo "- imu: /fmu/out/sensor_combined over uXRCE-DDS (~194 Hz, no USB)"
-  echo "- storage: ${TIERS}, split=${SPLIT_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
+  echo "- storage: ${TIERS}, split=${SPLIT_MB}MB, cache=${CACHE_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
   echo "- truth: return-to-start loop-closure (no mocap/RTK)"
   echo "- size: ${SIZE}"
   echo

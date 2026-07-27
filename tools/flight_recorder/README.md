@@ -109,10 +109,13 @@ progress.
 By default, completed split chunks move directly from RAM to
 `/mnt/recordings`, bypassing eMMC. Drone4's installed 256 GB USB drive sustained
 218 MB/s across a 4 GiB direct-write test on 2026-07-27. Without that mount,
-the recorder falls back to RAM-to-eMMC operation. Useful overrides:
+the recorder falls back to RAM-to-eMMC operation. Because the active MCAP is
+already on tmpfs, this path disables rosbag's asynchronous cache and avoids its
+blocking full-cache dump at every split. Useful overrides:
 
 ```sh
 DOWN_FPS=10 FPS=30 SPLIT_MB=256 COMPRESS=zstd ./record_flight.sh "" test
+CACHE_MB=512 ./record_flight.sh "" deliberate_async_cache_test
 CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight
 STOP_ON_DISARM=1 ./record_flight.sh "" autonomous
 DETECT=1 ./record_flight.sh "" tag_anchor
