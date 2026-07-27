@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # Single-drone intelligent-flight capture: forward GS + downward CM2 + IMU,
 # one bag,
-# streamed across three storage tiers so we're not capped by the eMMC's space.
+# staged in RAM and drained to the installed USB flash drive.
 #
-#   capture.py --> RAM (tmpfs)  --fast-->  eMMC  --slow-->  USB (deep store)
+#   capture.py --> RAM (tmpfs)  -->  USB (final store)
 #
-# The bag is split into chunks; tier_drain.py relocates each COMPLETED chunk down
-# the tiers while recording continues. The USB drains continuously (~8 MB/s);
-# RAM + eMMC absorb the (~30 - 8) MB/s deficit, so max record time ~= (RAM +
-# eMMC) / deficit ~= 9-10 min, and everything lands on the 57 GB USB. The
-# max_cache_size in capture.py keeps the tmpfs writes drop-free. mcap zstd
-# (COMPRESS=zstd, default) shrinks the stream before it hits any tier. The
-# achieved ratio and duration depend on the color scene.
+# The bag is split into chunks; tier_drain.py moves each COMPLETED chunk directly
+# to USB while recording continues. Drone4's installed 256 GB drive sustained
+# 218 MB/s across a 4 GiB direct-write test on 2026-07-27, comfortably above the
+# recorder's measured output rate. If USB is absent, eMMC is the final store.
+# MCAP zstd (COMPRESS=zstd, default) shrinks the stream before it leaves RAM.
 #
 # Operationally: start before arming and press Ctrl-C after landing. One Ctrl-C
 # requests a clean stop. Keep power connected through "MCAP finalized" and the
@@ -50,26 +48,31 @@ RAMDIR="${RAMDIR:-/dev/shm/maavrec}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 SESSION="${STAMP}_${TAG}"
 
-# Storage tiers adapt to whether the USB deep-store is mounted:
-#   USB present -> 3-tier RAM -> eMMC -> USB  (full duration; USB is final)
-#   USB absent  -> 2-tier RAM -> eMMC         (eMMC is final; bounded by eMMC free)
+# Storage adapts to whether the USB final store is mounted:
+#   USB present -> RAM -> USB   (USB is final; eMMC is bypassed)
+#   USB absent  -> RAM -> eMMC  (eMMC is final; bounded by eMMC free)
 HOT="$RAMDIR/$SESSION"      # tmpfs -- capture writes here (split chunks)
 if mountpoint -q "$USBDIR"; then
-  MID="$EMMCDIR/$SESSION"   # eMMC -- mid buffer
-  DEEP="$USBDIR/$SESSION"   # USB  -- deep store, final bag
-  TIERS="RAM->eMMC->USB"
+  FINAL_ROOT="$USBDIR"
+  DEEP="$FINAL_ROOT/$SESSION"
+  TIERS="RAM->USB"
+  FINAL_LABEL="USB"
 else
-  echo ">> USB ($USBDIR) not mounted -- 2-tier mode: recording lands on eMMC ($EMMCDIR)" >&2
-  MID=""                    # no mid tier; HOT drains straight to DEEP (eMMC)
-  DEEP="$EMMCDIR/$SESSION"  # eMMC is the final store
+  echo ">> USB ($USBDIR) not mounted -- recording lands on eMMC ($EMMCDIR)" >&2
+  FINAL_ROOT="$EMMCDIR"
+  DEEP="$FINAL_ROOT/$SESSION"
   TIERS="RAM->eMMC"
+  FINAL_LABEL="eMMC"
 fi
 
 set +u; source /opt/ros/jazzy/setup.bash; set -u
 
 free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc '0-9'; }
-mkdir -p "$EMMCDIR" "$RAMDIR"
-[ "$(free_gb "$EMMCDIR")" -ge 1 ] || { echo "eMMC <1G free" >&2; exit 1; }
+mkdir -p "$FINAL_ROOT" "$RAMDIR"
+[ "$(free_gb "$FINAL_ROOT")" -ge 1 ] || {
+  echo "$FINAL_LABEL <1G free" >&2
+  exit 1
+}
 SCFG=""; [ "$COMPRESS" = zstd ] && SCFG="$RECORDER_DIR/config/mcap_zstd.yaml"
 DISARM=""; [ "$STOP_ON_DISARM" = 1 ] && DISARM="--stop-on-disarm"
 DOWN_CAMERA_ARG=""; [ "$NO_DOWN_CAMERA" = 1 ] && DOWN_CAMERA_ARG="--no-down-camera"
@@ -82,11 +85,7 @@ if [ "$DETECT" = 1 ]; then
   DETECT_ARG="--detect"
 fi
 echo ">> tiers=$TIERS  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  compress=${COMPRESS}"
-if [ -n "$MID" ]; then
-  echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  eMMC=$EMMCDIR ($(free_gb "$EMMCDIR")G)  USB=$USBDIR ($(free_gb "$USBDIR")G)"
-else
-  echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  eMMC=$EMMCDIR ($(free_gb "$EMMCDIR")G, final)"
-fi
+echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  $FINAL_LABEL=$FINAL_ROOT ($(free_gb "$FINAL_ROOT")G, final)"
 
 # --- drainer lifecycle: a flag file marks "recording in progress" ---
 FLAG=""; MOVER_PID=""; FINALIZED=""
@@ -116,13 +115,8 @@ if [ "$imu_ok" -ne 1 ]; then
 fi
 
 FLAG="$(mktemp /tmp/maav_rec_flag.XXXXXX)"
-if [ -n "$MID" ]; then
-  python3 "$RECORDER_DIR/tier_drain.py" --hot "$HOT" --mid "$MID" --deep "$DEEP" \
-          --flag "$FLAG" >/tmp/tier_drain.log 2>&1 &
-else
-  python3 "$RECORDER_DIR/tier_drain.py" --hot "$HOT" --deep "$DEEP" \
-          --flag "$FLAG" >/tmp/tier_drain.log 2>&1 &
-fi
+python3 "$RECORDER_DIR/tier_drain.py" --hot "$HOT" --deep "$DEEP" \
+        --flag "$FLAG" >/tmp/tier_drain.log 2>&1 &
 MOVER_PID=$!
 echo ">> drainer up (pid $MOVER_PID, log /tmp/tier_drain.log)"
 
@@ -147,7 +141,7 @@ set -e
 echo ">> [3/4] draining buffers to $DEEP ..."
 finalize
 tail -1 /tmp/tier_drain.log
-rmdir "$HOT" ${MID:+"$MID"} 2>/dev/null || true
+rmdir "$HOT" 2>/dev/null || true
 
 echo ">> [4/4] session metadata + verify"
 SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
@@ -168,7 +162,7 @@ SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
     echo "- camera_calibration: drone4 OV9281 and CM2 uncalibrated; K[0]=0 in CameraInfo"
   fi
   echo "- imu: /fmu/out/sensor_combined over uXRCE-DDS (~194 Hz, no USB)"
-  echo "- storage: ${TIERS} tiered, split=${SPLIT_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
+  echo "- storage: ${TIERS}, split=${SPLIT_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
   echo "- truth: return-to-start loop-closure (no mocap/RTK)"
   echo "- size: ${SIZE}"
   echo

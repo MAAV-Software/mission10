@@ -106,8 +106,10 @@ Keep the CM5 powered until the final bag path is printed. During MCAP
 finalization, another Ctrl-C only reports that finalization is already in
 progress.
 
-By default, split chunks move from RAM to eMMC to `/mnt/recordings` when that
-mount exists. Without it, the recorder uses RAM to eMMC. Useful overrides:
+By default, completed split chunks move directly from RAM to
+`/mnt/recordings`, bypassing eMMC. Drone4's installed 256 GB USB drive sustained
+218 MB/s across a 4 GiB direct-write test on 2026-07-27. Without that mount,
+the recorder falls back to RAM-to-eMMC operation. Useful overrides:
 
 ```sh
 DOWN_FPS=10 FPS=30 SPLIT_MB=256 COMPRESS=zstd ./record_flight.sh "" test

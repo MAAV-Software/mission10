@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Tiered drain for a split mcap recording.
+"""Drain completed chunks from a split MCAP recording.
 
-    HOT (tmpfs/RAM)  --fast-->  MID (eMMC, optional)  --slow-->  DEEP (USB)
+    HOT (tmpfs/RAM)  -->  DEEP (USB or eMMC)
 
 capture.py writes a split bag into HOT (one <session>_N.mcap chunk at a time).
-This relocates each COMPLETED chunk down the tiers *while recording continues*,
-so the maximum recording time is bounded by the sum of all tier capacities
-rather than the eMMC's small free space. The USB drains continuously at its slow
-pace; eMMC + RAM absorb the (produce - usb) deficit.
+This relocates each COMPLETED chunk to the final store while recording
+continues. An optional MID tier remains supported for other callers, but the
+flight recorder bypasses eMMC when its USB final store is present.
 
 Policy
 ------
 While the recording flag exists (capture running):
-  * thread A (hot->mid): move every completed HOT chunk to MID whenever MID has
-    headroom; if MID is full, leave it in HOT (the RAM spill). The active
-    (highest-index) chunk is never touched -- capture is still writing it.
-  * thread B (mid->deep): continuously move MID chunks to DEEP at USB speed.
+  * Without MID, move every completed HOT chunk directly to DEEP.
+  * With MID, thread A moves completed HOT chunks to MID when it has headroom,
+    and thread B continuously moves MID chunks to DEEP.
+  * The active (highest-index) chunk is never touched because capture may still
+    be writing it.
 When the flag disappears (capture has closed every file + written metadata),
 both threads stop and a single-threaded final flush pushes everything still in
 MID and HOT to DEEP, then copies metadata.yaml last so the DEEP bag dir is a
@@ -75,7 +75,7 @@ class Counter:
 
 
 def hotfree_loop(a, stop, moved):
-    """HOT -> MID (or HOT -> DEEP in 2-tier mode), completed chunks only."""
+    """Move completed chunks from HOT toward the final store."""
     while not stop.is_set():
         files = mcaps(a.hot)
         active = max((chunk_idx(f) for f in files), default=-1)
@@ -87,9 +87,8 @@ def hotfree_loop(a, stop, moved):
                     rsync_move(f, a.mid)
                 # else MID full -> leave in HOT (RAM spill), retry next pass
             else:
-                # 2-tier: DEEP is the eMMC rootfs. Reserve headroom so the RAM
-                # spill starts BEFORE the rootfs is hard-full (a full rootfs
-                # takes down more than the recording).
+                # Direct mode: reserve space on the final store. If it becomes
+                # too full, leave the chunk in RAM and report it at shutdown.
                 if avail_mb(a.deep) > a.deep_headroom_mb:
                     if rsync_move(f, a.deep):
                         moved.inc()
