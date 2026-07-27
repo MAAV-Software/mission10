@@ -5,8 +5,8 @@
 
 capture.py writes a split bag into HOT (one <session>_N.mcap chunk at a time).
 This relocates each COMPLETED chunk to the final store while recording
-continues. An optional MID tier remains supported for other callers, but the
-flight recorder bypasses eMMC when its USB final store is present.
+continues. The flight recorder uses this only for its no-USB RAM-to-eMMC
+fallback; its normal USB path writes directly and does not run a drainer.
 
 Policy
 ------

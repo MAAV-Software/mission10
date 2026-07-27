@@ -2,8 +2,8 @@
 """Unified dual-camera flight capture -> single mcap, no DDS hop for images.
 
 Sources:
-  - OV9281 forward GS cam via Picamera2 (YUV420 luma -> mono8), enqueued to one
-    MCAP writer thread (no ROS publish / DDS). SensorTimestamp is CLOCK_BOOTTIME;
+  - OV9281 forward GS cam via Picamera2 (YUV420 luma -> mono8), written DIRECTLY
+    to mcap (no ROS publish / DDS). libcamera SensorTimestamp is CLOCK_BOOTTIME;
     it is mapped to CLOCK_REALTIME so its header shares the ROS/PX4 DDS clock.
   - IMX219 Camera Module 2 via a second Picamera2 instance, recorded as packed
     YUYV 4:2:2 color at 1640x1232. Its intrinsics are intentionally marked
@@ -211,48 +211,23 @@ class SyncMonitor:
 
 
 class Bag:
-    def __init__(
-        self,
-        uri,
-        split_bytes=0,
-        storage_config="",
-        cache_bytes=512 * 1024 * 1024,
-        writer_queue_bytes=512 * 1024 * 1024,
-    ):
+    def __init__(self, uri, split_bytes=0, storage_config=""):
         self.w = rosbag2_py.SequentialWriter()
-        # max_cache_size>0 enables rosbag2's async CacheConsumer. This protects
-        # direct-to-disk callers from storage stalls, but rosbag2 Jazzy dumps the
-        # whole cache synchronously inside write() at every split. RAM-staged
-        # recording therefore sets this to zero; its storage is already fast and
-        # the synchronous split flush otherwise overflows the camera buffers.
-        # max_bagfile_size>0 splits the bag into <uri>_N.mcap chunks; the tiered
-        # drainer (tier_drain.py) relocates each COMPLETED chunk RAM->eMMC->USB
-        # while recording continues, so max recording time is bounded by the sum
-        # of all tiers, not just the eMMC's free space. 0 = single file.
+        # max_cache_size>0 enables rosbag2's async writer (CacheConsumer thread):
+        # write() buffers into RAM while a background thread drains to storage.
+        # max_bagfile_size>0 optionally splits the bag into <uri>_N.mcap chunks;
+        # zero writes one file and avoids split-finalization stalls.
         # storage_config (mcap plugin yaml) enables per-chunk zstd: ~1.78x on
-        # mono8, compressed once here in RAM so every downstream tier carries
-        # fewer bytes (more buffer-seconds AND less USB deficit). See mcap_zstd.yaml.
+        # mono8. See mcap_zstd.yaml.
         so = rosbag2_py.StorageOptions(uri=uri, storage_id="mcap",
-                                       max_cache_size=cache_bytes,
+                                       max_cache_size=512*1024*1024,
                                        max_bagfile_size=split_bytes)
         if storage_config:
             so.storage_config_uri = storage_config
         self.w.open(so, rosbag2_py.ConverterOptions("", ""))
+        self.lock = threading.Lock()
         self._id = 0
         self.counts = {}
-        self.writer_queue_bytes = writer_queue_bytes
-        self.pending = deque()
-        self.pending_bytes = 0
-        self.peak_pending_bytes = 0
-        self.producer_waits = 0
-        self.accepting = True
-        self.writer_error = None
-        self.cv = threading.Condition()
-        self.writer_thread = threading.Thread(
-            target=self._writer_loop,
-            name="mcap-writer",
-        )
-        self.writer_thread.start()
 
     def topic(self, name, type_str):
         self.w.create_topic(rosbag2_py.TopicMetadata(
@@ -261,71 +236,25 @@ class Bag:
         self.counts[name] = 0
 
     def write(self, name, data, ts_ns):
-        size = len(data)
-        with self.cv:
-            while (
-                self.accepting
-                and self.writer_error is None
-                and self.pending
-                and self.writer_queue_bytes > 0
-                and self.pending_bytes + size > self.writer_queue_bytes
-            ):
-                self.producer_waits += 1
-                self.cv.wait()
-            if self.writer_error is not None:
-                raise RuntimeError("MCAP writer failed") from self.writer_error
-            if not self.accepting:
+        with self.lock:
+            if self.w is None:  # closed during teardown -> drop late callbacks
                 return
-            self.pending.append((name, data, ts_ns, size))
-            self.pending_bytes += size
-            self.peak_pending_bytes = max(
-                self.peak_pending_bytes, self.pending_bytes
-            )
-            self.cv.notify()
-
-    def _writer_loop(self):
-        try:
-            while True:
-                with self.cv:
-                    while not self.pending and self.accepting:
-                        self.cv.wait()
-                    if not self.pending:
-                        return
-                    name, data, ts_ns, size = self.pending.popleft()
-                    self.pending_bytes -= size
-                    self.cv.notify_all()
-                self.w.write(name, data, ts_ns)
-                self.counts[name] += 1
-        except Exception as exc:
-            with self.cv:
-                self.writer_error = exc
-                self.accepting = False
-                self.cv.notify_all()
+            self.w.write(name, data, ts_ns)
+            self.counts[name] += 1
 
     def close(self):
-        # Producers have stopped before close(). Drain their queued messages,
-        # then destroy the writer on this thread to finalize metadata.
-        with self.cv:
-            self.accepting = False
-            self.cv.notify_all()
+        # Detach the writer under the lock so any in-flight ROS callback that
+        # races teardown sees w is None and no-ops, then finalize (flush cache +
+        # write metadata) outside the lock.
+        with self.lock:
+            w, self.w = self.w, None
         print(
-            "recorder: draining writer queue and finalizing MCAP metadata; "
-            "keep power connected",
+            "recorder: finalizing MCAP cache and metadata; keep power connected",
             file=sys.stderr,
             flush=True,
         )
-        self.writer_thread.join()
-        if self.writer_error is not None:
-            raise RuntimeError("MCAP writer failed") from self.writer_error
-        w, self.w = self.w, None
         del w
-        print(
-            "recorder: MCAP finalized; writer queue peak="
-            f"{self.peak_pending_bytes / (1024 * 1024):.1f} MB, "
-            f"producer_waits={self.producer_waits}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print("recorder: MCAP finalized", file=sys.stderr, flush=True)
 
 
 def message_record_time_ns(msg):
@@ -635,10 +564,6 @@ def main():
                     help="nadir frames the detector may fall behind by")
     ap.add_argument("--split-mb", type=int, default=0,
                     help="split bag into N-MB mcap chunks (0=single file)")
-    ap.add_argument("--cache-mb", type=int, default=512,
-                    help="rosbag async cache size in MB (0=synchronous writer)")
-    ap.add_argument("--writer-queue-mb", type=int, default=512,
-                    help="application writer queue size in MB")
     ap.add_argument("--storage-config", default="",
                     help="mcap storage plugin yaml (e.g. config/mcap_zstd.yaml)")
     ap.add_argument("--stop-on-disarm", action="store_true",
@@ -661,19 +586,13 @@ def main():
         ap.error("--detect needs the downward camera")
     if args.detect_queue < 1:
         ap.error("--detect-queue must be at least 1")
-    if args.cache_mb < 0:
-        ap.error("--cache-mb must be nonnegative")
-    if args.writer_queue_mb <= 0:
-        ap.error("--writer-queue-mb must be positive")
 
     ov_clock_mapper = ClockMapper(max_step_ns=int(args.max_clock_step_ms * 1e6))
     down_clock_mapper = ClockMapper(max_step_ns=int(args.max_clock_step_ms * 1e6))
     sync_monitor = SyncMonitor(max_rtt_us=int(args.max_sync_rtt_ms * 1000))
 
     bag = Bag(args.out, split_bytes=args.split_mb * 1024 * 1024,
-              storage_config=args.storage_config,
-              cache_bytes=args.cache_mb * 1024 * 1024,
-              writer_queue_bytes=args.writer_queue_mb * 1024 * 1024)
+              storage_config=args.storage_config)
     bag.topic("/camera/image_raw", "sensor_msgs/msg/Image")
     bag.topic("/camera/camera_info", "sensor_msgs/msg/CameraInfo")
     if not args.no_down_camera:
@@ -964,7 +883,7 @@ def main():
         except Exception:
             pass
         rclpy.shutdown()
-        bag.close()              # drain the FIFO, then finalize MCAP metadata
+        bag.close()              # race-free finalize (flush cache + metadata)
 
         dt = time.monotonic() - session_t0 if session_t0 else 0.0
         print("=== capture summary ===", file=sys.stderr)

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Single-drone intelligent-flight capture: forward GS + downward CM2 + IMU,
 # one bag,
-# staged in RAM and drained to the installed USB flash drive.
+# written directly to the installed USB flash drive.
 #
-#   capture.py --> RAM (tmpfs)  -->  USB (final store)
+#   capture.py --> USB (final store)
 #
-# The bag is split into chunks; tier_drain.py moves each COMPLETED chunk directly
-# to USB while recording continues. Drone4's installed 256 GB drive sustained
-# 218 MB/s across a 4 GiB direct-write test on 2026-07-27, comfortably above the
-# recorder's measured output rate. If USB is absent, eMMC is the final store.
-# MCAP zstd (COMPRESS=zstd, default) shrinks the stream before it leaves RAM.
+# Drone4's installed 256 GB drive sustained 218 MB/s across a 4 GiB direct-write
+# test on 2026-07-27, comfortably above the recorder's measured output rate.
+# The USB path writes one MCAP by default: no tmpfs copy, rsync, eMMC traffic, or
+# periodic split finalization. If USB is absent, the recorder falls back to
+# split chunks staged through RAM into eMMC.
 #
 # Operationally: start before arming and press Ctrl-C after landing. One Ctrl-C
 # requests a clean stop. Keep power connected through "MCAP finalized" and the
@@ -18,8 +18,7 @@
 # Usage: record_flight.sh [SECONDS] [TAG]
 #   SECONDS  hard cap (default: none -- run until SIGINT at landing)
 #   TAG      name suffix (default: intel_flight)
-# Env: SPLIT_MB (default 256), CACHE_MB (default 0),
-#      WRITER_QUEUE_MB (default 512), FPS (OV9281, default 30),
+# Env: SPLIT_MB (default 0 with USB, 256 without), FPS (OV9281, default 30),
 #      NO_DOWN_CAMERA (1 = OV9281 only), DOWN_FPS (IMX219, default 10),
 #      MINHZ (IMU gate, default 120), DETECT (1 = run the nadir AprilTag detector),
 #      MISSION_ENGINE (package path the detector comes from),
@@ -35,9 +34,7 @@ CM2_MAX_EXPOSURE_US="${CM2_MAX_EXPOSURE_US:-1000}"
 MINHZ="${MINHZ:-120}"
 IMU_GATE_SECS="${IMU_GATE_SECS:-5}"
 IMU_GATE_ATTEMPTS="${IMU_GATE_ATTEMPTS:-3}"
-SPLIT_MB="${SPLIT_MB:-256}"
-CACHE_MB="${CACHE_MB:-0}"         # tmpfs is fast; avoid rosbag's blocking split flush
-WRITER_QUEUE_MB="${WRITER_QUEUE_MB:-512}"
+SPLIT_MB="${SPLIT_MB:-}"
 COMPRESS="${COMPRESS:-zstd}"     # lossless per-chunk compression | none
 STOP_ON_DISARM="${STOP_ON_DISARM:-0}"  # 1 = recorder self-stops when PX4 disarms (mission end)
 DETECT="${DETECT:-0}"                  # 1 = run the nadir AprilTag detector on the captured frames
@@ -52,26 +49,34 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 SESSION="${STAMP}_${TAG}"
 
 # Storage adapts to whether the USB final store is mounted:
-#   USB present -> RAM -> USB   (USB is final; eMMC is bypassed)
-#   USB absent  -> RAM -> eMMC  (eMMC is final; bounded by eMMC free)
-HOT="$RAMDIR/$SESSION"      # tmpfs -- capture writes here (split chunks)
+#   USB present -> write one MCAP directly to USB
+#   USB absent  -> split MCAP in RAM and drain completed chunks to eMMC
 if mountpoint -q "$USBDIR"; then
   FINAL_ROOT="$USBDIR"
   DEEP="$FINAL_ROOT/$SESSION"
-  TIERS="RAM->USB"
+  HOT="$DEEP"
+  SPLIT_MB="${SPLIT_MB:-0}"
+  USE_DRAIN=0
+  STORAGE_PATH="USB direct"
   FINAL_LABEL="USB"
 else
   echo ">> USB ($USBDIR) not mounted -- recording lands on eMMC ($EMMCDIR)" >&2
   FINAL_ROOT="$EMMCDIR"
   DEEP="$FINAL_ROOT/$SESSION"
-  TIERS="RAM->eMMC"
+  HOT="$RAMDIR/$SESSION"
+  SPLIT_MB="${SPLIT_MB:-256}"
+  USE_DRAIN=1
+  STORAGE_PATH="RAM->eMMC"
   FINAL_LABEL="eMMC"
 fi
 
 set +u; source /opt/ros/jazzy/setup.bash; set -u
 
 free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc '0-9'; }
-mkdir -p "$FINAL_ROOT" "$RAMDIR"
+mkdir -p "$FINAL_ROOT"
+if [ "$USE_DRAIN" -eq 1 ]; then
+  mkdir -p "$RAMDIR"
+fi
 [ "$(free_gb "$FINAL_ROOT")" -ge 1 ] || {
   echo "$FINAL_LABEL <1G free" >&2
   exit 1
@@ -87,8 +92,12 @@ if [ "$DETECT" = 1 ]; then
   export PYTHONPATH="${PYTHONPATH:-}:$MISSION_ENGINE"
   DETECT_ARG="--detect"
 fi
-echo ">> tiers=$TIERS  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  cache=${CACHE_MB}MB  queue=${WRITER_QUEUE_MB}MB  compress=${COMPRESS}"
-echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  $FINAL_LABEL=$FINAL_ROOT ($(free_gb "$FINAL_ROOT")G, final)"
+echo ">> storage=$STORAGE_PATH  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  compress=${COMPRESS}"
+if [ "$USE_DRAIN" -eq 1 ]; then
+  echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  $FINAL_LABEL=$FINAL_ROOT ($(free_gb "$FINAL_ROOT")G, final)"
+else
+  echo ">>   $FINAL_LABEL=$FINAL_ROOT ($(free_gb "$FINAL_ROOT")G, direct)"
+fi
 
 # --- drainer lifecycle: a flag file marks "recording in progress" ---
 FLAG=""; MOVER_PID=""; FINALIZED=""
@@ -117,11 +126,15 @@ if [ "$imu_ok" -ne 1 ]; then
   exit 1
 fi
 
-FLAG="$(mktemp /tmp/maav_rec_flag.XXXXXX)"
-python3 "$RECORDER_DIR/tier_drain.py" --hot "$HOT" --deep "$DEEP" \
-        --flag "$FLAG" >/tmp/tier_drain.log 2>&1 &
-MOVER_PID=$!
-echo ">> drainer up (pid $MOVER_PID, log /tmp/tier_drain.log)"
+if [ "$USE_DRAIN" -eq 1 ]; then
+  FLAG="$(mktemp /tmp/maav_rec_flag.XXXXXX)"
+  python3 "$RECORDER_DIR/tier_drain.py" --hot "$HOT" --deep "$DEEP" \
+          --flag "$FLAG" >/tmp/tier_drain.log 2>&1 &
+  MOVER_PID=$!
+  echo ">> drainer up (pid $MOVER_PID, log /tmp/tier_drain.log)"
+else
+  echo ">> direct USB write; no storage drainer"
+fi
 
 if [ "$NO_DOWN_CAMERA" = 1 ]; then
   echo ">> [2/4] capturing -> $HOT  (OV=$FPS fps, CM2=disabled, ${SECS:-until SIGINT})"
@@ -131,20 +144,24 @@ fi
 echo ">>        start BEFORE arming; Ctrl-C AFTER landing."
 set +e
 if [ -n "$SECS" ]; then
-  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --cache-mb "$CACHE_MB" --writer-queue-mb "$WRITER_QUEUE_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 124 ] && rc=0; [ "$rc" -eq 130 ] && rc=0
 else
-  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --cache-mb "$CACHE_MB" --writer-queue-mb "$WRITER_QUEUE_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 130 ] && rc=0
 fi
 set -e
 [ "$rc" -ne 0 ] && { echo "capture.py failed (rc=$rc)" >&2; exit "$rc"; }
 
-# capture has closed every chunk + written metadata -> let the drainer flush
-echo ">> [3/4] draining buffers to $DEEP ..."
-finalize
-tail -1 /tmp/tier_drain.log
-rmdir "$HOT" 2>/dev/null || true
+if [ "$USE_DRAIN" -eq 1 ]; then
+  # Capture has closed every chunk and written metadata; flush the drainer.
+  echo ">> [3/4] draining buffers to $DEEP ..."
+  finalize
+  tail -1 /tmp/tier_drain.log
+  rmdir "$HOT" 2>/dev/null || true
+else
+  echo ">> [3/4] MCAP already finalized on USB"
+fi
 
 echo ">> [4/4] session metadata + verify"
 SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
@@ -165,7 +182,7 @@ SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
     echo "- camera_calibration: drone4 OV9281 and CM2 uncalibrated; K[0]=0 in CameraInfo"
   fi
   echo "- imu: /fmu/out/sensor_combined over uXRCE-DDS (~194 Hz, no USB)"
-  echo "- storage: ${TIERS}, split=${SPLIT_MB}MB, cache=${CACHE_MB}MB, writer_queue=${WRITER_QUEUE_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
+  echo "- storage: ${STORAGE_PATH}, split=${SPLIT_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
   echo "- truth: return-to-start loop-closure (no mocap/RTK)"
   echo "- size: ${SIZE}"
   echo
