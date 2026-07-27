@@ -70,6 +70,21 @@ rsync -a tools/flight_recorder/ drone4:/home/maav/flight_recorder/
 The drone image supplies ROS 2 Jazzy, `px4_msgs`, Picamera2, NumPy,
 `rosbag2_py`, the MCAP storage plugin, and `rsync`.
 
+`DETECT=1` also needs the mission engine. `MISSION_ENGINE` defaults to the
+sibling package in this checkout, so a copied-out recorder must name where the
+engine landed:
+
+```sh
+rsync -a ros/mission_engine/ drone4:/home/maav/maav_survey/src/mission_engine/
+# on the aircraft
+MISSION_ENGINE=/home/maav/maav_survey/src/mission_engine DETECT=1 \
+  ./record_flight.sh "" tag_anchor
+```
+
+`vision_msgs` is not in the base ROS image. Install it from a CI tarball with
+`px4_ros_build/scripts/deploy-ros-pkg.sh`, which also installs the ament index
+markers that `rosbag2` needs to record a readable message definition.
+
 ## Record a flight
 
 On the drone:
@@ -109,8 +124,8 @@ publishes `vision_msgs/Detection2DArray` on `/detections/down` for the mission
 engine, and records the same messages in the bag. Each detection keeps its
 source image header, so a detection joins to flight state on the image stamp.
 
-`MISSION_ENGINE` gives the package path, `/home/maav/maav_survey/src/mission_engine`
-by default. The recorder reports the detector at startup and prints its frame,
+`MISSION_ENGINE` gives the package path. It defaults to the sibling package in
+this checkout. The recorder reports the detector at startup and prints its frame,
 tag, drop, and latency counts in the capture summary. A detector that will not
 load, or that faults during the flight, is reported and the recording
 continues.

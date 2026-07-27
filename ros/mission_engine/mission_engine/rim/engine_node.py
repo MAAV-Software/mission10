@@ -94,6 +94,12 @@ class EngineNode(OffboardController):
         self.declare_parameter("anchor_gate_m", 1.5)
         self.declare_parameter("anchor_persist_s", 1.0)
         self.declare_parameter("anchor_max_radial_m", 3.0)
+        # Which tags are survey markers at known fixed places. The anchor keys
+        # its datum by tag id, so a second tag carrying an anchor id puts the
+        # datum at the midpoint of the two, where no tag is, and moves it by
+        # metres when either one leaves view. The mine log still ingests every
+        # decode; only the anchor is restricted. Empty accepts any tag.
+        self.declare_parameter("anchor_tag_ids", [6, 7])
         self.declare_parameter("anchor_aborts", True)
         # anchor correction. Off by default: this moves the airframe, so a
         # flight enables it only after an open-loop flight has characterised
@@ -126,6 +132,9 @@ class EngineNode(OffboardController):
         self.camera_roll = math.radians(float(p("camera_roll_deg").value))
         self.detections_topic = str(p("detections_topic").value)
         self.anchor_aborts = bool(p("anchor_aborts").value)
+        self.anchor_tag_ids = {
+            f"{TAG_PREFIX}{int(i)}" for i in (p("anchor_tag_ids").value or [])
+        }
         self.drone_id = str(p("drone_id").value)
         self.mission_id = str(p("mission_id").value) or time.strftime("%Y%m%d_%H%M%S")
         self.dump_dir = Path(str(p("dump_dir").value))
@@ -175,6 +184,7 @@ class EngineNode(OffboardController):
             f"mission_engine rim up: detections={self.detections_topic} "
             f"fence={p('fence_radius_m').value} m "
             f"anchor_gate={p('anchor_gate_m').value} m "
+            f"anchor_tags={sorted(self.anchor_tag_ids) or 'any'} "
             f"anchor_aborts={self.anchor_aborts}"
         )
 
@@ -298,7 +308,11 @@ class EngineNode(OffboardController):
                 continue
             if self.engine is not None:
                 self.engine.log.ingest(obs)
-            if tag_id is not None:
+            # Every decode reaches the mine log above. Only a known survey
+            # marker is allowed to move the anchor's datum.
+            if tag_id is not None and (
+                not self.anchor_tag_ids or tag_id in self.anchor_tag_ids
+            ):
                 self._observe_anchor(t_img, tag_id, obs.ground_local, snap)
 
     def _observe_anchor(self, t_img, tag_id, fix, snap: PoseSnapshot) -> None:

@@ -53,7 +53,10 @@
     camera_roll_deg: 0.0
     camera_tilt_deg: 0.0
 
-    # the tag anchor: measure and report only
+    # the tag anchor: measure and report only.
+    # 6 and 7 are the big tags at the corners of the centre square. Any other
+    # decode still reaches the mine log; it just cannot move the datum.
+    anchor_tag_ids: [6, 7]
     anchor_aborts: false
     anchor_corrects: false
     anchor_gate_m: 1.5
