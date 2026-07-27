@@ -11,10 +11,11 @@ The recorder owns the cameras, so it is also the frame source for the sensing
 stack. One capture serves every consumer of the nadir view
 ([`rfd-single-camera-sensing`](../../../doc/rfd-single-camera-sensing.md) 3.1).
 `--detect` attaches the mission engine's AprilTag detector to those frames and
-avoids a DDS hop for 20 MB/s of imagery. The bag is always written first, in
-the capture thread. A sink is optional, runs on its own thread behind a
-bounded queue, and cannot stop a recording. Run the recorder without `--detect`
-to keep it free of the mission engine.
+avoids a DDS hop for 20 MB/s of imagery. The bag FIFO is always populated
+before the optional sink sees a frame. One writer thread drains that FIFO to
+MCAP; the sink runs on its own thread behind a separate bounded queue and
+cannot stop a recording. Run the recorder without `--detect` to keep it free
+of the mission engine.
 
 ## Recorded streams
 
@@ -98,7 +99,7 @@ Start the recorder before arming. Press Ctrl-C once after landing. The recorder
 then prints these shutdown phases:
 
 1. `stop requested`
-2. `finalizing MCAP cache and metadata`
+2. `draining writer queue and finalizing MCAP metadata`
 3. `MCAP finalized`
 4. the tier-drain summary and final bag path
 
@@ -111,7 +112,9 @@ By default, completed split chunks move directly from RAM to
 218 MB/s across a 4 GiB direct-write test on 2026-07-27. Without that mount,
 the recorder falls back to RAM-to-eMMC operation. Because the active MCAP is
 already on tmpfs, this path disables rosbag's asynchronous cache and avoids its
-blocking full-cache dump at every split. Useful overrides:
+blocking full-cache dump at every split. A separate bounded application queue
+keeps camera acquisition independent from MCAP writes and split finalization.
+Useful overrides:
 
 ```sh
 DOWN_FPS=10 FPS=30 SPLIT_MB=256 COMPRESS=zstd ./record_flight.sh "" test
