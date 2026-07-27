@@ -18,10 +18,11 @@ to keep it free of the mission engine.
 
 ## Recorded streams
 
-- Forward OV9281: 1280 × 800 `mono8` at 30 Hz. The tool requires the installed
-  device-tree rotation to report 180 degrees. It initializes this camera after
-  the CM2 manager so libcamera applies native horizontal and vertical sensor
-  flips for the physically inverted mount.
+- Forward OV9281: 1280 × 800 `mono8` at 30 Hz. Automatic daylight exposure is
+  capped at 1000 µs by default. The tool requires the installed device-tree
+  rotation to report 180 degrees. It initializes this camera after the CM2
+  manager so libcamera applies native horizontal and vertical sensor flips for
+  the physically inverted mount.
 - Downward IMX219 Camera Module 2: 1640 × 1232 packed `yuyv` 4:2:2 color at
   10 Hz by default. Automatic daylight exposure is capped at 1000 µs; darker
   frames remain dark after analogue gain is exhausted. The packed format keeps
@@ -116,6 +117,7 @@ from RAM to eMMC. Useful overrides:
 DOWN_FPS=10 FPS=30 COMPRESS=zstd ./record_flight.sh "" test
 SPLIT_MB=2048 ./record_flight.sh "" deliberate_split_test
 CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight
+OV_MAX_EXPOSURE_US=1000 ./record_flight.sh "" vio_daylight
 STOP_ON_DISARM=1 ./record_flight.sh "" autonomous
 DETECT=1 ./record_flight.sh "" tag_anchor
 ./record_flight.sh 60 timed_test

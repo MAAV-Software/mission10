@@ -1,7 +1,7 @@
-"""Process-local libcamera tuning helpers for the daylight IMX219."""
+"""Process-local libcamera tuning helpers for daylight camera capture."""
 
-def cap_imx219_short_exposure(tuning, max_exposure_us):
-    """Cap the normal IMX219 AGC channel's short-mode shutter curve.
+def cap_short_exposure(tuning, max_exposure_us, camera_name):
+    """Cap camera AGC channel zero's short-mode shutter curve.
 
     The curve remains automatic below the limit. Once the shutter reaches the
     limit, AGC increases analogue gain along the remaining curve points.
@@ -27,11 +27,22 @@ def cap_imx219_short_exposure(tuning, max_exposure_us):
         return tuning
 
     raise RuntimeError(
-        "IMX219 tuning does not contain rpi.agc channel 0 short exposure mode"
+        f"{camera_name} tuning does not contain "
+        "rpi.agc channel 0 short exposure mode"
     )
+
+
+def cap_imx219_short_exposure(tuning, max_exposure_us):
+    return cap_short_exposure(tuning, max_exposure_us, "IMX219")
 
 
 def load_imx219_daylight_tuning(picamera2_class, max_exposure_us):
     """Load the installed IMX219 tuning and apply a hard shutter ceiling."""
     tuning = picamera2_class.load_tuning_file("imx219.json")
     return cap_imx219_short_exposure(tuning, max_exposure_us)
+
+
+def load_ov9281_daylight_tuning(picamera2_class, max_exposure_us):
+    """Load the installed OV9281 tuning and apply a hard shutter ceiling."""
+    tuning = picamera2_class.load_tuning_file("ov9281_mono.json")
+    return cap_short_exposure(tuning, max_exposure_us, "OV9281")

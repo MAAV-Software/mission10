@@ -44,7 +44,10 @@ from std_msgs.msg import Int64
 import rosbag2_py
 from picamera2 import Picamera2
 
-from camera_tuning import load_imx219_daylight_tuning
+from camera_tuning import (
+    load_imx219_daylight_tuning,
+    load_ov9281_daylight_tuning,
+)
 from image_formats import YUYV_BYTES_PER_PIXEL, YUYV_ENCODING, pack_yuyv_frame
 from px4_msgs.msg import (
     DistanceSensor, EstimatorAidSource1d, EstimatorAidSource2d,
@@ -342,7 +345,8 @@ class CameraStats:
 
 def capture_camera(
     picam, bag, clock_mapper, stats, *, width, height, frame_id,
-    image_topic, info_topic, camera_info, clock_topic, errors, errors_lock,
+    image_topic, info_topic, camera_info, clock_topic, max_exposure_us,
+    errors, errors_lock,
 ):
     """Drain one Picamera2 stream until the session stops."""
     global _running
@@ -360,6 +364,11 @@ def capture_camera(
             finally:
                 req.release()
 
+            if exposure_us > max_exposure_us:
+                raise RuntimeError(
+                    "exposure ceiling violated: "
+                    f"{exposure_us} us > {max_exposure_us} us"
+                )
             ts_ns, clock_offset_ns = clock_mapper.camera_realtime_ns(
                 sensor_boottime_ns
             )
@@ -548,6 +557,8 @@ def main():
     ap.add_argument("--w", type=int, default=1280)
     ap.add_argument("--h", type=int, default=800)
     ap.add_argument("--fps", type=float, default=30.0)
+    ap.add_argument("--ov-max-exposure-us", type=int, default=1000,
+                    help="hard OV9281 daylight shutter ceiling (default: 1000 us)")
     ap.add_argument("--down-cam", type=int, default=1)
     ap.add_argument("--down-w", type=int, default=1640)
     ap.add_argument("--down-h", type=int, default=1232)
@@ -578,6 +589,8 @@ def main():
 
     if args.fps <= 0 or args.down_fps <= 0:
         ap.error("camera frame rates must be positive")
+    if args.ov_max_exposure_us <= 0:
+        ap.error("--ov-max-exposure-us must be positive")
     if args.down_max_exposure_us <= 0:
         ap.error("--down-max-exposure-us must be positive")
     if not args.no_down_camera and args.cam == args.down_cam:
@@ -735,7 +748,10 @@ def main():
 
         # Initialize both libcamera managers before either sensor streams. The
         # CM2 needs a separate manager for its process-local exposure tuning.
-        ov = Picamera2(args.cam)
+        ov_tuning = load_ov9281_daylight_tuning(
+            Picamera2, args.ov_max_exposure_us
+        )
+        ov = Picamera2(args.cam, tuning=ov_tuning)
         cameras.append(ov)
         ov_model = ov.camera_properties.get("Model")
         ov_rotation = ov.camera_properties.get("Rotation")
@@ -760,7 +776,12 @@ def main():
         ov_duration_us = int(1_000_000 / args.fps)
         ov.configure(ov.create_video_configuration(
             main={"size": (args.w, args.h), "format": "YUV420"},
-            controls={"FrameDurationLimits": (ov_duration_us, ov_duration_us)},
+            controls={
+                "FrameDurationLimits": (ov_duration_us, ov_duration_us),
+                "AeExposureMode": 1,
+                "ExposureTimeMode": 0,
+                "AnalogueGainMode": 0,
+            },
             buffer_count=12,
         ))
         if down_process:
@@ -774,7 +795,9 @@ def main():
         session_t0 = time.monotonic()
         print(
             f"recorder: OV9281 cam{args.cam} {args.w}x{args.h}@{args.fps} "
-            f"rotation={ov_rotation} -> {args.out}",
+            f"rotation={ov_rotation} "
+            f"automatic exposure<={args.ov_max_exposure_us}us "
+            f"-> {args.out}",
             file=sys.stderr,
             flush=True,
         )
@@ -803,6 +826,7 @@ def main():
                 "info_topic": "/camera/camera_info",
                 "camera_info": make_uncalibrated_camera_info(args.w, args.h),
                 "clock_topic": "/capture/realtime_minus_boottime_ns",
+                "max_exposure_us": args.ov_max_exposure_us,
                 "errors": errors,
                 "errors_lock": errors_lock,
             },

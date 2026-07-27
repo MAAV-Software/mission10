@@ -28,6 +28,7 @@ set -euo pipefail
 SECS="${1:-}"
 TAG="${2:-intel_flight}"
 FPS="${FPS:-30}"
+OV_MAX_EXPOSURE_US="${OV_MAX_EXPOSURE_US:-1000}"
 NO_DOWN_CAMERA="${NO_DOWN_CAMERA:-0}"
 DOWN_FPS="${DOWN_FPS:-10}"
 CM2_MAX_EXPOSURE_US="${CM2_MAX_EXPOSURE_US:-1000}"
@@ -144,10 +145,10 @@ fi
 echo ">>        start BEFORE arming; Ctrl-C AFTER landing."
 set +e
 if [ -n "$SECS" ]; then
-  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 124 ] && rc=0; [ "$rc" -eq 130 ] && rc=0
 else
-  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 130 ] && rc=0
 fi
 set -e
@@ -173,7 +174,7 @@ SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
   else
     echo "- forward GS + downward survey camera + IMU, one continuous bag"
   fi
-  echo "- forward_camera: OV9281 cam0 1280x800 mono8 @${FPS}fps; device-tree rotation=180; no software rotation"
+  echo "- forward_camera: OV9281 cam0 1280x800 mono8 @${FPS}fps; automatic daylight exposure <=${OV_MAX_EXPOSURE_US}us; device-tree rotation=180; no software rotation"
   if [ "$NO_DOWN_CAMERA" = 1 ]; then
     echo "- downward_camera: disabled"
     echo "- camera_calibration: drone4 OV9281 uncalibrated; K[0]=0 in CameraInfo"

@@ -12,6 +12,7 @@ set -euo pipefail
 
 SECS="${1:-30}"
 TAG="${2:-ov9281_vio}"
+OV_MAX_EXPOSURE_US="${OV_MAX_EXPOSURE_US:-1000}"
 DOWN_FPS="${DOWN_FPS:-10}"
 CM2_MAX_EXPOSURE_US="${CM2_MAX_EXPOSURE_US:-1000}"
 MINHZ="${MINHZ:-120}"          # gate: fail below this (override on battery: MINHZ=100)
@@ -54,7 +55,7 @@ echo ">> [2/3] capturing ${SECS}s -> $OUT"
 # duration-bounded stop here (capture.py catches SIGINT and flushes cleanly).
 # Accept 124/130 only; any other non-zero is a real capture failure.
 set +e
-timeout -s INT "$((SECS + 2))" python3 "$RECORDER_DIR/capture.py" --out "$OUT" --fps 30 --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US"
+timeout -s INT "$((SECS + 2))" python3 "$RECORDER_DIR/capture.py" --out "$OUT" --fps 30 --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 130 ]; then
@@ -70,7 +71,7 @@ SIZE="$(du -h "$OUT"/*.mcap | cut -f1)"
   echo "- duration_req: ${SECS}s"
   echo "- imu_source: /fmu/out/sensor_combined over uXRCE-DDS (~194 Hz, no USB)"
   echo "- size: ${SIZE}"
-  echo "- forward_camera: OV9281 cam0 1280x800 mono8 @30fps; device-tree rotation=180; no software rotation"
+  echo "- forward_camera: OV9281 cam0 1280x800 mono8 @30fps; automatic daylight exposure <=${OV_MAX_EXPOSURE_US}us; device-tree rotation=180; no software rotation"
   echo "- downward_camera: IMX219 cam1 1640x1232 yuyv422 color @${DOWN_FPS}fps; automatic daylight exposure <=${CM2_MAX_EXPOSURE_US}us; driver-default orientation; no software rotation"
   echo "- camera_calibration: drone4 OV9281 and CM2 uncalibrated; K[0]=0 in CameraInfo"
   echo
