@@ -14,9 +14,8 @@ def cap_short_exposure(tuning, max_exposure_us, camera_name):
         if not agc:
             continue
         channels = agc.get("channels", [])
-        if not channels:
-            break
-        exposure_modes = channels[0].get("exposure_modes", {})
+        agc_channel = channels[0] if channels else agc
+        exposure_modes = agc_channel.get("exposure_modes", {})
         short_mode = exposure_modes.get("short")
         if not short_mode or not short_mode.get("shutter"):
             break
