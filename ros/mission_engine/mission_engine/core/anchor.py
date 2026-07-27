@@ -249,16 +249,31 @@ class TagAnchorMap:
 
     # ------------------------------------------------------------ outputs
 
-    def drift(self, t: float) -> Optional[AnchorTransform]:
+    def drift(
+        self,
+        t: float,
+        *,
+        min_tags: int = 1,
+        max_age_s: Optional[float] = None,
+        max_pair_error_m: Optional[float] = None,
+    ) -> Optional[AnchorTransform]:
         """Best current estimate of how the flight-layer frame has moved since
         the datum, or None when no settled tag has been seen recently.
 
         Each tag contributes one point correspondence — its datum against the
         median of its recent fixes, so a single bad frame cannot carry the
         answer. Two correspondences determine translation and rotation exactly;
-        one leaves rotation unobservable and the solve reduces to a shift."""
-        pairs = self._correspondences(t)
-        if not pairs:
+        one leaves rotation unobservable and the solve reduces to a shift.
+
+        Closed-loop callers can require a fresh, geometrically consistent tag
+        pair. The ordinary diagnostic/abort path retains the one-tag behavior."""
+        pairs = self._correspondences(t, max_age_s=max_age_s)
+        if len(pairs) < min_tags:
+            return None
+        if (
+            max_pair_error_m is not None
+            and self._pair_geometry_error(pairs) > max_pair_error_m
+        ):
             return None
         if len(pairs) == 1:
             (origin, fix), = pairs
@@ -272,11 +287,12 @@ class TagAnchorMap:
         return _rigid_fit(pairs)
 
     def _correspondences(
-        self, t: float
+        self, t: float, *, max_age_s: Optional[float] = None
     ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        max_age = self.cfg.stale_s if max_age_s is None else max_age_s
         per_tag: Dict[str, List[AnchorFix]] = {}
         for fx in self.fixes:
-            if not fx.settled or t - fx.t > self.cfg.stale_s:
+            if not fx.settled or t - fx.t > max_age:
                 continue
             per_tag.setdefault(fx.tag_id, []).append(fx)
         pairs = []
@@ -294,6 +310,23 @@ class TagAnchorMap:
                 )
             )
         return pairs
+
+    @staticmethod
+    def _pair_geometry_error(
+        pairs: List[Tuple[Tuple[float, float], Tuple[float, float]]]
+    ) -> float:
+        """Largest change in inter-tag separation. A rigid tag board cannot
+        change shape, so this rejects a wrong ID, a bad ray, or a partial
+        detection before it can move a setpoint."""
+        worst = 0.0
+        for i, (origin_a, fix_a) in enumerate(pairs):
+            for origin_b, fix_b in pairs[i + 1 :]:
+                datum_d = math.hypot(
+                    origin_a[0] - origin_b[0], origin_a[1] - origin_b[1]
+                )
+                fix_d = math.hypot(fix_a[0] - fix_b[0], fix_a[1] - fix_b[1])
+                worst = max(worst, abs(fix_d - datum_d))
+        return worst
 
     def disagreement(self, t: float) -> Optional[str]:
         """Reason string once the drift has exceeded the gate continuously for

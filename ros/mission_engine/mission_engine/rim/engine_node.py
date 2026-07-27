@@ -22,10 +22,9 @@ both trace to the 2026-07-24 wall encounters
   - the horizontal fence and mission timeout, which the core applies to both
     the estimate and the command (`MissionConfig`).
 
-The anchor runs open-loop in this version: it measures, reports, and aborts,
-and it never corrects the EKF. Feeding the anchor to EKF2 as external vision
-is the next rung and is gated on the open-loop characterisation this node
-produces (`doc/rfd-vio-to-ev.md`, `doc/measurement-ownership.md`).
+The optional setpoint correction closes the mission-layer loop without
+changing EKF2. It accepts only a fresh, geometrically consistent two-tag
+measurement and holds each center return until that correction converges.
 """
 from __future__ import annotations
 
@@ -71,13 +70,20 @@ class EngineNode(OffboardController):
         super().__init__("mission_engine")
 
         # field geometry, relative to the frozen post-climb anchor
+        self.declare_parameter("mission_pattern", "serpentine")
         self.declare_parameter("lane_length_m", 10.0)
         self.declare_parameter("n_lanes", 3)
         self.declare_parameter("lane_spacing_m", 3.0)
         self.declare_parameter("lane_heading_deg", 180.0)  # cardinal south
         self.declare_parameter("lanes_offset_ne", [0.0, -3.0])
+        self.declare_parameter("rosette_radius_m", 1.5)
+        self.declare_parameter("rosette_outer_hold_s", 0.5)
+        self.declare_parameter("rosette_center_hold_s", 0.5)
         self.declare_parameter("survey_alt_m", 4.0)
         self.declare_parameter("lane_speed_mps", 1.0)
+        self.declare_parameter("reach_tolerance_m", 0.25)
+        self.declare_parameter("land_settle_s", 3.0)
+        self.declare_parameter("land_speed_tolerance_mps", 0.20)
         # envelope
         self.declare_parameter("fence_radius_m", 12.0)
         self.declare_parameter("mission_timeout_s", 300.0)
@@ -107,6 +113,9 @@ class EngineNode(OffboardController):
         self.declare_parameter("anchor_corrects", False)
         self.declare_parameter("anchor_correction_rate_mps", 0.30)
         self.declare_parameter("anchor_correction_max_m", 5.0)
+        self.declare_parameter("anchor_correction_fresh_s", 0.5)
+        self.declare_parameter("anchor_correction_pair_error_m", 0.25)
+        self.declare_parameter("anchor_correction_settle_m", 0.10)
         # dump
         self.declare_parameter("drone_id", "drone4")
         self.declare_parameter("mission_id", "")
@@ -148,6 +157,15 @@ class EngineNode(OffboardController):
             )
         )
         self.anchor_corrects = bool(p("anchor_corrects").value)
+        self.anchor_correction_fresh_s = float(
+            p("anchor_correction_fresh_s").value
+        )
+        self.anchor_correction_pair_error_m = float(
+            p("anchor_correction_pair_error_m").value
+        )
+        self.anchor_correction_settle_m = float(
+            p("anchor_correction_settle_m").value
+        )
         self.correction = SetpointCorrection(
             CorrectionConfig(
                 max_rate_mps=float(p("anchor_correction_rate_mps").value),
@@ -182,6 +200,7 @@ class EngineNode(OffboardController):
 
         self.get_logger().info(
             f"mission_engine rim up: detections={self.detections_topic} "
+            f"pattern={p('mission_pattern').value} "
             f"fence={p('fence_radius_m').value} m "
             f"anchor_gate={p('anchor_gate_m').value} m "
             f"anchor_tags={sorted(self.anchor_tag_ids) or 'any'} "
@@ -205,14 +224,21 @@ class EngineNode(OffboardController):
         offset = [float(v) for v in p("lanes_offset_ne").value]
         anchor = self._anchor_ne
         return MissionConfig(
+            pattern=str(p("mission_pattern").value),
             lanes_origin=(anchor[0] + offset[0], anchor[1] + offset[1]),
             lane_length=float(p("lane_length_m").value),
             n_lanes=int(p("n_lanes").value),
             lane_spacing=float(p("lane_spacing_m").value),
             lane_heading_deg=float(p("lane_heading_deg").value),
+            rosette_radius_m=float(p("rosette_radius_m").value),
+            rosette_outer_hold_s=float(p("rosette_outer_hold_s").value),
+            rosette_center_hold_s=float(p("rosette_center_hold_s").value),
             survey_alt_m=float(p("survey_alt_m").value),
             lane_speed=float(p("lane_speed_mps").value),
+            reach_tol_m=float(p("reach_tolerance_m").value),
             egress_ne=(anchor[0], anchor[1]),
+            land_settle_s=float(p("land_settle_s").value),
+            land_speed_tol_mps=float(p("land_speed_tolerance_mps").value),
             max_dips=int(p("max_dips").value),
             detector_silence_s=float(p("detector_silence_s").value),
             fence_radius_m=float(p("fence_radius_m").value),
@@ -353,8 +379,7 @@ class EngineNode(OffboardController):
         self.engine.start()
         self.get_logger().info(
             f"survey begun: anchor N {self._anchor_ne[0]:.2f} E {self._anchor_ne[1]:.2f}, "
-            f"{self.engine.cfg.n_lanes} lanes x {self.engine.cfg.lane_length:.1f} m "
-            f"at {self.engine.cfg.lane_heading_deg:.0f}°"
+            f"pattern={self.engine.cfg.pattern}"
         )
 
     def on_return_home(self) -> None:
@@ -373,9 +398,28 @@ class EngineNode(OffboardController):
         # The offset converts both ways around the tick. Correcting only the
         # emitted setpoint would leave the engine reading a drifted position
         # and steering against its own correction.
-        self.correction.update(t, self.anchor.drift(t) if self.anchor_corrects else None)
+        correction_measurement = None
+        if self.anchor_corrects:
+            correction_measurement = self.anchor.drift(
+                t,
+                min_tags=2,
+                max_age_s=self.anchor_correction_fresh_s,
+                max_pair_error_m=self.anchor_correction_pair_error_m,
+            )
+        self.correction.update(t, correction_measurement)
+        anchor_ready = not self.anchor_corrects or (
+            correction_measurement is not None
+            and not self.correction.saturated
+            and self.correction.pending_m <= self.anchor_correction_settle_m
+        )
         n, e = self.correction.to_plan((float(self.x), float(self.y)))
-        sp = self.engine.tick(t, (n, e, float(self.z - self._launch_z)))
+        sp = self.engine.tick(
+            t,
+            (n, e, float(self.z - self._launch_z)),
+            (float(self.vx), float(self.vy), float(self.vz)),
+            horizontal_valid=self._xy_valid and self._v_xy_valid,
+            survey_ready=anchor_ready,
+        )
         self._on_phase(self.engine.phase)
         if sp is None:
             return None
@@ -394,6 +438,12 @@ class EngineNode(OffboardController):
         if phase == DUMP and not self._dumped:
             self._dump()
         if phase in (LAND, DONE) and not self._land_requested:
+            if not (self._xy_valid and self._v_xy_valid):
+                self._log_throttled(
+                    "LAND blocked: horizontal position or velocity is invalid; "
+                    "maintaining Offboard hold for safety-pilot takeover"
+                )
+                return
             # PX4 owns the touchdown; the engine's LAND descent is the fake's.
             self._land_requested = True
             self.get_logger().info("engine reached LAND; handing off to NAV_LAND.")
@@ -412,6 +462,7 @@ class EngineNode(OffboardController):
         )
         path = self.dump_dir / f"minefield_{self.drone_id}_{self.mission_id}.json"
         try:
+            self.dump_dir.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2))
             self.get_logger().info(f"dump written to {path}")
         except OSError as exc:

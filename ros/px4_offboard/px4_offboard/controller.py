@@ -132,6 +132,8 @@ class OffboardController(Node):
         self._launch_z_latched = False
         self._launch_yaw = 0.0
         self._launch_yaw_latched = False
+        self._xy_valid = False
+        self._v_xy_valid = False
         self._z_valid = False
         self._attitude_seen = False
 
@@ -269,6 +271,8 @@ class OffboardController(Node):
     def _pos_cb(self, msg: VehicleLocalPosition):
         self.x, self.y, self.z = msg.x, msg.y, msg.z
         self.vx, self.vy, self.vz = msg.vx, msg.vy, msg.vz
+        self._xy_valid = bool(msg.xy_valid)
+        self._v_xy_valid = bool(msg.v_xy_valid)
         self._z_valid = bool(msg.z_valid)
         if self._launch_xy is None and all(math.isfinite(v) for v in (msg.x, msg.y)):
             self._launch_xy = (float(msg.x), float(msg.y))

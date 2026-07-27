@@ -1,22 +1,13 @@
-# Mission engine for the REAL drone at M-Air. First flight of the tag anchor.
+# Mission engine for the real Drone4 flight at M-Air.
 #
-# The field geometry mirrors the proven survey config
-# (flight_intelligent/config/survey_mair_real.yaml): a centred 4 x 4 m
-# serpentine on the post-climb anchor, rotated to cardinal south. Its 2.83 m
-# corner radius leaves recovery room under the net.
+# Fly the center-return qualification pattern from the 2026-07-26 flight
+# card. Each short leg returns over tags 6 and 7. The engine accepts a new
+# map-to-flight correction only from a fresh, geometrically consistent pair.
+# It holds at center until the correction has converged.
 #
-# The anchor observes and does nothing else on this flight. It neither
-# corrects the setpoints nor aborts:
-#
-#   - The flight-1 replay measured the drift that EKF2 produced while it
-#     fused GNSS position (TAG_ANCHOR_REPLAY.md). This flight fuses GNSS
-#     velocity only, so the drift changes character and the measured gate
-#     and correction numbers do not transfer to it.
-#   - The shipped 1.5 m / 1.0 s gate trips 29 times on the flight-1 data. A
-#     gate that fires spuriously under the net is itself a hazard.
-#
-# Set the gate and enable the correction from data this flight records under
-# the fusion configuration that will actually fly.
+# Before NAV_LAND, hold the center with valid horizontal state and low speed
+# for three continuous seconds. A failed gate keeps Offboard position hold;
+# it does not hand a moving aircraft to Auto Land.
 /**:
   ros__parameters:
     # base controller: real preflight, safety pilot on RC, and no motion until
@@ -30,18 +21,20 @@
     takeoff_timeout_s: 40.0
     status_stale_timeout_s: 5.0
 
-    # field, relative to the frozen post-climb anchor
-    lane_length_m: 4.0
-    n_lanes: 3
-    lane_spacing_m: 2.0
-    lane_heading_deg: 180.0     # cardinal south, PX4 NED convention
-    lanes_offset_ne: [-2.0, -2.0]
+    # eight fixed compass legs, center -> outer point -> center
+    mission_pattern: center_return_rosette
+    rosette_radius_m: 1.5
+    rosette_outer_hold_s: 0.5
+    rosette_center_hold_s: 0.5
     survey_alt_m: 2.0
-    lane_speed_mps: 1.0
+    lane_speed_mps: 1.5
+    reach_tolerance_m: 0.20
+    land_settle_s: 3.0
+    land_speed_tolerance_mps: 0.20
 
     # guards the core applies to the estimate and the command
-    fence_radius_m: 6.0
-    mission_timeout_s: 300.0
+    fence_radius_m: 2.0
+    mission_timeout_s: 60.0
     max_dips: 0
     detector_silence_s: 0.0     # 0 disables the guard
 
@@ -53,17 +46,19 @@
     camera_roll_deg: 0.0
     camera_tilt_deg: 0.0
 
-    # the tag anchor: measure and report only.
-    # 6 and 7 are the big tags at the corners of the centre square. Any other
-    # decode still reaches the mine log; it just cannot move the datum.
+    # Setpoint loop closure. Both pad tags must be fresh and preserve their
+    # measured separation before their transform can move a setpoint.
     anchor_tag_ids: [6, 7]
     anchor_aborts: false
-    anchor_corrects: false
+    anchor_corrects: true
     anchor_gate_m: 1.5
     anchor_persist_s: 1.0
     anchor_max_radial_m: 3.0
     anchor_correction_rate_mps: 0.30
     anchor_correction_max_m: 5.0
+    anchor_correction_fresh_s: 0.5
+    anchor_correction_pair_error_m: 0.25
+    anchor_correction_settle_m: 0.10
 
     drone_id: drone4
-    dump_dir: /home/maav/recordings
+    dump_dir: /mnt/recordings
