@@ -109,6 +109,18 @@ FLOW=1 FLOW_BACKEND=svo FLOW_PUBLISH=0 DETECT=1 \
 `FLOW_PUBLISH=1` enables `/fmu/in/sensor_optical_flow` after the shadow run
 passes its timing and availability checks. The existing KLT frontend remains
 available with `FLOW_BACKEND=klt`.
+
+The first CM5 qualification used the full 2,603-frame July 27 handheld bag.
+The tracker retained at least eight tracks on every pair. The PX4 quality gate
+accepted 81.2% of the deliberately aggressive motion, and the flow contract
+error stayed below `7e-18` rad. Processing took 43.4 ms median and 49.7 ms p95
+at 820x616. This is suitable for a 20 Hz shadow trial, but it does not pass the
+30 Hz no-drop gate. PX4 publication remains disabled pending that trial.
+
+The first live shadow capture ran at 30 Hz with AprilTag detection and no raw
+CM2 stream. It had no flow queue drops or worker faults and did not publish to
+PX4. Its bench view was a dark, nearly featureless obstruction, so it could
+validate integration and timing but not visual availability.
 - The strict claim that SVO beats KLT on every held-out proxy is false. That
   claim is not required for PX4 flow bring-up.
 - The SVO tracker qualifies for a separate selectable live-flow integration
