@@ -35,36 +35,38 @@ never EKF2 horizontal position.
 
 ## rl_vo feature-tracker comparison
 
-`svo_flow_frontend.py` compares the C++ pyramidal patch tracker bundled with
-`rl_vo` against the existing OpenCV KLT flow frontend. This is visual tracking,
-not SVO pose, scale, or VIO. The default `tracker` mode:
+`svo_flow_frontend.py` uses the standalone C++ patch tracker bundled with
+`rl_vo`. This is visual tracking, not SVO pose, scale, or VIO. The maintained
+fork commit is
+`calgary-kirisame/rl_vo@96c5a3eafa1a7dae772c7e81f421056ab56411f9`.
+It adds only the experiment-facing pieces:
 
-- exports adjacent-frame pixel correspondences;
-- retains surviving tracks while replenishing the feature grid;
-- uses the previous observation as the patch template;
-- applies the existing gyro and 16-band rolling-shutter flow geometry afterward;
-- never publishes ROS or PX4 messages.
+- optional initial pixels for known track IDs;
+- convergence, patch residual, Hessian, and failure diagnostics;
+- a detailed NumPy binding that exports every attempted track.
 
-The rolling-shutter intrinsics and `9.688693 us/row` line delay are the patched
-Kalibr candidate documented in
-`reference/cyclops_offline/calibration/20260724_drone4_intrinsics/README.md`.
-Kalibr estimates the camera model; the runtime adapter performs banded
-gyro-based deskew.
+The replay predicts initial pixels from the synchronized Pixhawk gyro. It
+integrates between quantized physical row times using the calibrated
+`9.688693 us/row` line delay. The tracker still estimates visual motion; no
+accelerometer or translational IMU prior is used. Point features,
+first-observation templates, pyramid level 2, and 0.01-pixel convergence remain
+the selected operating point.
 
-The binding patch targets upstream `rl_vo` commit
-`c273182857fdef3d91eccd6bde3d78b551de21bb`. Apply it to a disposable worktree:
+Create a disposable worktree from the fork:
 
 ```bash
-git -C ../reference/rl_vo worktree add \
-  --detach /tmp/rl_vo_svo_flow c273182857fdef3d91eccd6bde3d78b551de21bb
-git -C /tmp/rl_vo_svo_flow apply --unidiff-zero \
-  "$PWD/tools/localization_experiments/patches/rl_vo_svo_flow.patch"
+git -C ../reference/rl_vo fetch \
+  https://github.com/calgary-kirisame/rl_vo.git \
+  maav/cm2-flow-frontend
+git -C ../reference/rl_vo worktree add --detach \
+  /tmp/rl_vo_svo_flow \
+  96c5a3eafa1a7dae772c7e81f421056ab56411f9
 cmake -S /tmp/rl_vo_svo_flow/svo-lib \
   -B /tmp/rl_vo_svo_flow/svo-lib/build -DCMAKE_BUILD_TYPE=Release
 cmake --build /tmp/rl_vo_svo_flow/svo-lib/build -j4 --target svo_env
 ```
 
-Prepare and replay the CM2 evidence:
+Prepare, replay, select a reducer, and summarize diagnostics:
 
 ```bash
 uv run --with mcap --with mcap-ros2-support --with numpy \
@@ -72,32 +74,38 @@ uv run --with mcap --with mcap-ros2-support --with numpy \
   python tools/localization_experiments/svo_flow_frontend.py prepare
 
 python tools/localization_experiments/svo_flow_frontend.py replay \
-  --frontend tracker \
   --svo-build /tmp/rl_vo_svo_flow/svo-lib/build/svo_env
 
 uv run --with mcap --with mcap-ros2-support --with numpy \
   --with opencv-python-headless --with pyyaml \
-  python tools/localization_experiments/svo_flow_frontend.py convert
+  python tools/localization_experiments/svo_flow_frontend.py sweep
+
+uv run --with numpy \
+  python tools/localization_experiments/svo_flow_frontend.py diagnostics
 ```
 
-Use `aprilgrid.py --skip-path-comparison` for angular and optional anchored-loop
-scoring when the candidate CSV does not contain its own dToF-integrated path.
-`--frontend map` is retained only to diagnose the incorrect map-association
-interpretation; it is not the candidate flow frontend.
+The reducer sweep is intentionally small: median, equal-weight Huber,
+diagnostic-weighted Huber, and diagnostic-weighted Huber with equal tile
+weight. Selection uses the first 70.35 seconds. The 70.35--75.60 second loop
+is held out.
 
-The initial 2026-07-27 result is in
-`results/20260727_rl_vo_cm2_flow.json`. The corrected sweep is in
-`results/20260728_rl_vo_cm2_flow_sweep.json`.
+The 2026-07-28 result is in
+`results/20260728_svo_cm2_flow_diagnostics.json`.
 
-The corrected standalone tracker uses point features, first-observation
-templates, pyramid level 2, and a 0.01-pixel convergence tolerance. On the
-118 half-second windows also supported by KLT, SVO measured 4.34 mm median /
-16.69 mm p95 error versus KLT's 3.82 / 15.17 mm. SVO supported 139 windows
-overall and improved anchored-loop endpoint error from 35.35 mm to 26.23 mm.
-These are workstation measurements; the selected tracker still requires a
-CM5 timing run under representative capture load.
+- Lab replay: 2,603 frames at 30.02 Hz, 100% post-warmup availability,
+  5.47 ms p95 frontend time.
+- July 24 flight replay: 6,670 frames over 250.54 seconds, 100% post-warmup
+  availability, 8.42 ms p95 frontend time.
+- Held-out selected-flow scale: 0.982. The half-second displacement errors
+  correspond to 0.0089 m/s median and 0.0231 m/s p95 velocity-error proxies.
+- The strict claim that SVO beats KLT on every held-out proxy is false. That
+  claim is not required for PX4 flow bring-up.
+- The SVO tracker qualifies for a separate selectable live-flow integration
+  experiment. This harness does not publish ROS or PX4 messages.
 
-The full SVO map frontend was also replayed with its homography initializer.
-It retained only 77.6% flow availability and accumulated 157 mm anchored-loop
-endpoint error. That map-to-flow adapter is rejected: it discards SVO's pose
-output while inheriting map initialization and reset gaps.
+This confirms the established frontend result rather than locating the
+longer-term VO/VIO defect. The frontend never loses a frame-level measurement,
+and tracks aged 16 frames or more succeed 97.2% of the time. The new
+per-attempt diagnostics expose the boundary needed to test initialization and
+backend hypotheses without changing the tracker. `--frontend map` remains only
+as a diagnostic reproduction.

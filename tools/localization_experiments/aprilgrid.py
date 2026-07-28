@@ -10,7 +10,6 @@ from bisect import bisect_left
 from pathlib import Path
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 
 from common import image_to_gray, iter_messages, median, percentile, stamp_ns
@@ -357,7 +356,11 @@ def _position_from_pose(row: dict) -> np.ndarray:
 
 
 def angular_validation(
-    poses: list[dict], flow_csv: Path, output: Path
+    poses: list[dict],
+    flow_csv: Path,
+    output: Path,
+    relative_start_s: float | None = None,
+    relative_stop_s: float | None = None,
 ) -> dict:
     """Compare the measured angular flow with motion from adjacent PnP poses."""
     pose_by_frame = {
@@ -365,6 +368,7 @@ def angular_validation(
         for row in poses
         if float(row["reprojection_rmse_px"]) <= 1.5
     }
+    origin_s = min(float(row["timestamp_s"]) for row in pose_by_frame.values())
     pair_by_id = {
         int(row["pair"]): row
         for row in _read_csv(flow_csv.parent / "flow_pairs.csv")
@@ -376,6 +380,14 @@ def angular_validation(
         before = pose_by_frame.get(frame - 1)
         after = pose_by_frame.get(frame)
         if before is None or after is None:
+            continue
+        relative_time_s = float(after["timestamp_s"]) - origin_s
+        if (
+            relative_start_s is not None
+            and relative_time_s < relative_start_s
+        ):
+            continue
+        if relative_stop_s is not None and relative_time_s > relative_stop_s:
             continue
         dt = float(after["timestamp_s"]) - float(before["timestamp_s"])
         if not 0.02 <= dt <= 0.05:
@@ -671,7 +683,7 @@ def loop_validation(
     truth_path_length = 0.0
     flow_path_length = 0.0
     for leg_number, (begin, end) in enumerate(
-        zip(anchors, anchors[1:], strict=False), start=1
+        zip(anchors, anchors[1:]), start=1
     ):
         truth_delta = (end["position"] - begin["position"])[:2]
         flow_delta = sum(
@@ -899,6 +911,8 @@ def compare(poses: list[dict], flow_csv: Path, output: Path) -> dict:
         json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
     )
 
+    import matplotlib.pyplot as plt
+
     figure, axes = plt.subplots(1, 2, figsize=(13, 5.5))
     axes[0].plot(
         aligned_grid[:, 0],
@@ -951,6 +965,8 @@ def main() -> None:
             "a dToF-integrated path in flow_selected.csv"
         ),
     )
+    parser.add_argument("--relative-start-s", type=float)
+    parser.add_argument("--relative-stop-s", type=float)
     parser.add_argument(
         "--loop-anchor-window",
         action="append",
@@ -970,7 +986,11 @@ def main() -> None:
     )
     metrics = {
         "angular_flow": angular_validation(
-            poses, arguments.flow, arguments.output
+            poses,
+            arguments.flow,
+            arguments.output,
+            arguments.relative_start_s,
+            arguments.relative_stop_s,
         ),
     }
     if not arguments.skip_path_comparison:
