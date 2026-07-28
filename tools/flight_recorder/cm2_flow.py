@@ -129,7 +129,10 @@ def _rotate_vectors(vectors: np.ndarray, rotation_vectors: np.ndarray):
 class Cm2FlowFrontend:
     """One stateful 30 Hz frontend. Calls are serialized by its worker."""
 
-    def __init__(self, calibration: str | Path, imu: ImuHistory, bands: int = 8):
+    def __init__(
+        self, calibration: str | Path, imu: ImuHistory, bands: int = 8,
+        downsample: int = 4,
+    ):
         data = yaml.safe_load(Path(calibration).read_text())["cam0"]
         fx, fy, cx, cy = (float(value) for value in data["intrinsics"])
         self.native_width, self.native_height = (
@@ -138,10 +141,15 @@ class Cm2FlowFrontend:
         self.line_delay_s = float(data["line_delay"])
         self.imu = imu
         self.bands = int(bands)
-        self.width = self.native_width // 2
-        self.height = self.native_height // 2
+        self.downsample = int(downsample)
+        self.width = self.native_width // self.downsample
+        self.height = self.native_height // self.downsample
         self.k = np.array(
-            [[fx * 0.5, 0.0, cx * 0.5], [0.0, fy * 0.5, cy * 0.5], [0.0, 0.0, 1.0]],
+            [
+                [fx / self.downsample, 0.0, cx / self.downsample],
+                [0.0, fy / self.downsample, cy / self.downsample],
+                [0.0, 0.0, 1.0],
+            ],
             dtype=np.float64,
         )
         distortion = np.asarray(data["distortion_coeffs"], dtype=np.float64)
@@ -178,10 +186,10 @@ class Cm2FlowFrontend:
                 y1 = round((tile_y + 1) * self.height / 6)
                 points = cv2.goodFeaturesToTrack(
                     image[y0:y1, x0:x1],
-                    maxCorners=8,
+                    maxCorners=6,
                     qualityLevel=0.01,
-                    minDistance=10,
-                    blockSize=7,
+                    minDistance=5,
+                    blockSize=5,
                 )
                 if points is not None:
                     points[:, 0, 0] += x0
@@ -228,11 +236,11 @@ class Cm2FlowFrontend:
             self.previous_center_ns = center_ns
             return self._invalid(STATUS_TOO_FEW_FEATURES, center_ns, dt_us, detected)
         points1, status1, _ = cv2.calcOpticalFlowPyrLK(
-            self.previous, gray, points0, None, winSize=(21, 21), maxLevel=3,
+            self.previous, gray, points0, None, winSize=(15, 15), maxLevel=3,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
         )
         points0_back, status2, _ = cv2.calcOpticalFlowPyrLK(
-            gray, self.previous, points1, None, winSize=(21, 21), maxLevel=3,
+            gray, self.previous, points1, None, winSize=(15, 15), maxLevel=3,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
         )
         fb = np.linalg.norm(points0[:, 0] - points0_back[:, 0], axis=1)
