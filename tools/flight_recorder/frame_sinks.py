@@ -269,14 +269,6 @@ class FlowSink:
             self._valid_streak += 1
         else:
             self.error_count += 1
-            if (
-                self._valid_streak >= 10
-                and frame.ts_ns - self._last_fault_dump_ns >= 10_000_000_000
-            ):
-                with self._wake:
-                    self._dump_preroll_locked()
-                    self._fault_post = 30
-                self._last_fault_dump_ns = frame.ts_ns
             self._valid_streak = 0
 
         msg = SensorOpticalFlow()

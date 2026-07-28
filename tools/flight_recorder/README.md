@@ -24,7 +24,7 @@ bounded queues and cannot stop camera capture.
   the physically inverted mount.
 - Downward IMX219 Camera Module 2: 1640 × 1232 at 30 Hz. By default the bag
   stores flow, tracks, timing/quality diagnostics, tag corners, a 1 Hz preview,
-  and one-second pre/post raw clips around flow faults instead of the
+  and operator-triggered one-second pre/post raw clips instead of the
   approximately 121 MB/s continuous YUYV stream. Set `RECORD_CM2_RAW=1` for a
   deliberate calibration capture.
 - `/imu`, converted from PX4 `SensorCombined`, plus the original PX4 IMU topic.

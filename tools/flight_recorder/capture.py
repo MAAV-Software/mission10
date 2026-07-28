@@ -7,7 +7,7 @@ Sources:
     it is mapped to CLOCK_REALTIME so its header shares the ROS/PX4 DDS clock.
   - IMX219 Camera Module 2 via a second Picamera2 instance. The flight default
     processes 1640x1232 YUYV at 30 Hz into PX4 optical flow and compact
-    diagnostics, with a 1 Hz preview and event-triggered raw clips. Continuous
+    diagnostics, with a 1 Hz preview and operator-triggered raw clips. Continuous
     raw YUYV remains available for calibration captures.
   - IMU via the uXRCE-DDS bridge: /fmu/out/sensor_combined (~194 Hz over TELEM2
     serial, NO USB cable). Mapped to sensor_msgs/Imu; header.stamp =
