@@ -282,11 +282,27 @@ index 4c6eaaa..f69105e 100644
 +  FeatureTrackerOptions tracker_options = loadTrackerOptions(config);
 +  // Flow needs a measurement every frame. Preserve still-valid tracks when
 +  // replenishing the grid instead of dropping the whole set below threshold.
-+  tracker_options.reset_before_detection = false;
-+  // Angular flow is adjacent-frame motion, so use the previous observation as
-+  // the patch template. Long-lived first-observation templates are for
-+  // initialization consistency and add no value to a per-frame measurement.
-+  tracker_options.klt_template_is_first_observation = false;
++  tracker_options.reset_before_detection =
++      config["tracker_reset_before_detection"]
++          ? config["tracker_reset_before_detection"].as<bool>() : false;
++  // The flow experiment selects first- or previous-observation templates
++  // explicitly. First-observation templates reduced drift on the CM2 replay.
++  tracker_options.klt_template_is_first_observation =
++      config["klt_template_is_first_observation"]
++          ? config["klt_template_is_first_observation"].as<bool>() : false;
++  tracker_options.min_tracks_to_detect_new_features =
++      config["tracker_min_tracks_to_detect_new_features"]
++          ? config["tracker_min_tracks_to_detect_new_features"].as<size_t>()
++          : 50;
++  tracker_options.klt_max_iter =
++      config["klt_max_iter"] ? config["klt_max_iter"].as<int>() : 30;
++  tracker_options.klt_min_update_squared =
++      config["klt_min_update_squared"]
++          ? config["klt_min_update_squared"].as<double>() : 0.001;
++  if (config["klt_patch_sizes"]) {
++    tracker_options.klt_patch_sizes =
++        config["klt_patch_sizes"].as<std::vector<int>>();
++  }
 +  return std::make_shared<FeatureTracker>(
 +      tracker_options, loadDetectorOptions(config), cam);
 +}

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import yaml
 
 from common import (
     image_to_gray,
@@ -167,6 +168,9 @@ def replay_svo(
     svo_build: Path,
     output: Path,
     *,
+    svo_params: Path = DEFAULT_SVO_PARAMS,
+    svo_calibration: Path = DEFAULT_SVO_CALIBRATION,
+    param_overrides: list[str] | None = None,
     frontend: str = "tracker",
     start_frame: int = 0,
     max_frames: int | None = None,
@@ -194,9 +198,26 @@ def replay_svo(
         raise RuntimeError(
             f"only {len(frames)} frames remain after start-frame={start_frame}"
         )
+    effective_params = svo_params
+    parsed_overrides = {}
+    if param_overrides:
+        parameters = yaml.safe_load(svo_params.read_text(encoding="utf-8"))
+        for override in param_overrides:
+            key, separator, raw_value = override.partition("=")
+            if not separator or not key:
+                raise ValueError(
+                    f"invalid --param {override!r}; expected KEY=YAML_VALUE"
+                )
+            value = yaml.safe_load(raw_value)
+            parameters[key] = value
+            parsed_overrides[key] = value
+        effective_params = output / "effective_svo_params.yaml"
+        effective_params.write_text(
+            yaml.safe_dump(parameters, sort_keys=False), encoding="utf-8"
+        )
     environment = svo_env.SVOEnv(
-        str(DEFAULT_SVO_PARAMS),
-        str(DEFAULT_SVO_CALIBRATION),
+        str(effective_params),
+        str(svo_calibration),
         1,
         True,
     )
@@ -365,6 +386,9 @@ def replay_svo(
     result = {
         "frames": len(frames),
         "frontend": frontend,
+        "svo_params": str(effective_params.resolve()),
+        "svo_calibration": str(svo_calibration.resolve()),
+        "param_overrides": parsed_overrides,
         "start_frame": start_frame,
         "first_timestamp_ns": first_sensor_ns,
         "sensor_duration_s": sensor_duration_s,
@@ -433,6 +457,7 @@ def tracks_to_flow(
     replay: Path,
     output: Path,
     calibration: Path = DEFAULT_CALIBRATION,
+    ransac_threshold_px: float = 2.0,
 ) -> dict:
     """Apply the existing CM2/PX4 angular-flow geometry to SVO correspondences."""
     output.mkdir(parents=True, exist_ok=True)
@@ -463,7 +488,9 @@ def tracks_to_flow(
         p1 = np.asarray(
             [[float(row["u_current"]), float(row["v_current"])] for row in rows]
         )
-        homography, mask = cv2.findHomography(p0, p1, cv2.RANSAC, 2.0)
+        homography, mask = cv2.findHomography(
+            p0, p1, cv2.RANSAC, ransac_threshold_px
+        )
         if homography is None or mask is None:
             continue
         mask = mask[:, 0].astype(bool)
@@ -551,6 +578,7 @@ def tracks_to_flow(
             "rolling_shutter_bands": 16,
             "readout_sign": 1,
             "line_delay_s": line_delay,
+            "ransac_threshold_px": ransac_threshold_px,
         },
     }
     write_json(output / "flow_summary.json", result)
@@ -646,6 +674,17 @@ def parser() -> argparse.ArgumentParser:
     replay.add_argument("--dataset", type=Path, default=DEFAULT_WORK / "dataset")
     replay.add_argument("--svo-build", type=Path, required=True)
     replay.add_argument("--output", type=Path, default=DEFAULT_WORK / "replay")
+    replay.add_argument("--svo-params", type=Path, default=DEFAULT_SVO_PARAMS)
+    replay.add_argument(
+        "--svo-calibration", type=Path, default=DEFAULT_SVO_CALIBRATION
+    )
+    replay.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override one SVO YAML parameter; repeat for a sweep point",
+    )
     replay.add_argument(
         "--frontend", choices=("tracker", "map"), default="tracker"
     )
@@ -658,6 +697,7 @@ def parser() -> argparse.ArgumentParser:
     convert.add_argument("--bag", type=Path, default=DEFAULT_BAG)
     convert.add_argument("--replay", type=Path, default=DEFAULT_WORK / "replay")
     convert.add_argument("--output", type=Path, default=DEFAULT_WORK / "flow")
+    convert.add_argument("--ransac-threshold-px", type=float, default=2.0)
     decide = commands.add_parser("decision")
     decide.add_argument("--replay-summary", type=Path, required=True)
     decide.add_argument("--flow-summary", type=Path, required=True)
@@ -678,6 +718,9 @@ def main() -> int:
             arguments.dataset,
             arguments.svo_build,
             arguments.output,
+            svo_params=arguments.svo_params,
+            svo_calibration=arguments.svo_calibration,
+            param_overrides=arguments.param,
             frontend=arguments.frontend,
             start_frame=arguments.start_frame,
             max_frames=arguments.max_frames,
@@ -687,7 +730,10 @@ def main() -> int:
         )
     elif arguments.command == "convert":
         value = tracks_to_flow(
-            arguments.bag, arguments.replay, arguments.output
+            arguments.bag,
+            arguments.replay,
+            arguments.output,
+            ransac_threshold_px=arguments.ransac_threshold_px,
         )
     else:
         value = decision(

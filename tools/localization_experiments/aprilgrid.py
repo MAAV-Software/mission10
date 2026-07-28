@@ -939,6 +939,11 @@ def main() -> None:
     parser.add_argument("--flow", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--poses",
+        type=Path,
+        help="reuse a previously extracted aprilgrid_poses.csv",
+    )
+    parser.add_argument(
         "--skip-path-comparison",
         action="store_true",
         help=(
@@ -958,7 +963,11 @@ def main() -> None:
     )
     arguments = parser.parse_args()
     arguments.output.mkdir(parents=True, exist_ok=True)
-    poses = extract_poses(arguments.bag, arguments.output)
+    poses = (
+        _read_csv(arguments.poses)
+        if arguments.poses
+        else extract_poses(arguments.bag, arguments.output)
+    )
     metrics = {
         "angular_flow": angular_validation(
             poses, arguments.flow, arguments.output

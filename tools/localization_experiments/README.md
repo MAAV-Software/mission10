@@ -85,7 +85,19 @@ scoring when the candidate CSV does not contain its own dToF-integrated path.
 `--frontend map` is retained only to diagnose the incorrect map-association
 interpretation; it is not the candidate flow frontend.
 
-The 2026-07-27 result is in
-`results/20260727_rl_vo_cm2_flow.json`. The tracker is fast and fully available
-on the workstation, but it does not pass the predeclared KLT non-inferiority
-gate. It remains an alternate frontend and is not enabled in flight code.
+The initial 2026-07-27 result is in
+`results/20260727_rl_vo_cm2_flow.json`. The corrected sweep is in
+`results/20260728_rl_vo_cm2_flow_sweep.json`.
+
+The corrected standalone tracker uses point features, first-observation
+templates, pyramid level 2, and a 0.01-pixel convergence tolerance. On the
+118 half-second windows also supported by KLT, SVO measured 4.34 mm median /
+16.69 mm p95 error versus KLT's 3.82 / 15.17 mm. SVO supported 139 windows
+overall and improved anchored-loop endpoint error from 35.35 mm to 26.23 mm.
+These are workstation measurements; the selected tracker still requires a
+CM5 timing run under representative capture load.
+
+The full SVO map frontend was also replayed with its homography initializer.
+It retained only 77.6% flow availability and accumulated 157 mm anchored-loop
+endpoint error. That map-to-flow adapter is rejected: it discards SVO's pose
+output while inheriting map initialization and reset gaps.

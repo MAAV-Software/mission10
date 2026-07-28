@@ -1,0 +1,66 @@
+{
+  "date": "2026-07-28",
+  "source_bag": "reference/20260727_drone4_cm2_flow_handheld_validation_uncompressed",
+  "rl_vo_commit": "c273182857fdef3d91eccd6bde3d78b551de21bb",
+  "finding": "The first comparison used SVO's standalone initialization tracker, not the map-tracking frontend shown in SVO demonstrations. The initial adapter also treated SVO edgelets as isotropic point observations and inherited an unnecessarily coarse EuRoC convergence configuration.",
+  "selected_tracker_configuration": {
+    "use_edgelets": false,
+    "klt_template_is_first_observation": true,
+    "tracker_min_tracks_to_detect_new_features": 180,
+    "klt_max_level": 2,
+    "klt_min_update_squared": 0.0001,
+    "ransac_threshold_px": 1.0
+  },
+  "selected_tracker_result": {
+    "frames": 2603,
+    "accepted_pairs": 2602,
+    "availability": 1.0,
+    "valid_rate_hz": 30.01576184790709,
+    "workstation_latency_ms": {
+      "median": 2.0485359709709883,
+      "p95": 5.7015159633010635,
+      "max": 8.519392926245928
+    },
+    "all_svo_supported_half_second_windows": {
+      "samples": 139,
+      "scale_median": 0.9717538750721749,
+      "vector_error_median_m": 0.005146041115177563,
+      "vector_error_p95_m": 0.02100235292775821
+    },
+    "common_klt_supported_half_second_windows": {
+      "samples": 118,
+      "svo_vector_error_median_m": 0.004337561286094477,
+      "svo_vector_error_p95_m": 0.01668766834112488,
+      "klt_vector_error_median_m": 0.0038222089965304004,
+      "klt_vector_error_p95_m": 0.015171569719136708
+    },
+    "anchored_loop": {
+      "path_length_scale": 0.9112864402416551,
+      "endpoint_vector_error_m": 0.026227779548152502,
+      "klt_endpoint_vector_error_m": 0.03534912099366625
+    }
+  },
+  "full_svo_map_frontend": {
+    "initializer": "Homography",
+    "start_frame": 320,
+    "valid_availability_after_1s": 0.8050621669626998,
+    "accepted_flow_availability": 0.7760736196319018,
+    "resets": 6,
+    "workstation_latency_ms": {
+      "median": 3.307248931378126,
+      "p95": 5.641373968683184
+    },
+    "half_second_vector_error_median_m": 0.004893021789946178,
+    "half_second_vector_error_p95_m": 0.019241572346587462,
+    "anchored_loop_path_length_scale": 0.6976436911445119,
+    "anchored_loop_endpoint_vector_error_m": 0.1570336068616147,
+    "decision": "Reject this map-to-flow adapter. Homography initialization matches the planar scene but map loss still creates unacceptable gaps and loop error."
+  },
+  "interpretation": [
+    "The corrected standalone SVO tracker is close to KLT on identical support, covers 21 additional half-second windows, and closes the anchored loop better.",
+    "It does not yet beat KLT's common-window median error, so the claim that SVO is more accurate is not established.",
+    "The full SVO map frontend from rl_vo is not a drop-in optical-flow backend. Its demonstration strength is pose estimation with a persistent map; converting only adjacent map associations back into flow discards that benefit while inheriting map initialization and reset gaps.",
+    "The next flight-backend gate is ARM timing on the CM5 under representative capture load."
+  ],
+  "decision": "Advance the corrected standalone SVO tracker to a selectable CM5 live-backend benchmark. Retain KLT only as the offline accuracy reference; do not advance the full map-to-flow adapter."
+}

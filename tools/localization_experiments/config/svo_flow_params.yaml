@@ -11,6 +11,19 @@ depth_filter_affine_est_offset: true
 detector_threshold_primary: 10
 detector_threshold_secondary: 200
 grid_size: 20
+# Flow uses point tracks in an isotropic planar model. SVO edgelets carry a
+# one-dimensional constraint that the full pose optimizer understands but this
+# adapter does not.
+use_edgelets: false
+# Preserve the stable reference patch to avoid adjacent-frame track drift, but
+# replenish the spatial grid before coverage becomes sparse.
+klt_template_is_first_observation: true
+tracker_min_tracks_to_detect_new_features: 180
+# At 30 Hz the CM2 inter-frame displacement is small. Starting at level 2
+# avoids the quantization bias observed with the inherited EuRoC level 4.
+klt_max_level: 2
+# Match the 0.01-pixel convergence precision used by the OpenCV KLT baseline.
+klt_min_update_squared: 0.0001
 img_align_est_illumination_gain: true
 img_align_est_illumination_offset: true
 img_align_max_level: 4
