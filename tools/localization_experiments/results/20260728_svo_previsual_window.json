@@ -1,0 +1,95 @@
+{
+  "date": "2026-07-28",
+  "source_dataset": "/tmp/maav_localization_20260724_2005/prepared/svo_dataset",
+  "configuration": "B_hover_psd_floor",
+  "svo_commit": "93215126f511e6cdc9629338d90cbd23530c2ab2",
+  "experiment": {
+    "last_dataset_frame": 400,
+    "normal_visual_success_frame": 200,
+    "early_state_window_frames": 50,
+    "arms": [
+      {
+        "camera_start_frame": 0,
+        "previsual_frames": 200,
+        "visual_success_dataset_frame": 200,
+        "handoff_translation_m": 0.1151593370517106,
+        "first_visual_initial_cost": 1174.8700447539818,
+        "first_visual_final_cost": 5.6901588063024855,
+        "initial_speed_m_s": 0.09997414699408694,
+        "maximum_early_speed_m_s": 2.3047004429592923,
+        "maximum_early_accel_bias_m_s2": 0.04140686423369463,
+        "first_failure_dataset_frame": null
+      },
+      {
+        "camera_start_frame": 80,
+        "previsual_frames": 121,
+        "visual_success_dataset_frame": 201,
+        "handoff_translation_m": 0.07363673457724344,
+        "first_visual_initial_cost": 1056.5743084255514,
+        "first_visual_final_cost": 0.2654584073023771,
+        "initial_speed_m_s": 0.11969656831119503,
+        "maximum_early_speed_m_s": 2.334908015828749,
+        "maximum_early_accel_bias_m_s2": 0.11206878137683199,
+        "first_failure_dataset_frame": null
+      },
+      {
+        "camera_start_frame": 160,
+        "previsual_frames": 40,
+        "visual_success_dataset_frame": 200,
+        "handoff_translation_m": 0.07993765335827109,
+        "first_visual_initial_cost": 949.0113488801287,
+        "first_visual_final_cost": 31.17239205088665,
+        "initial_speed_m_s": 0.07296619762155587,
+        "maximum_early_speed_m_s": 2.407504996658102,
+        "maximum_early_accel_bias_m_s2": 0.4382147988936183,
+        "first_failure_dataset_frame": 204
+      },
+      {
+        "camera_start_frame": 190,
+        "previsual_frames": 10,
+        "visual_success_dataset_frame": 200,
+        "handoff_translation_m": 0.029661162257916474,
+        "first_visual_initial_cost": 730.701434350393,
+        "first_visual_final_cost": 0.000015407439573358795,
+        "initial_speed_m_s": 0.018461633893986112,
+        "maximum_early_speed_m_s": 2.476921236185842,
+        "maximum_early_accel_bias_m_s2": 0.3797279140380138,
+        "first_failure_dataset_frame": 209
+      }
+    ]
+  },
+  "repeat_controls": [
+    {
+      "camera_start_frame": 160,
+      "handoff_translation_m": 0.07993590330280621,
+      "first_visual_initial_cost": 949.0113488801287,
+      "first_visual_final_cost": 31.173436313241243,
+      "maximum_early_speed_m_s": 2.4811704446887304,
+      "maximum_early_accel_bias_m_s2": 0.20194816767069426,
+      "first_failure_dataset_frame": 204
+    },
+    {
+      "camera_start_frame": 190,
+      "handoff_translation_m": 0.029661388897660037,
+      "first_visual_initial_cost": 730.701434350393,
+      "first_visual_final_cost": 1.8283943658207073e-14,
+      "maximum_early_speed_m_s": 3.6774905963192936,
+      "maximum_early_accel_bias_m_s2": 0.4296846115246126,
+      "first_failure_dataset_frame": null
+    }
+  ],
+  "interpretation": [
+    "A shorter previsual inertial history reduced the handoff translation and the initial visual solve cost.",
+    "The reduction did not improve the first 50 post-initialization frames. Speed error did not decrease, accelerometer-bias growth increased, and the two shortest arms became unstable.",
+    "The repeated 40-frame arm failed at the same dataset frame. The repeated 10-frame arm avoided that failure but exceeded 3.6 m/s and reached 0.43 m/s2 accelerometer bias.",
+    "Previsual history contributes to the handoff mismatch, but it is not a sufficient explanation or a bounded fix for the unusable VI state."
+  ],
+  "decision": {
+    "previsual_history_contributes_to_handoff": true,
+    "shorter_history_improves_vi_state": false,
+    "simple_sequencing_fix_justified": false,
+    "continue_svo_vi_backend_campaign_now": false,
+    "next_work": "Validate the SVO or rl_vo frontend for CM2 angular flow and PX4 fusion.",
+    "long_term": "Keep OV9281 VIO as a separate research branch with the current failure evidence."
+  }
+}
