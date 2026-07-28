@@ -98,6 +98,17 @@ The 2026-07-28 result is in
   availability, 8.42 ms p95 frontend time.
 - Held-out selected-flow scale: 0.982. The half-second displacement errors
   correspond to 0.0089 m/s median and 0.0231 m/s p95 velocity-error proxies.
+
+The flight recorder can run the same tracker without publishing it to PX4:
+
+```bash
+FLOW=1 FLOW_BACKEND=svo FLOW_PUBLISH=0 DETECT=1 \
+  tools/flight_recorder/record_flight.sh 60 svo_flow_shadow
+```
+
+`FLOW_PUBLISH=1` enables `/fmu/in/sensor_optical_flow` after the shadow run
+passes its timing and availability checks. The existing KLT frontend remains
+available with `FLOW_BACKEND=klt`.
 - The strict claim that SVO beats KLT on every held-out proxy is false. That
   claim is not required for PX4 flow bring-up.
 - The SVO tracker qualifies for a separate selectable live-flow integration

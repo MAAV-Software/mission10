@@ -52,8 +52,13 @@ DEFAULT_WORK = Path("/tmp/maav_svo_cm2_flow")
 DEFAULT_CALIBRATION = (
     WORKSPACE / "mission10/tools/flight_recorder/config/cm2_intrinsics_rs.yaml"
 )
-DEFAULT_SVO_PARAMS = HERE / "config/svo_flow_params.yaml"
-DEFAULT_SVO_CALIBRATION = HERE / "config/svo_flow_cm2_820.yaml"
+DEFAULT_SVO_PARAMS = (
+    WORKSPACE / "mission10/tools/flight_recorder/config/svo_flow_params.yaml"
+)
+DEFAULT_SVO_CALIBRATION = (
+    WORKSPACE
+    / "mission10/tools/flight_recorder/config/svo_flow_cm2_820.yaml"
+)
 DEFAULT_KLT_ANALYSIS = (
     DEFAULT_BAG / "analysis/localization_experiments"
 )

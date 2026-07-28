@@ -13,6 +13,7 @@ RECORDER = HERE.parent / "flight_recorder"
 sys.path.insert(0, str(RECORDER))
 
 from cm2_flow import Cm2FlowFrontend, ImuHistory, STATUS_VALID  # noqa: E402
+from cm2_svo_flow import Cm2SvoFlowFrontend  # noqa: E402
 from common import iter_messages, stamp_ns  # noqa: E402
 
 
@@ -20,6 +21,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("bag", type=Path)
     parser.add_argument("--max-pairs", type=int, default=300)
+    parser.add_argument(
+        "--backend", choices=("klt", "svo"), default="klt"
+    )
+    parser.add_argument(
+        "--svo-build",
+        type=Path,
+        default=(
+            HERE.parents[2]
+            / "reference/rl_vo/svo-lib/build/svo_env"
+        ),
+    )
     parser.add_argument(
         "--calibration",
         type=Path,
@@ -34,7 +46,16 @@ def main():
             stamp_ns(message.header),
             (angular.x, angular.y, angular.z),
         )
-    frontend = Cm2FlowFrontend(args.calibration, imu)
+    if args.backend == "svo":
+        frontend = Cm2SvoFlowFrontend(
+            args.calibration,
+            imu,
+            args.svo_build,
+            RECORDER / "config" / "svo_flow_params.yaml",
+            RECORDER / "config" / "svo_flow_cm2_820.yaml",
+        )
+    else:
+        frontend = Cm2FlowFrontend(args.calibration, imu)
     results = []
     for topic, _, image in iter_messages(
         args.bag, ["/camera_down/image_raw"]
@@ -45,6 +66,7 @@ def main():
     valid = [result for result in results if result.status == STATUS_VALID]
     if not valid:
         raise RuntimeError("live frontend produced no valid pairs")
+    tracked = [result for result in results[1:] if result.tracked >= 8]
     # PX4 computes (-raw + gyro) / dt. This must be the negative of the
     # frontend's compensated translational pixel-flow convention.
     contract_error = [
@@ -56,8 +78,9 @@ def main():
         for result in valid
     ]
     print(
-        f"frames={len(results)} valid={len(valid)} "
-        f"availability={len(valid) / max(1, len(results) - 1):.3f} "
+        f"backend={args.backend} frames={len(results)} valid={len(valid)} "
+        f"tracker_availability={len(tracked) / max(1, len(results) - 1):.3f} "
+        f"quality_availability={len(valid) / max(1, len(results) - 1):.3f} "
         f"quality_median={np.median([r.quality for r in valid]):.1f} "
         f"contract_error_max={max(contract_error):.3e} "
         f"statuses={dict(Counter(r.status for r in results))}"

@@ -601,10 +601,33 @@ def main():
     ap.add_argument("--no-down-raw", action="store_true",
                     help="record processed flow plus a low-rate CM2 preview, not continuous raw CM2")
     ap.add_argument("--flow", action="store_true",
-                    help="publish CM2 angular flow to PX4 and record compact diagnostics")
+                    help="compute CM2 angular flow and record compact diagnostics")
+    ap.add_argument(
+        "--flow-backend",
+        choices=("klt", "svo"),
+        default="klt",
+        help="CM2 feature tracker (default: klt)",
+    )
+    ap.add_argument(
+        "--flow-shadow",
+        action="store_true",
+        help="compute and record flow diagnostics without publishing to PX4",
+    )
     ap.add_argument(
         "--flow-calibration",
         default=str(Path(__file__).with_name("config") / "cm2_intrinsics_rs.yaml"),
+    )
+    ap.add_argument(
+        "--svo-build",
+        default="/home/maav/rl_vo_cm2_flow/svo-lib/build/svo_env",
+    )
+    ap.add_argument(
+        "--svo-params",
+        default=str(Path(__file__).with_name("config") / "svo_flow_params.yaml"),
+    )
+    ap.add_argument(
+        "--svo-calibration",
+        default=str(Path(__file__).with_name("config") / "svo_flow_cm2_820.yaml"),
     )
     ap.add_argument("--down-max-exposure-us", type=int, default=1000,
                     help="hard CM2 daylight shutter ceiling (default: 1000 us)")
@@ -660,7 +683,11 @@ def main():
             bag.topic("/camera_down/image_preview", "sensor_msgs/msg/Image")
         bag.topic("/camera_down/camera_info", "sensor_msgs/msg/CameraInfo")
     if args.flow:
-        bag.topic("/fmu/in/sensor_optical_flow", "px4_msgs/msg/SensorOpticalFlow")
+        if not args.flow_shadow:
+            bag.topic(
+                "/fmu/in/sensor_optical_flow",
+                "px4_msgs/msg/SensorOpticalFlow",
+            )
         bag.topic("/localization/cm2_flow/debug", "std_msgs/msg/String")
         bag.topic("/camera_down/image_fault", "sensor_msgs/msg/Image")
     if args.detect:
@@ -812,10 +839,24 @@ def main():
     flow_sink = None
     if args.flow:
         try:
-            from cm2_flow import Cm2FlowFrontend
             from frame_sinks import FlowSink
 
-            frontend = Cm2FlowFrontend(args.flow_calibration, imu_history)
+            if args.flow_backend == "svo":
+                from cm2_svo_flow import Cm2SvoFlowFrontend
+
+                frontend = Cm2SvoFlowFrontend(
+                    args.flow_calibration,
+                    imu_history,
+                    args.svo_build,
+                    args.svo_params,
+                    args.svo_calibration,
+                )
+            else:
+                from cm2_flow import Cm2FlowFrontend
+
+                frontend = Cm2FlowFrontend(
+                    args.flow_calibration, imu_history
+                )
             flow_publisher = node.create_publisher(
                 SensorOpticalFlow, "/fmu/in/sensor_optical_flow", 10
             )
@@ -828,6 +869,7 @@ def main():
                 flow_publisher.publish,
                 flow_debug_publisher.publish,
                 bag,
+                publish_enabled=not args.flow_shadow,
             )
             node.create_subscription(
                 Bool,
@@ -836,7 +878,12 @@ def main():
                 10,
             )
             print(
-                "recorder: live CM2 flow -> /fmu/in/sensor_optical_flow",
+                f"recorder: live CM2 {args.flow_backend} flow "
+                + (
+                    "shadow diagnostics only"
+                    if args.flow_shadow
+                    else "-> /fmu/in/sensor_optical_flow"
+                ),
                 file=sys.stderr,
                 flush=True,
             )

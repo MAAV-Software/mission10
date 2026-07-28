@@ -129,6 +129,8 @@ def _rotate_vectors(vectors: np.ndarray, rotation_vectors: np.ndarray):
 class Cm2FlowFrontend:
     """One stateful 30 Hz frontend. Calls are serialized by its worker."""
 
+    name = "klt"
+
     def __init__(
         self, calibration: str | Path, imu: ImuHistory, bands: int = 8,
         downsample: int = 4,

@@ -167,6 +167,7 @@ class FlowSink:
         debug_topic="/localization/cm2_flow/debug",
         fault_topic="/camera_down/image_fault",
         depth=2,
+        publish_enabled=True,
     ):
         self.frontend = frontend
         self.range_history = range_history
@@ -176,6 +177,7 @@ class FlowSink:
         self.flow_topic = flow_topic
         self.debug_topic = debug_topic
         self.fault_topic = fault_topic
+        self.publish_enabled = publish_enabled
         self._queue = collections.deque(maxlen=depth)
         self._wake = threading.Condition()
         self._stop = False
@@ -287,8 +289,9 @@ class FlowSink:
         msg.min_ground_distance = 0.4
         msg.max_ground_distance = 4.0
         msg.mode = SensorOpticalFlow.MODE_BRIGHT
-        self.publish(msg)
-        self.bag.write(self.flow_topic, self._serialize(msg), frame.ts_ns)
+        if self.publish_enabled:
+            self.publish(msg)
+            self.bag.write(self.flow_topic, self._serialize(msg), frame.ts_ns)
 
         range_row = self.range_history.nearest(result.timestamp_sample_ns)
         if range_row is None:
@@ -304,6 +307,8 @@ class FlowSink:
         debug = String()
         debug.data = json.dumps(
             {
+                "backend": getattr(self.frontend, "name", "unknown"),
+                "published": self.publish_enabled,
                 "sequence": self._sequence,
                 "timestamp_sample_ns": result.timestamp_sample_ns,
                 "status": result.status,
@@ -350,7 +355,9 @@ class FlowSink:
         median = lat[len(lat) // 2] if lat else 0.0
         p95 = lat[min(len(lat) - 1, int(0.95 * len(lat)))] if lat else 0.0
         return (
-            f"flow: {self.valid}/{self.processed} valid, "
+            f"flow ({getattr(self.frontend, 'name', 'unknown')}, "
+            f"{'publish' if self.publish_enabled else 'shadow'}): "
+            f"{self.valid}/{self.processed} valid, "
             f"{self.dropped} queue drops of {self.submitted}, "
             f"{median:.1f} ms median / {p95:.1f} ms p95, "
             f"{self.faults} worker faults"
