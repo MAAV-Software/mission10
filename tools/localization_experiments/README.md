@@ -102,7 +102,7 @@ The 2026-07-28 result is in
 The flight recorder can run the same tracker without publishing it to PX4:
 
 ```bash
-FLOW=1 FLOW_BACKEND=svo FLOW_PUBLISH=0 DETECT=1 \
+FLOW=1 FLOW_BACKEND=svo FLOW_PUBLISH=0 DOWN_FPS=20 DETECT=1 \
   tools/flight_recorder/record_flight.sh 60 svo_flow_shadow
 ```
 
