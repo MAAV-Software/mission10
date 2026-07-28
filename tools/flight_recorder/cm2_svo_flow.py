@@ -317,7 +317,8 @@ class Cm2SvoFlowFrontend:
                 tracked,
             )
         inliers = mask[:, 0].astype(bool)
-        if int(np.sum(inliers)) < 8:
+        inlier_count = int(np.sum(inliers))
+        if inlier_count < 8:
             return self._invalid(
                 STATUS_BAD_HOMOGRAPHY,
                 center_ns,
@@ -325,6 +326,10 @@ class Cm2SvoFlowFrontend:
                 detected,
                 tracked,
             )
+        inlier_fraction = inlier_count / tracked
+        successful = successful[inliers]
+        p0 = p0[inliers]
+        p1 = p1[inliers]
 
         center_row = 0.5 * (self.native_height - 1)
         native0 = self._native_rows(p0[:, 1])
@@ -372,10 +377,7 @@ class Cm2SvoFlowFrontend:
         raw = compensated + center_delta[:2]
 
         coverage = self._tile_coverage(p0)
-        inlier_fraction = float(np.mean(inliers))
-        transfer = self._transfer_error(
-            homography, p0[inliers], p1[inliers]
-        )
+        transfer = self._transfer_error(homography, p0, p1)
         residual_p95 = float(
             np.percentile(np.linalg.norm(centered, axis=1), 95)
         )
@@ -399,7 +401,7 @@ class Cm2SvoFlowFrontend:
             delta_angle=center_delta,
             detected=detected,
             tracked=tracked,
-            inliers=int(np.sum(inliers)),
+            inliers=inlier_count,
             coverage=coverage,
             inlier_fraction=inlier_fraction,
             fb_median_px=transfer,
