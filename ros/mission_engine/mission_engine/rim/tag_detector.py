@@ -20,6 +20,7 @@ recorder's.
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -174,6 +175,39 @@ def detect_image(detector: TagDetector, img):
     """
     gray = luma(img.data, img.height, img.width, img.step, img.encoding)
     return to_detection_array(img.header, detector.detect(gray))
+
+
+def detect_image_with_debug(detector: TagDetector, img):
+    """Return the existing wire message plus lossless corner diagnostics."""
+    from std_msgs.msg import String
+
+    gray = luma(img.data, img.height, img.width, img.step, img.encoding)
+    detections = detector.detect(gray)
+    debug = String()
+    debug.data = json.dumps(
+        {
+            "stamp_ns": (
+                int(img.header.stamp.sec) * 1_000_000_000
+                + int(img.header.stamp.nanosec)
+            ),
+            "frame_id": img.header.frame_id,
+            "detections": [
+                {
+                    "tag_id": detection.tag_id,
+                    "center_px": list(detection.center),
+                    "corners_px": [
+                        coordinate
+                        for corner in detection.corners
+                        for coordinate in corner
+                    ],
+                    "mean_side_px": detection.mean_side_px,
+                }
+                for detection in detections
+            ],
+        },
+        separators=(",", ":"),
+    )
+    return to_detection_array(img.header, detections), debug
 
 
 def main(args=None):

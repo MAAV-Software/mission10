@@ -5,10 +5,10 @@ Sources:
   - OV9281 forward GS cam via Picamera2 (YUV420 luma -> mono8), written DIRECTLY
     to mcap (no ROS publish / DDS). libcamera SensorTimestamp is CLOCK_BOOTTIME;
     it is mapped to CLOCK_REALTIME so its header shares the ROS/PX4 DDS clock.
-  - IMX219 Camera Module 2 via a second Picamera2 instance, recorded as packed
-    YUYV 4:2:2 color at 1640x1232. Its intrinsics are intentionally marked
-    uncalibrated until the installed camera and operational mode receive their
-    own Kalibr session.
+  - IMX219 Camera Module 2 via a second Picamera2 instance. The flight default
+    processes 1640x1232 YUYV at 30 Hz into PX4 optical flow and compact
+    diagnostics, with a 1 Hz preview and event-triggered raw clips. Continuous
+    raw YUYV remains available for calibration captures.
   - IMU via the uXRCE-DDS bridge: /fmu/out/sensor_combined (~194 Hz over TELEM2
     serial, NO USB cable). Mapped to sensor_msgs/Imu; header.stamp =
     SensorCombined.timestamp (DDS-adjusted ROS time, us). Requires firmware >= 8551f635c5 with
@@ -20,13 +20,14 @@ Sources:
 
 Bag timestamps and camera/IMU headers are all CLOCK_REALTIME ns. The original
 PX4 messages plus timesync_status and /capture/realtime_minus_boottime_ns keep
-the mapping auditable. The CM2 intrinsics are PLACEHOLDER -- calibrate the
-installed camera in its operational mode before scored projection or PnP.
+the mapping auditable. CM2 flow uses the installed-camera July 24 intrinsics
+and rolling-shutter calibration.
 SIGINT (e.g. `timeout -s INT`) stops capture and safely finalizes the bag.
 """
 import argparse
 from collections import deque
 import multiprocessing
+from pathlib import Path
 import signal
 import struct
 import sys
@@ -40,7 +41,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.serialization import serialize_message
 from builtin_interfaces.msg import Time as TimeMsg
 from sensor_msgs.msg import Image, CameraInfo, Imu
-from std_msgs.msg import Int64
+from std_msgs.msg import Bool, Int64, String
 import rosbag2_py
 from picamera2 import Picamera2
 
@@ -54,7 +55,8 @@ from px4_msgs.msg import (
     EstimatorAidSource3d, EstimatorGpsStatus, EstimatorStatus,
     EstimatorStatusFlags, FailsafeFlags, SensorCombined, SensorGps,
     TimesyncStatus, VehicleAttitude, VehicleCommandAck,
-    VehicleGlobalPosition, VehicleLocalPosition, VehicleStatus,
+    VehicleGlobalPosition, VehicleLocalPosition, VehicleOdometry, VehicleStatus,
+    SensorOpticalFlow,
 )
 
 PX4_SUBS = [
@@ -75,6 +77,8 @@ PX4_SUBS = [
     ("/fmu/out/estimator_aid_src_gnss_pos", "px4_msgs/msg/EstimatorAidSource2d", EstimatorAidSource2d),
     ("/fmu/out/estimator_aid_src_gnss_vel", "px4_msgs/msg/EstimatorAidSource3d", EstimatorAidSource3d),
     ("/fmu/out/estimator_aid_src_rng_hgt", "px4_msgs/msg/EstimatorAidSource1d", EstimatorAidSource1d),
+    ("/fmu/out/estimator_aid_src_optical_flow", "px4_msgs/msg/EstimatorAidSource2d", EstimatorAidSource2d),
+    ("/fmu/out/estimator_aid_src_ev_pos", "px4_msgs/msg/EstimatorAidSource2d", EstimatorAidSource2d),
     # Preserve command acceptance and the complete arming/failsafe requirement
     # state so pre-arm failures can be diagnosed from the bag.
     ("/fmu/out/vehicle_command_ack_v1", "px4_msgs/msg/VehicleCommandAck", VehicleCommandAck),
@@ -273,10 +277,12 @@ def on_px4_message(bag, sync_monitor, name, msg):
     bag.write(name, serialize_message(msg), message_record_time_ns(msg))
 
 
-def on_sensor_combined(bag, sync_monitor, msg):
+def on_sensor_combined(bag, sync_monitor, msg, imu_history=None):
     """SensorCombined (DDS) -> sensor_msgs/Imu in the ROS realtime domain."""
     sample_ns = int(msg.timestamp) * 1000
     sync_monitor.note_imu(sample_ns)
+    if imu_history is not None:
+        imu_history.note(sample_ns, msg.gyro_rad)
     m = Imu()
     m.header.stamp = stamp_ns(sample_ns)  # DDS already mapped PX4 hrt -> ROS time
     m.header.frame_id = "px4_imu_frd"
@@ -346,12 +352,13 @@ class CameraStats:
 def capture_camera(
     picam, bag, clock_mapper, stats, *, width, height, frame_id,
     image_topic, info_topic, camera_info, clock_topic, max_exposure_us,
-    errors, errors_lock,
+    errors, errors_lock, record_fps=0.0,
 ):
     """Drain one Picamera2 stream until the session stops."""
     global _running
     last_clock_record_ns = 0
     clock_msg = Int64()
+    last_record_ns = 0
     try:
         while _running:
             req = picam.capture_request()
@@ -384,11 +391,13 @@ def capture_camera(
             img.is_bigendian = 0
             img.step = width
             img.data = luma.tobytes()
-            bag.write(image_topic, serialize_message(img), ts_ns)
-
-            camera_info.header.stamp = st
-            camera_info.header.frame_id = frame_id
-            bag.write(info_topic, serialize_message(camera_info), ts_ns)
+            record_period_ns = int(1e9 / record_fps) if record_fps > 0 else 0
+            if record_period_ns == 0 or ts_ns - last_record_ns >= record_period_ns:
+                bag.write(image_topic, serialize_message(img), ts_ns)
+                camera_info.header.stamp = st
+                camera_info.header.frame_id = frame_id
+                bag.write(info_topic, serialize_message(camera_info), ts_ns)
+                last_record_ns = ts_ns
 
             if clock_topic and ts_ns - last_clock_record_ns >= 1_000_000_000:
                 clock_msg.data = clock_offset_ns
@@ -484,13 +493,15 @@ def capture_imx219_worker(
 def capture_camera_pipe(
     connection, status_connection, process, bag, clock_mapper, stats, *,
     width, height, frame_id, image_topic, info_topic, camera_info,
-    max_exposure_us, errors, errors_lock, sink=None,
+    max_exposure_us, errors, errors_lock, sink=None, record_raw=True,
+    preview_topic="/camera_down/image_preview", preview_fps=1.0,
 ):
     """Record packed CM2 YUYV frames received from its tuning-isolated process."""
     global _running
     expected_size = (
         CM2_FRAME_HEADER.size + width * height * YUYV_BYTES_PER_PIXEL
     )
+    last_preview_ns = 0
     try:
         while _running:
             if not connection.poll(0.25):
@@ -527,11 +538,32 @@ def capture_camera_pipe(
             img.is_bigendian = 0
             img.step = width * YUYV_BYTES_PER_PIXEL
             img.data = payload[CM2_FRAME_HEADER.size:]
-            bag.write(image_topic, serialize_message(img), ts_ns)
-
-            camera_info.header.stamp = st
-            camera_info.header.frame_id = frame_id
-            bag.write(info_topic, serialize_message(camera_info), ts_ns)
+            if record_raw:
+                bag.write(image_topic, serialize_message(img), ts_ns)
+                camera_info.header.stamp = st
+                camera_info.header.frame_id = frame_id
+                bag.write(info_topic, serialize_message(camera_info), ts_ns)
+            elif (
+                preview_fps > 0
+                and ts_ns - last_preview_ns >= int(1e9 / preview_fps)
+            ):
+                preview = Image()
+                preview.header = img.header
+                preview.height, preview.width = height, width
+                preview.encoding = "mono8"
+                preview.is_bigendian = 0
+                preview.step = width
+                yuyv = np.frombuffer(img.data, dtype=np.uint8).reshape(
+                    height, width * YUYV_BYTES_PER_PIXEL
+                )
+                preview.data = np.ascontiguousarray(yuyv[:, 0::2]).tobytes()
+                bag.write(
+                    preview_topic, serialize_message(preview), ts_ns
+                )
+                camera_info.header.stamp = st
+                camera_info.header.frame_id = frame_id
+                bag.write(info_topic, serialize_message(camera_info), ts_ns)
+                last_preview_ns = ts_ns
 
             # The recording is complete at this point. A sink is a tap on the
             # frame we already hold; it cannot block here and cannot fail here.
@@ -563,6 +595,17 @@ def main():
     ap.add_argument("--down-w", type=int, default=1640)
     ap.add_argument("--down-h", type=int, default=1232)
     ap.add_argument("--down-fps", type=float, default=10.0)
+    ap.add_argument("--ov-record-fps", type=float, default=0.0,
+                    help="record OV9281 at this rate while capturing at --fps (0=all)")
+    ap.add_argument("--down-preview-fps", type=float, default=1.0)
+    ap.add_argument("--no-down-raw", action="store_true",
+                    help="record processed flow plus a low-rate CM2 preview, not continuous raw CM2")
+    ap.add_argument("--flow", action="store_true",
+                    help="publish CM2 angular flow to PX4 and record compact diagnostics")
+    ap.add_argument(
+        "--flow-calibration",
+        default=str(Path(__file__).with_name("config") / "cm2_intrinsics_rs.yaml"),
+    )
     ap.add_argument("--down-max-exposure-us", type=int, default=1000,
                     help="hard CM2 daylight shutter ceiling (default: 1000 us)")
     ap.add_argument("--no-down-camera", action="store_true",
@@ -597,6 +640,8 @@ def main():
         ap.error("forward and downward camera indices must differ")
     if args.detect and args.no_down_camera:
         ap.error("--detect needs the downward camera")
+    if args.flow and args.no_down_camera:
+        ap.error("--flow needs the downward camera")
     if args.detect_queue < 1:
         ap.error("--detect-queue must be at least 1")
 
@@ -609,10 +654,22 @@ def main():
     bag.topic("/camera/image_raw", "sensor_msgs/msg/Image")
     bag.topic("/camera/camera_info", "sensor_msgs/msg/CameraInfo")
     if not args.no_down_camera:
-        bag.topic("/camera_down/image_raw", "sensor_msgs/msg/Image")
+        if not args.no_down_raw:
+            bag.topic("/camera_down/image_raw", "sensor_msgs/msg/Image")
+        else:
+            bag.topic("/camera_down/image_preview", "sensor_msgs/msg/Image")
         bag.topic("/camera_down/camera_info", "sensor_msgs/msg/CameraInfo")
+    if args.flow:
+        bag.topic("/fmu/in/sensor_optical_flow", "px4_msgs/msg/SensorOpticalFlow")
+        bag.topic("/localization/cm2_flow/debug", "std_msgs/msg/String")
+        bag.topic("/camera_down/image_fault", "sensor_msgs/msg/Image")
     if args.detect:
         bag.topic(args.detect_topic, "vision_msgs/msg/Detection2DArray")
+        bag.topic("/detections/down/debug", "std_msgs/msg/String")
+    bag.topic(
+        "/fmu/in/vehicle_visual_odometry", "px4_msgs/msg/VehicleOdometry"
+    )
+    bag.topic("/localization/tag_ev/status", "std_msgs/msg/String")
     bag.topic("/imu", "sensor_msgs/msg/Imu")
     bag.topic("/capture/realtime_minus_boottime_ns", "std_msgs/msg/Int64")
     for name, type_str, _ in PX4_SUBS:
@@ -628,10 +685,51 @@ def main():
             cls, name,
             (lambda n: (lambda msg: on_px4_message(bag, sync_monitor, n, msg)))(name),
             qos)
+    node.create_subscription(
+        VehicleOdometry,
+        "/fmu/in/vehicle_visual_odometry",
+        lambda msg: bag.write(
+            "/fmu/in/vehicle_visual_odometry",
+            serialize_message(msg),
+            message_record_time_ns(msg),
+        ),
+        qos,
+    )
+    node.create_subscription(
+        String,
+        "/localization/tag_ev/status",
+        lambda msg: bag.write(
+            "/localization/tag_ev/status",
+            serialize_message(msg),
+            realtime_ns(),
+        ),
+        qos,
+    )
     # IMU: SensorCombined over the same bridge, converted to sensor_msgs/Imu on /imu.
+    imu_history = None
+    range_history = None
+    if args.flow:
+        from cm2_flow import ImuHistory, RangeHistory
+
+        imu_history = ImuHistory()
+        range_history = RangeHistory()
     node.create_subscription(
         SensorCombined, "/fmu/out/sensor_combined",
-        lambda msg: on_sensor_combined(bag, sync_monitor, msg), qos)
+        lambda msg: on_sensor_combined(
+            bag, sync_monitor, msg, imu_history
+        ), qos)
+    if range_history is not None:
+        def note_range(msg):
+            distance = float(msg.current_distance)
+            if msg.min_distance <= distance <= msg.max_distance:
+                range_history.note(
+                    int(msg.timestamp) * 1000,
+                    distance,
+                    int(msg.signal_quality),
+                )
+        node.create_subscription(
+            DistanceSensor, "/fmu/out/distance_sensor", note_range, qos
+        )
     # Mission-end auto-stop: a dedicated vehicle_status sub (the PX4_SUBS one only
     # logs). Off by default so standalone/bench captures are unaffected.
     if args.stop_on_disarm:
@@ -683,26 +781,68 @@ def main():
     # detector that will not load is reported and the capture proceeds without
     # it; it never costs the flight its bag.
     detector_sink = None
+    from frame_sinks import FanoutSink
     if args.detect:
         try:
             from frame_sinks import DetectorSink
-            from mission_engine.rim.tag_detector import TagDetector, detect_image
+            from mission_engine.rim.tag_detector import (
+                TagDetector, detect_image_with_debug,
+            )
             from vision_msgs.msg import Detection2DArray
 
             tag_detector = TagDetector()
             publisher = node.create_publisher(Detection2DArray, args.detect_topic, 10)
+            debug_publisher = node.create_publisher(
+                String, "/detections/down/debug", 10
+            )
             detector_sink = DetectorSink(
-                detector=lambda img: detect_image(tag_detector, img),
+                detector=lambda img: detect_image_with_debug(tag_detector, img),
                 publish=publisher.publish,
                 bag=bag,
                 topic=args.detect_topic,
                 depth=args.detect_queue,
+                debug_publish=debug_publisher.publish,
+                debug_topic="/detections/down/debug",
             )
             print(f"recorder: nadir detector -> {args.detect_topic} "
                   f"(queue {args.detect_queue})", file=sys.stderr, flush=True)
         except Exception as exc:
             errors.append(f"detector: {exc}")
             print(f"recorder: DETECTOR DISABLED: {exc}", file=sys.stderr, flush=True)
+    flow_sink = None
+    if args.flow:
+        try:
+            from cm2_flow import Cm2FlowFrontend
+            from frame_sinks import FlowSink
+
+            frontend = Cm2FlowFrontend(args.flow_calibration, imu_history)
+            flow_publisher = node.create_publisher(
+                SensorOpticalFlow, "/fmu/in/sensor_optical_flow", 10
+            )
+            flow_debug_publisher = node.create_publisher(
+                String, "/localization/cm2_flow/debug", 10
+            )
+            flow_sink = FlowSink(
+                frontend,
+                range_history,
+                flow_publisher.publish,
+                flow_debug_publisher.publish,
+                bag,
+            )
+            node.create_subscription(
+                Bool,
+                "/capture/trigger_raw_cm2",
+                lambda msg: flow_sink.trigger_raw_clip() if msg.data else None,
+                10,
+            )
+            print(
+                "recorder: live CM2 flow -> /fmu/in/sensor_optical_flow",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as exc:
+            errors.append(f"flow: {exc}")
+            print(f"recorder: FLOW DISABLED: {exc}", file=sys.stderr, flush=True)
     down_process = None
     down_frames = None
     down_status = None
@@ -829,6 +969,7 @@ def main():
                 "max_exposure_us": args.ov_max_exposure_us,
                 "errors": errors,
                 "errors_lock": errors_lock,
+                "record_fps": args.ov_record_fps,
             },
             name="capture-ov9281",
         ))
@@ -853,7 +994,9 @@ def main():
                     "max_exposure_us": args.down_max_exposure_us,
                     "errors": errors,
                     "errors_lock": errors_lock,
-                    "sink": detector_sink,
+                    "sink": FanoutSink(flow_sink, detector_sink),
+                    "record_raw": not args.no_down_raw,
+                    "preview_fps": args.down_preview_fps,
                 },
                 name="capture-imx219",
             ))
@@ -898,10 +1041,9 @@ def main():
                 camera.close()
             except Exception:
                 pass
-        if detector_sink is not None:
-            # Drain the sink before the writer and the node go: it holds
-            # frames it still owes the bag, and it publishes through the node.
-            detector_sink.close()
+        for sink in (flow_sink, detector_sink):
+            if sink is not None:
+                sink.close()
         try:
             node.destroy_node()  # stop ROS callbacks before finalizing the writer
         except Exception:
@@ -933,6 +1075,11 @@ def main():
             print(f"  {detector_sink.summary()}", file=sys.stderr)
             if detector_sink.last_fault:
                 print(f"  last detector fault: {detector_sink.last_fault}",
+                      file=sys.stderr)
+        if flow_sink is not None:
+            print(f"  {flow_sink.summary()}", file=sys.stderr)
+            if flow_sink.last_fault:
+                print(f"  last flow fault: {flow_sink.last_fault}",
                       file=sys.stderr)
         for error in errors:
             print(f"  ERROR: {error}", file=sys.stderr)

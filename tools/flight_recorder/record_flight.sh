@@ -19,7 +19,9 @@
 #   SECONDS  hard cap (default: none -- run until SIGINT at landing)
 #   TAG      name suffix (default: intel_flight)
 # Env: SPLIT_MB (default 0 with USB, 256 without), FPS (OV9281, default 30),
-#      NO_DOWN_CAMERA (1 = OV9281 only), DOWN_FPS (IMX219, default 10),
+#      NO_DOWN_CAMERA (1 = OV9281 only), DOWN_FPS (IMX219, default 30),
+#      FLOW (1 = publish CM2 flow to PX4), RECORD_CM2_RAW (1 = continuous raw),
+#      OV_RECORD_FPS (default 1; camera capture still runs at FPS),
 #      COMPRESS (default none; zstd is opt-in for low-rate captures),
 #      MINHZ (IMU gate, default 120), DETECT (1 = run the nadir AprilTag detector),
 #      MISSION_ENGINE (package path the detector comes from),
@@ -31,8 +33,11 @@ TAG="${2:-intel_flight}"
 FPS="${FPS:-30}"
 OV_MAX_EXPOSURE_US="${OV_MAX_EXPOSURE_US:-1000}"
 NO_DOWN_CAMERA="${NO_DOWN_CAMERA:-0}"
-DOWN_FPS="${DOWN_FPS:-10}"
+DOWN_FPS="${DOWN_FPS:-30}"
 CM2_MAX_EXPOSURE_US="${CM2_MAX_EXPOSURE_US:-1000}"
+FLOW="${FLOW:-1}"
+RECORD_CM2_RAW="${RECORD_CM2_RAW:-0}"
+OV_RECORD_FPS="${OV_RECORD_FPS:-1}"
 MINHZ="${MINHZ:-120}"
 IMU_GATE_SECS="${IMU_GATE_SECS:-5}"
 IMU_GATE_ATTEMPTS="${IMU_GATE_ATTEMPTS:-3}"
@@ -86,6 +91,8 @@ fi
 SCFG=""; [ "$COMPRESS" = zstd ] && SCFG="$RECORDER_DIR/config/mcap_zstd.yaml"
 DISARM=""; [ "$STOP_ON_DISARM" = 1 ] && DISARM="--stop-on-disarm"
 DOWN_CAMERA_ARG=""; [ "$NO_DOWN_CAMERA" = 1 ] && DOWN_CAMERA_ARG="--no-down-camera"
+FLOW_ARG=""; [ "$FLOW" = 1 ] && [ "$NO_DOWN_CAMERA" = 0 ] && FLOW_ARG="--flow"
+DOWN_RAW_ARG=""; [ "$RECORD_CM2_RAW" = 0 ] && [ "$NO_DOWN_CAMERA" = 0 ] && DOWN_RAW_ARG="--no-down-raw"
 # The detector is the mission engine's, running on the frames the recorder
 # already holds. It is a tap: the bag is written before it runs.
 DETECT_ARG=""
@@ -146,10 +153,10 @@ fi
 echo ">>        start BEFORE arming; Ctrl-C AFTER landing."
 set +e
 if [ -n "$SECS" ]; then
-  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-record-fps "$OV_RECORD_FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DOWN_RAW_ARG $FLOW_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 124 ] && rc=0; [ "$rc" -eq 130 ] && rc=0
 else
-  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DISARM $DETECT_ARG; rc=$?
+  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-record-fps "$OV_RECORD_FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DOWN_RAW_ARG $FLOW_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 130 ] && rc=0
 fi
 set -e
@@ -180,8 +187,9 @@ SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
     echo "- downward_camera: disabled"
     echo "- camera_calibration: drone4 OV9281 uncalibrated; K[0]=0 in CameraInfo"
   else
-    echo "- downward_camera: IMX219 cam1 1640x1232 yuyv422 color @${DOWN_FPS}fps; automatic daylight exposure <=${CM2_MAX_EXPOSURE_US}us; driver-default orientation; no software rotation"
-    echo "- camera_calibration: drone4 OV9281 and CM2 uncalibrated; K[0]=0 in CameraInfo"
+    echo "- downward_camera: IMX219 cam1 1640x1232 yuyv422 capture @${DOWN_FPS}fps; automatic daylight exposure <=${CM2_MAX_EXPOSURE_US}us; driver-default orientation"
+    echo "- downward_recording: continuous_raw=${RECORD_CM2_RAW}; flow=${FLOW}; 1 Hz mono preview when raw is disabled"
+    echo "- camera_calibration: CM2 uses config/cm2_intrinsics_rs.yaml for flow; CameraInfo remains K[0]=0 for compatibility"
   fi
   echo "- imu: /fmu/out/sensor_combined over uXRCE-DDS (~194 Hz, no USB)"
   echo "- storage: ${STORAGE_PATH}, split=${SPLIT_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"

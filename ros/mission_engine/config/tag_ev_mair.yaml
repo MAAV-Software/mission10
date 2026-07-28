@@ -1,0 +1,12 @@
+/**:
+  ros__parameters:
+    # Shadow first. Change to true only with EKF2_EV_CTRL=1 and
+    # anchor_corrects=false after reviewing the shadow output.
+    publish_ev: false
+    detections_topic: /detections/down
+    tag_ids: [6, 7]
+    registration_samples: 10
+    registration_scatter_m: 0.10
+    pair_disagreement_m: 0.25
+    prior_timeout_after_arm_s: 10.0
+    position_noise_floor_m: 0.10

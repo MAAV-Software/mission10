@@ -1,0 +1,8 @@
+cam0:
+  camera_model: pinhole
+  distortion_model: radtan
+  distortion_coeffs: [0.15046410, -0.23368367, 0.00000042, -0.00209991]
+  intrinsics: [1298.69385194, 1299.56328818, 827.70242273, 617.60425847]
+  resolution: [1640, 1232]
+  shutter_model: rolling
+  line_delay: 0.00000968869339923

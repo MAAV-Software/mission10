@@ -10,23 +10,23 @@ map records remain within the mission engine.
 The recorder owns the cameras, so it is also the frame source for the sensing
 stack. One capture serves every consumer of the nadir view
 ([`rfd-single-camera-sensing`](../../../doc/rfd-single-camera-sensing.md) 3.1).
-`--detect` attaches the mission engine's AprilTag detector to those frames and
-avoids a DDS hop for 20 MB/s of imagery. The bag is always written first, in
-the capture thread. A sink is optional, runs on its own thread behind a
-bounded queue, and cannot stop a recording. Run the recorder without `--detect`
-to keep it free of the mission engine.
+`--flow` attaches the CM2 angular-flow frontend and `--detect` attaches the
+mission engine's AprilTag detector without a raw-image DDS hop. Both run behind
+bounded queues and cannot stop camera capture.
 
 ## Recorded streams
 
-- Forward OV9281: 1280 × 800 `mono8` at 30 Hz. Automatic daylight exposure is
+- Forward OV9281: captured at 30 Hz and recorded at 1 Hz during flow bring-up.
+  Set `OV_RECORD_FPS=0` to retain every frame for VIO. Automatic daylight exposure is
   capped at 1000 µs by default. The tool requires the installed device-tree
   rotation to report 180 degrees. It initializes this camera after the CM2
   manager so libcamera applies native horizontal and vertical sensor flips for
   the physically inverted mount.
-- Downward IMX219 Camera Module 2: 1640 × 1232 packed `yuyv` 4:2:2 color at
-  10 Hz by default. Automatic daylight exposure is capped at 1000 µs; darker
-  frames remain dark after analogue gain is exhausted. The packed format keeps
-  all color samples in a standard ROS Jazzy `sensor_msgs/Image` encoding.
+- Downward IMX219 Camera Module 2: 1640 × 1232 at 30 Hz. By default the bag
+  stores flow, tracks, timing/quality diagnostics, tag corners, a 1 Hz preview,
+  and one-second pre/post raw clips around flow faults instead of the
+  approximately 121 MB/s continuous YUYV stream. Set `RECORD_CM2_RAW=1` for a
+  deliberate calibration capture.
 - `/imu`, converted from PX4 `SensorCombined`, plus the original PX4 IMU topic.
 - PX4 time sync, attitude, local/global position, receiver GNSS, dToF range,
   EKF range-height aid state, estimator control flags, full estimator status,
@@ -36,11 +36,13 @@ to keep it free of the mission engine.
 Both camera `CameraInfo` messages deliberately report `K[0] = 0` until the
 installed cameras are calibrated in their operational modes.
 
-The required PX4 firmware publishes `EstimatorStatus`,
+The optional diagnostic PX4 firmware publishes `EstimatorStatus`,
 `EstimatorGpsStatus`, the GNSS position and velocity aid sources,
 `EstimatorStatusFlags`, and the range-height aid source. These streams keep
 the distinction between a receiver fix and measurements accepted by EKF2
-visible in the bag.
+visible in the bag. Existing firmware can consume `/fmu/in/sensor_optical_flow`
+without rebuilding `px4_msgs`; the extra flow/EV aid-source publications only
+improve live observability.
 
 ## Preview the cameras
 
@@ -114,7 +116,8 @@ By default, the recorder writes one unsplit MCAP directly to
 from RAM to eMMC. Useful overrides:
 
 ```sh
-DOWN_FPS=10 FPS=30 ./record_flight.sh "" test
+FLOW=1 DOWN_FPS=30 FPS=30 ./record_flight.sh "" flow_test
+RECORD_CM2_RAW=1 OV_RECORD_FPS=0 ./record_flight.sh "" calibration
 COMPRESS=zstd ./record_flight.sh "" deliberate_low_rate_compressed_test
 SPLIT_MB=2048 ./record_flight.sh "" deliberate_split_test
 CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight
@@ -144,8 +147,9 @@ load, or that faults during the flight, is reported and the recording
 continues.
 
 Detection costs about 90 ms of one core per 1640 × 1232 frame, against the
-100 ms frame interval at `DOWN_FPS=10`. The queue holds two frames and drops
-the oldest when the detector falls behind.
+33 ms camera interval at `DOWN_FPS=30`. The detector therefore consumes the
+freshest frames at roughly 10 Hz while the independent flow worker processes
+the full camera rate.
 
 For a short, single-tier capture:
 
@@ -158,7 +162,6 @@ RECDIR=/home/maav/recordings ./record_session.sh 30 bench
 From this directory:
 
 ```sh
-python3 -m py_compile camera_tuning.py capture.py frame_sinks.py focus_stream.py imu_rate.py tier_drain.py
+python3 -m py_compile camera_tuning.py capture.py cm2_flow.py frame_sinks.py focus_stream.py imu_rate.py tier_drain.py
 bash -n record_flight.sh record_session.sh
-python3 -m pytest test_image_formats.py test_frame_sinks.py -q
 ```
