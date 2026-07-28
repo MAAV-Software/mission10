@@ -119,6 +119,34 @@ Without `--cert` and `--key`, the webapp uses plain HTTP and writes a warning. A
 desktop browser on localhost can use this mode for development, and the space bar
 operates push-to-talk. A phone in this mode gives no access to the microphone.
 
+### Drone companion service
+
+The Drone companion image supplies ROS in `/opt/ros/jazzy`. Run Jarvis directly
+from the source checkout with:
+
+```bash
+ros/jarvis_web/run_jarvis.sh
+```
+
+Install the checked-in system service once on the Drone:
+
+```bash
+sudo install -m 0644 \
+  ros/jarvis_web/systemd/jarvis-web.service \
+  /etc/systemd/system/jarvis-web.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now jarvis-web.service
+```
+
+The service runs as `maav`, starts during boot without an interactive login,
+and restarts after a process failure. It expects the venv, speech models, and
+TLS files described above. Inspect it with:
+
+```bash
+systemctl status jarvis-web.service
+journalctl -u jarvis-web.service
+```
+
 ## Layout
 
 - `grammar.py` — pure. The vocabulary, the phrases, the normal form and the
