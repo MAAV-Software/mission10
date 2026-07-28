@@ -939,6 +939,14 @@ def main() -> None:
     parser.add_argument("--flow", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--skip-path-comparison",
+        action="store_true",
+        help=(
+            "score angular flow and optional loop anchors without requiring "
+            "a dToF-integrated path in flow_selected.csv"
+        ),
+    )
+    parser.add_argument(
         "--loop-anchor-window",
         action="append",
         default=[],
@@ -955,10 +963,11 @@ def main() -> None:
         "angular_flow": angular_validation(
             poses, arguments.flow, arguments.output
         ),
-        "dtof_metric_path": compare(
-            poses, arguments.flow, arguments.output
-        ),
     }
+    if not arguments.skip_path_comparison:
+        metrics["dtof_metric_path"] = compare(
+            poses, arguments.flow, arguments.output
+        )
     if arguments.loop_anchor_window:
         windows = [
             tuple(float(value) for value in item.split(":", maxsplit=1))

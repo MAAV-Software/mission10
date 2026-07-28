@@ -1,0 +1,67 @@
+{
+  "date": "2026-07-27",
+  "source_bag": "reference/20260727_drone4_cm2_flow_handheld_validation_uncompressed",
+  "rl_vo_commit": "c273182857fdef3d91eccd6bde3d78b551de21bb",
+  "candidate": {
+    "backend": "rl_vo standalone FeatureTracker",
+    "svo_pose_used": false,
+    "imu_used_by_tracker": false,
+    "rolling_shutter_compensation": "downstream 16-band gyro compensation",
+    "frames": 2603,
+    "accepted_pairs": 2602,
+    "availability": 1.0,
+    "valid_rate_hz": 30.01576184790709,
+    "workstation_latency_ms": {
+      "median": 0.8752818685024977,
+      "p95": 3.716961992904544
+    },
+    "half_second_windows": {
+      "samples": 139,
+      "scale_median": 1.0053138603116674,
+      "vector_error_median_m": 0.007726172979360143,
+      "vector_error_p95_m": 0.0223525594564696
+    },
+    "anchored_loop": {
+      "path_length_scale": 0.8995444256190174,
+      "endpoint_vector_error_m": 0.02719530570438573
+    }
+  },
+  "opencv_klt_baseline": {
+    "availability": 1.0,
+    "half_second_windows": {
+      "samples": 118,
+      "scale_median": 0.9776027696137373,
+      "vector_error_median_m": 0.0038222089965304004,
+      "vector_error_p95_m": 0.015574170796612264
+    },
+    "anchored_loop": {
+      "path_length_scale": 0.9117050584100029,
+      "endpoint_vector_error_m": 0.03534912099366625
+    },
+    "workstation_frontend_benchmark_ms": {
+      "median": 4.828946897760034,
+      "p95": 6.273775396402925,
+      "note": "Approximate feature-detection plus forward/backward LK benchmark; excludes homography and rolling-shutter conversion."
+    }
+  },
+  "gate": {
+    "passed": false,
+    "passed_checks": [
+      "availability",
+      "valid rate",
+      "loop endpoint error",
+      "window scale"
+    ],
+    "failed_checks": [
+      "half-second median vector error within 10 percent of KLT",
+      "half-second p95 vector error within 10 percent of KLT"
+    ],
+    "arm_performance_evaluated": false,
+    "arm_performance_note": "Stopped at the accuracy gate. Drone4 has no rl_vo build environment and no VIO CI workflow was added."
+  },
+  "reproducibility": {
+    "track_csv_sha256": "8a52af5abcccbb5373e19a35448c07931df4e672f5797502bd71cee97cf0b18a",
+    "repeat_match": true
+  },
+  "decision": "Keep OpenCV KLT as the flight frontend. Retain rl_vo FeatureTracker as a fast alternate for later validation; do not publish it to PX4 yet."
+}

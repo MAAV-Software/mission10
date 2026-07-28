@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 import numpy as np
-from mcap.reader import make_reader
-from mcap_ros2.decoder import DecoderFactory
 
 
 def stamp_ns(header) -> int:
@@ -35,6 +33,11 @@ def split_mcaps(bag: Path) -> list[Path]:
 def iter_messages(
     bag: Path, topics: Iterable[str] | None = None
 ) -> Iterator[tuple[str, int, object]]:
+    # Keep MCAP optional for runners that only consume an already prepared
+    # image/CSV dataset, such as the self-contained SVO frontend benchmark.
+    from mcap.reader import make_reader
+    from mcap_ros2.decoder import DecoderFactory
+
     selected = list(topics) if topics is not None else None
     for path in split_mcaps(bag):
         with path.open("rb") as stream:
@@ -135,4 +138,3 @@ def percentile(values, q: float):
 def median(values):
     values = [float(value) for value in values if finite(value)]
     return float(np.median(values)) if values else None
-
