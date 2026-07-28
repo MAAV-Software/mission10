@@ -198,6 +198,10 @@ class TagEvNode(Node):
     def _prior_tick(self):
         if not self._prior_allowed():
             return
+        # The launch prior is only a bootstrap measurement. Once one tag has
+        # a pad-frame reference, that tag owns the horizontal observation.
+        if self.references:
+            return
         now_ns = self.get_clock().now().nanoseconds
         if self.publish_ev:
             self._publish_ev(now_ns, np.zeros(2), self.noise_floor_m ** 2, 100)
@@ -243,7 +247,7 @@ class TagEvNode(Node):
 
     def _detections(self, msg):
         image_ns = _stamp_ns(msg.header.stamp)
-        candidates = []
+        observations = []
         used_ns = image_ns
         for detection in msg.detections:
             tag_id = self._tag_id(detection)
@@ -257,28 +261,72 @@ class TagEvNode(Node):
             if relative is None:
                 continue
             used_ns, offset, _ = relative
-            if tag_id not in self.references and self._prior_allowed():
-                rows = self.registration[tag_id]
-                rows.append(offset)
-                if len(rows) == self.registration_samples:
-                    values = np.asarray(rows)
-                    median = np.median(values, axis=0)
-                    scatter = float(
-                        np.max(np.linalg.norm(values - median, axis=1))
-                    )
-                    if scatter <= self.registration_scatter_m:
-                        # During the pad prior the camera horizontal position
-                        # is zero, so this offset is the tag's pad-frame fix.
-                        self.references[tag_id] = median
-                        self.get_logger().info(
-                            f"registered tag {tag_id} at "
-                            f"N={median[0]:+.3f} E={median[1]:+.3f}"
-                        )
-            if tag_id in self.references:
-                candidates.append(self.references[tag_id] - offset)
+            observations.append((tag_id, offset))
 
-        if not (self.references.keys() >= self.tag_ids) or not candidates:
+        if not observations:
             return
+
+        # Bootstrap exactly one tag against the known launch-pad origin. A
+        # short stable window bounds the handoff jump without incorrectly
+        # requiring the aircraft to remain stationary for the whole climb.
+        if not self.references and self._prior_allowed():
+            tag_id, offset = max(
+                observations,
+                key=lambda item: (
+                    len(self.registration[item[0]]),
+                    -item[0],
+                ),
+            )
+            rows = self.registration[tag_id]
+            rows.append(offset)
+            if len(rows) == self.registration_samples:
+                values = np.asarray(rows)
+                median = np.median(values, axis=0)
+                scatter = float(
+                    np.max(np.linalg.norm(values - median, axis=1))
+                )
+                if scatter <= self.registration_scatter_m:
+                    self.references[tag_id] = median
+                    self.get_logger().info(
+                        f"bootstrapped tag {tag_id} at "
+                        f"N={median[0]:+.3f} E={median[1]:+.3f}"
+                    )
+
+        candidates = [
+            self.references[tag_id] - offset
+            for tag_id, offset in observations
+            if tag_id in self.references
+        ]
+        if not candidates:
+            return
+
+        # Register every later tag relative to the position supplied by an
+        # existing tag. This removes vehicle motion from its registration
+        # samples and allows a second anchor to converge during flight.
+        provisional_position = np.median(np.asarray(candidates), axis=0)
+        for tag_id, offset in observations:
+            if tag_id in self.references:
+                continue
+            rows = self.registration[tag_id]
+            rows.append(provisional_position + offset)
+            if len(rows) != self.registration_samples:
+                continue
+            values = np.asarray(rows)
+            median = np.median(values, axis=0)
+            scatter = float(np.max(np.linalg.norm(values - median, axis=1)))
+            if scatter <= self.registration_scatter_m:
+                self.references[tag_id] = median
+                self.get_logger().info(
+                    f"registered tag {tag_id} relative to active anchor at "
+                    f"N={median[0]:+.3f} E={median[1]:+.3f}"
+                )
+
+        candidates = [
+            self.references[tag_id] - offset
+            for tag_id, offset in observations
+            if tag_id in self.references
+        ]
+
         values = np.asarray(candidates)
         position = np.median(values, axis=0)
         disagreement = (

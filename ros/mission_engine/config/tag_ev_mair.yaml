@@ -5,7 +5,9 @@
     publish_ev: false
     detections_topic: /detections/down
     tag_ids: [6, 7]
-    registration_samples: 10
+    # Three frames bound the initial handoff while keeping the window short
+    # enough for a vehicle that has no horizontal aid before the first tag.
+    registration_samples: 3
     registration_scatter_m: 0.10
     pair_disagreement_m: 0.25
     prior_timeout_after_arm_s: 10.0

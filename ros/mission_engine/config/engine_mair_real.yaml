@@ -46,11 +46,11 @@
     camera_roll_deg: 0.0
     camera_tilt_deg: 0.0
 
-    # Setpoint loop closure. Both pad tags must be fresh and preserve their
-    # measured separation before their transform can move a setpoint.
+    # EKF2 consumes the tag-EV position stream. Do not also move mission
+    # setpoints from the same tag observations.
     anchor_tag_ids: [6, 7]
     anchor_aborts: false
-    anchor_corrects: true
+    anchor_corrects: false
     anchor_gate_m: 1.5
     anchor_persist_s: 1.0
     anchor_max_radial_m: 3.0
