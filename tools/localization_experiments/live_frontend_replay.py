@@ -5,6 +5,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 
@@ -57,10 +58,13 @@ def main():
     else:
         frontend = Cm2FlowFrontend(args.calibration, imu)
     results = []
+    latency_ms = []
     for topic, _, image in iter_messages(
         args.bag, ["/camera_down/image_raw"]
     ):
+        started = time.perf_counter()
         results.append(frontend.process(image, stamp_ns(image.header)))
+        latency_ms.append((time.perf_counter() - started) * 1e3)
         if len(results) >= args.max_pairs + 1:
             break
     valid = [result for result in results if result.status == STATUS_VALID]
@@ -82,6 +86,8 @@ def main():
         f"tracker_availability={len(tracked) / max(1, len(results) - 1):.3f} "
         f"quality_availability={len(valid) / max(1, len(results) - 1):.3f} "
         f"quality_median={np.median([r.quality for r in valid]):.1f} "
+        f"latency_median_ms={np.median(latency_ms):.1f} "
+        f"latency_p95_ms={np.percentile(latency_ms, 95):.1f} "
         f"contract_error_max={max(contract_error):.3e} "
         f"statuses={dict(Counter(r.status for r in results))}"
     )
