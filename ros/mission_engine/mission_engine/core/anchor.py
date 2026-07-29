@@ -170,6 +170,25 @@ class TagAnchorMap:
 
     # ------------------------------------------------------------ ingest
 
+    def apply_frame_reset(self, dn: float, de: float) -> None:
+        """Move the stored datum into PX4's new local frame."""
+        for ref in self.refs.values():
+            ref.pending = [(t, n + dn, e + de) for t, n, e in ref.pending]
+            if ref.origin is not None:
+                ref.origin = (ref.origin[0] + dn, ref.origin[1] + de)
+        self.fixes = [
+            AnchorFix(
+                t=fix.t,
+                tag_id=fix.tag_id,
+                fix=(fix.fix[0] + dn, fix.fix[1] + de),
+                residual=fix.residual,
+                agl_m=fix.agl_m,
+                radial_m=fix.radial_m,
+                settled=fix.settled,
+            )
+            for fix in self.fixes
+        ]
+
     def observe(
         self,
         t: float,
@@ -445,8 +464,16 @@ class SetpointCorrection:
         self.cfg = cfg or CorrectionConfig()
         self.applied: Tuple[float, float] = (0.0, 0.0)
         self.target: Tuple[float, float] = (0.0, 0.0)
+        self.frame_shift: Tuple[float, float] = (0.0, 0.0)
         self.saturated = False
         self._last_t: Optional[float] = None
+
+    def apply_frame_reset(self, dn: float, de: float) -> None:
+        """Keep the planning frame fixed when PX4 moves its local frame."""
+        self.frame_shift = (
+            self.frame_shift[0] + dn,
+            self.frame_shift[1] + de,
+        )
 
     def update(
         self, t: float, transform: Optional[AnchorTransform]
@@ -499,8 +526,14 @@ class SetpointCorrection:
 
     def to_plan(self, pos: Tuple[float, float]) -> Tuple[float, float]:
         """Flight-layer position -> the frame the engine plans in."""
-        return (pos[0] - self.applied[0], pos[1] - self.applied[1])
+        return (
+            pos[0] - self.frame_shift[0] - self.applied[0],
+            pos[1] - self.frame_shift[1] - self.applied[1],
+        )
 
     def to_flight(self, point: Tuple[float, float]) -> Tuple[float, float]:
         """A planned point -> the frame PX4 acts on."""
-        return (point[0] + self.applied[0], point[1] + self.applied[1])
+        return (
+            point[0] + self.frame_shift[0] + self.applied[0],
+            point[1] + self.frame_shift[1] + self.applied[1],
+        )

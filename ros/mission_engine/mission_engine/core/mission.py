@@ -161,6 +161,12 @@ class MissionEngine:
             self.ekf_resets_seen += abs(counter - self._last_reset_counter)
         self._last_reset_counter = counter
 
+    def apply_heading_reset(self, delta: float) -> None:
+        self._last_yaw = math.atan2(
+            math.sin(self._last_yaw + delta),
+            math.cos(self._last_yaw + delta),
+        )
+
     def operator_abort(self) -> None:
         self._abort("operator")
 

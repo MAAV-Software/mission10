@@ -80,6 +80,7 @@ class OffboardController(Node):
         self.declare_parameter("force_arm", False)
         self.declare_parameter("wait_for_start", False)
         self.declare_parameter("status_stale_timeout_s", 5.0)
+        self.declare_parameter("launch_stability_s", 3.0)
 
         self.ns = self.get_parameter("vehicle_namespace").value.strip("/")
         self.rate_hz = float(self.get_parameter("setpoint_rate_hz").value)
@@ -90,6 +91,7 @@ class OffboardController(Node):
         self.force_arm = bool(self.get_parameter("force_arm").value)
         self.wait_for_start = bool(self.get_parameter("wait_for_start").value)
         self.status_stale_timeout_s = float(self.get_parameter("status_stale_timeout_s").value)
+        self.launch_stability_s = float(self.get_parameter("launch_stability_s").value)
 
         # PX4 publishes every uORB topic BEST_EFFORT over uXRCE-DDS. A RELIABLE
         # subscription is silently incompatible with it and receives nothing,
@@ -129,6 +131,7 @@ class OffboardController(Node):
         self.yaw = 0.0
         self._launch_xy = None
         self._launch_z = 0.0
+        self._launch_reference_latched = False
         self._launch_z_latched = False
         self._launch_yaw = 0.0
         self._launch_yaw_latched = False
@@ -155,6 +158,10 @@ class OffboardController(Node):
         self._origin_start_us = 0
         self._origin_confirmed = False
         self._handoff_hold = None
+        self._xy_reset_counter = None
+        self._z_reset_counter = None
+        self._heading_reset_counter = None
+        self._last_local_reset_us = 0
 
         self.state = WAIT_LINK
         self._timer = self.create_timer(1.0 / self.rate_hz, self._tick)
@@ -253,6 +260,9 @@ class OffboardController(Node):
         mission that wants RTL opts in by overriding this with `begin_return()`.
         """
 
+    def on_local_frame_reset(self, delta_xy, delta_z, delta_heading):
+        """Mission hook for rebasing state stored outside the base controller."""
+
     # plumbing
 
     def _topic(self, suffix: str) -> str:
@@ -269,13 +279,72 @@ class OffboardController(Node):
         self.failsafe = msg.failsafe
 
     def _pos_cb(self, msg: VehicleLocalPosition):
+        self._handle_local_frame_reset(msg)
         self.x, self.y, self.z = msg.x, msg.y, msg.z
         self.vx, self.vy, self.vz = msg.vx, msg.vy, msg.vz
         self._xy_valid = bool(msg.xy_valid)
         self._v_xy_valid = bool(msg.v_xy_valid)
         self._z_valid = bool(msg.z_valid)
-        if self._launch_xy is None and all(math.isfinite(v) for v in (msg.x, msg.y)):
+        if (
+            not self._launch_reference_latched
+            and all(math.isfinite(v) for v in (msg.x, msg.y))
+        ):
             self._launch_xy = (float(msg.x), float(msg.y))
+
+    def _handle_local_frame_reset(self, msg: VehicleLocalPosition):
+        xy_counter = int(msg.xy_reset_counter)
+        z_counter = int(msg.z_reset_counter)
+        heading_counter = int(msg.heading_reset_counter)
+        if self._xy_reset_counter is None:
+            self._xy_reset_counter = xy_counter
+            self._z_reset_counter = z_counter
+            self._heading_reset_counter = heading_counter
+            self._last_local_reset_us = self._now_us()
+            return
+
+        delta_xy = (0.0, 0.0)
+        delta_z = 0.0
+        delta_heading = 0.0
+        xy_changed = xy_counter != self._xy_reset_counter
+        z_changed = z_counter != self._z_reset_counter
+        heading_changed = heading_counter != self._heading_reset_counter
+        if xy_changed:
+            delta_xy = (float(msg.delta_xy[0]), float(msg.delta_xy[1]))
+        if z_changed:
+            delta_z = float(msg.delta_z)
+        if heading_changed:
+            delta_heading = float(msg.delta_heading)
+
+        self._xy_reset_counter = xy_counter
+        self._z_reset_counter = z_counter
+        self._heading_reset_counter = heading_counter
+        if not (xy_changed or z_changed or heading_changed):
+            return
+
+        self._last_local_reset_us = self._now_us()
+        if self._launch_xy is not None:
+            self._launch_xy = (
+                self._launch_xy[0] + delta_xy[0],
+                self._launch_xy[1] + delta_xy[1],
+            )
+        if self._launch_z_latched:
+            self._launch_z += delta_z
+        if self._launch_yaw_latched:
+            self._launch_yaw = wrap_pi(self._launch_yaw + delta_heading)
+        if self._handoff_hold is not None:
+            x, y, z, yaw = self._handoff_hold
+            self._handoff_hold = (
+                x + delta_xy[0],
+                y + delta_xy[1],
+                z,
+                wrap_pi(yaw + delta_heading),
+            )
+        self.on_local_frame_reset(delta_xy, delta_z, delta_heading)
+        self.get_logger().warn(
+            "PX4 local frame reset: "
+            f"xy=({delta_xy[0]:+.3f}, {delta_xy[1]:+.3f}) m "
+            f"z={delta_z:+.3f} m heading={math.degrees(delta_heading):+.2f} deg"
+        )
 
     def _att_cb(self, msg: VehicleAttitude):
         w, x, y, z = msg.q  # PX4 order w, x, y, z
@@ -401,15 +470,25 @@ class OffboardController(Node):
 
     def _latch_launch_reference(self) -> bool:
         """Latch the converged pad altitude and operator-set heading pre-arm."""
-        if self._launch_z_latched and self._launch_yaw_latched:
+        if self._launch_reference_latched:
             return True
-        if self._z_valid and math.isfinite(self.z) and self._attitude_seen:
+        stable_s = (self._now_us() - self._last_local_reset_us) / 1_000_000.0
+        if (
+            stable_s >= self.launch_stability_s
+            and self._xy_valid
+            and self._z_valid
+            and all(math.isfinite(v) for v in (self.x, self.y, self.z))
+            and self._attitude_seen
+        ):
+            self._launch_xy = (float(self.x), float(self.y))
             self._launch_z = float(self.z)
+            self._launch_reference_latched = True
             self._launch_z_latched = True
             self._launch_yaw = float(self.yaw)
             self._launch_yaw_latched = True
             self.get_logger().info(
-                f"latched launch-z datum {self._launch_z:+.3f} m; "
+                f"latched launch datum N {self._launch_xy[0]:+.3f} "
+                f"E {self._launch_xy[1]:+.3f} Z {self._launch_z:+.3f} m; "
                 f"holding operator-set heading {math.degrees(self._launch_yaw):.1f} deg NED"
             )
             return True
@@ -470,10 +549,10 @@ class OffboardController(Node):
                     )
                     if self._prestream_count > max_wait:
                         raise RuntimeError(
-                            "launch reference never latched (z/attitude invalid); refusing to arm"
+                            "launch reference never became stable and valid; refusing to arm"
                         )
                     self._log_throttled(
-                        "waiting for valid z + attitude to latch launch reference before takeoff"
+                        "waiting for a stable valid local pose before takeoff"
                     )
                     return
                 self._takeoff_started_us = self._now_us()

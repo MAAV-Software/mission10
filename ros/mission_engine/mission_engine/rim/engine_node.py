@@ -262,6 +262,14 @@ class EngineNode(OffboardController):
             self.engine.note_reset_counter(int(msg.xy_reset_counter))
         self._push_pose()
 
+    def on_local_frame_reset(self, delta_xy, delta_z, delta_heading) -> None:
+        dn, de = delta_xy
+        self.anchor.apply_frame_reset(dn, de)
+        self.poses.clear()
+        if self.engine is not None:
+            self.correction.apply_frame_reset(dn, de)
+            self.engine.apply_heading_reset(delta_heading)
+
     def _dist_cb(self, msg: DistanceSensor) -> None:
         d = float(msg.current_distance)
         if msg.min_distance <= d <= msg.max_distance:

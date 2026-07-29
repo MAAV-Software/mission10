@@ -52,6 +52,10 @@ class PoseHistory:
             del self._ts[:drop]
             del self._snaps[:drop]
 
+    def clear(self) -> None:
+        self._ts.clear()
+        self._snaps.clear()
+
     def nearest(self, t: float) -> Optional[PoseSnapshot]:
         if not self._ts:
             return None
