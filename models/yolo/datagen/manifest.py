@@ -9,7 +9,7 @@ from .config import GenConfig
 from .labels import YoloBox
 from .scene import Scene, image_stem
 
-SCHEMA = "minefield-datagen/3"
+SCHEMA = "minefield-datagen/4"
 
 
 def scene_manifest(
@@ -25,7 +25,12 @@ def scene_manifest(
         "tag_visible_fraction": (
             sum(m.tag_visible for m in scene.mines) / len(scene.mines)
         ),
-        "mines": [asdict(m) for m in scene.mines],
+        "mines": [
+            {**asdict(mine), "appearance": asdict(appearance)}
+            for mine, appearance in zip(
+                scene.mines, scene.mine_appearances, strict=True
+            )
+        ],
         "stations": [
             {
                 "stem": image_stem(cfg, scene, k),

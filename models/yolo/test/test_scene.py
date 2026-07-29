@@ -1,3 +1,4 @@
+import colorsys
 import json
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 
 from datagen.config import GenConfig
 from datagen.dump import write_scene
+from datagen.generate import _srgb_to_linear
 from datagen.manifest import SCHEMA, scene_manifest
 from datagen.scene import build_scene, scene_labels
 
@@ -21,6 +23,56 @@ class TestScene(unittest.TestCase):
 
     def test_surface_draw_is_deterministic(self):
         self.assertEqual(build_scene(CFG, 4).surface, build_scene(CFG, 4).surface)
+
+    def test_mine_colors_are_one_jittered_batch_per_scene(self):
+        scene = build_scene(CFG, 4)
+        families = {appearance.color_family for appearance in scene.mine_appearances}
+        colors = {appearance.color_srgb for appearance in scene.mine_appearances}
+        self.assertEqual(len(families), 1)
+        self.assertGreater(len(colors), 1)
+        palette_index = CFG.mine_color_names.index(next(iter(families)))
+        base_h, base_s, base_v = colorsys.rgb_to_hsv(
+            *CFG.mine_color_palette_srgb[palette_index]
+        )
+        for appearance in scene.mine_appearances:
+            self.assertTrue(
+                all(0.0 <= channel <= 1.0 for channel in appearance.color_srgb)
+            )
+            h, s, v = colorsys.rgb_to_hsv(*appearance.color_srgb)
+            hue_delta = min(abs(h - base_h), 1.0 - abs(h - base_h)) * 360.0
+            self.assertLessEqual(hue_delta, CFG.mine_color_hue_jitter_deg)
+            self.assertGreaterEqual(
+                s / base_s, CFG.mine_color_saturation_scale[0]
+            )
+            self.assertLessEqual(
+                s / base_s, CFG.mine_color_saturation_scale[1]
+            )
+            self.assertGreaterEqual(v / base_v, CFG.mine_color_value_scale[0])
+            self.assertLessEqual(v / base_v, CFG.mine_color_value_scale[1])
+
+    def test_forced_mine_color_has_exact_anchor_without_jitter(self):
+        cfg = replace(
+            CFG,
+            mine_color_names=("test_green",),
+            mine_color_palette_srgb=((0.2, 0.4, 0.3),),
+            mine_color_weights=(1.0,),
+            mine_color_hue_jitter_deg=0.0,
+            mine_color_saturation_scale=(1.0, 1.0),
+            mine_color_value_scale=(1.0, 1.0),
+        )
+        for appearance in build_scene(cfg, 0).mine_appearances:
+            self.assertEqual(appearance.color_family, "test_green")
+            for actual, expected in zip(
+                appearance.color_srgb, (0.2, 0.4, 0.3), strict=True
+            ):
+                self.assertAlmostEqual(actual, expected)
+
+    def test_srgb_conversion_uses_scene_linear_values(self):
+        self.assertEqual(_srgb_to_linear((0.0, 0.0, 0.0)), (0.0, 0.0, 0.0))
+        self.assertEqual(_srgb_to_linear((1.0, 1.0, 1.0)), (1.0, 1.0, 1.0))
+        self.assertAlmostEqual(
+            _srgb_to_linear((0.5, 0.5, 0.5))[0], 0.214041, places=6
+        )
 
     def test_forced_single_and_mixed_surfaces(self):
         single = replace(
@@ -54,6 +106,9 @@ class TestScene(unittest.TestCase):
             mixed_surface_prob=1.0,
             p_tag_both=1.0, p_tag_one=0.0, p_tag_none=0.0,
             tag_up_prob=1.0,
+            mine_color_names=("forced",),
+            mine_color_palette_srgb=((0.1, 0.2, 0.3),),
+            mine_color_weights=(1.0,),
         )
         a = build_scene(untagged_grass, 2)
         b = build_scene(tagged_mixed, 2)
@@ -62,8 +117,30 @@ class TestScene(unittest.TestCase):
             [(m.north, m.east, m.yaw) for m in b.mines],
         )
         self.assertEqual(a.stations, b.stations)
+        self.assertNotEqual(a.mine_appearances, b.mine_appearances)
         self.assertEqual(
             scene_labels(untagged_grass, a), scene_labels(tagged_mixed, b)
+        )
+
+    def test_color_config_only_changes_appearance(self):
+        recolored = replace(
+            CFG,
+            mine_color_names=("forced",),
+            mine_color_palette_srgb=((0.1, 0.2, 0.3),),
+            mine_color_weights=(1.0,),
+        )
+        original_scene = build_scene(CFG, 2)
+        recolored_scene = build_scene(recolored, 2)
+        self.assertEqual(original_scene.mines, recolored_scene.mines)
+        self.assertEqual(original_scene.stations, recolored_scene.stations)
+        self.assertEqual(original_scene.surface, recolored_scene.surface)
+        self.assertEqual(original_scene.tilt, recolored_scene.tilt)
+        self.assertNotEqual(
+            original_scene.mine_appearances, recolored_scene.mine_appearances
+        )
+        self.assertEqual(
+            scene_labels(CFG, original_scene),
+            scene_labels(recolored, recolored_scene),
         )
 
     def test_index_validated(self):
@@ -106,10 +183,18 @@ class TestManifestAndDump(unittest.TestCase):
         )
         visible = sum(m.tag_visible for m in scene.mines)
         self.assertEqual(man["tag_visible_fraction"], visible / len(scene.mines))
-        for mine, record in zip(scene.mines, man["mines"]):
+        for mine, appearance, record in zip(
+            scene.mines, scene.mine_appearances, man["mines"], strict=True
+        ):
             self.assertEqual(record["tag_layout"], mine.tag_layout)
             self.assertEqual(record["tag_up"], mine.tag_up)
             self.assertEqual(record["tag_visible"], mine.tag_visible)
+            self.assertEqual(
+                record["appearance"]["color_family"], appearance.color_family
+            )
+            self.assertEqual(
+                record["appearance"]["color_srgb"], list(appearance.color_srgb)
+            )
 
     def test_write_scene_files(self):
         with tempfile.TemporaryDirectory() as tmp:

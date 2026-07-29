@@ -21,7 +21,6 @@ cameras look along local -Z with +Y up; the runtime optical frame is
 from __future__ import annotations
 
 import argparse
-import colorsys
 import json
 import math
 import random
@@ -157,29 +156,30 @@ def _randomize_sun(bpy, cfg: GenConfig, rng: random.Random) -> None:
     bpy.context.scene.view_settings.exposure = exposure
 
 
-def _jitter_rgba_hue(rgba, amount: float, rng: random.Random):
-    h, s, v = colorsys.rgb_to_hsv(*rgba[:3])
-    r, g, b = colorsys.hsv_to_rgb((h + rng.uniform(-amount, amount)) % 1.0, s, v)
-    return (r, g, b, rgba[3])
+def _srgb_to_linear(rgb):
+    """Display sRGB triplet -> Blender scene-linear RGB."""
+    return tuple(
+        channel / 12.92
+        if channel <= 0.04045
+        else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in rgb
+    )
 
 
-def _jitter_mine_hue(obj, amount: float, rng: random.Random) -> None:
+def _set_mine_color(obj, color_srgb) -> None:
     """Copy and tint body materials; AprilTag materials stay black/white."""
-    if amount == 0.0:
-        return
+    color = (*_srgb_to_linear(color_srgb), 1.0)
     for slot in obj.material_slots:
         source = slot.material
         if source is None or "tag" in source.name.lower():
             continue
         material = source.copy()
-        material.diffuse_color = _jitter_rgba_hue(material.diffuse_color, amount, rng)
+        material.diffuse_color = color
         if material.use_nodes:
             for node in material.node_tree.nodes:
                 base_color = node.inputs.get("Base Color")
                 if base_color is not None:
-                    base_color.default_value = _jitter_rgba_hue(
-                        base_color.default_value, amount, rng
-                    )
+                    base_color.default_value = color
         slot.material = material
 
 
@@ -205,7 +205,7 @@ def _assign_tag_id(bpy, obj, rng: random.Random) -> None:
 
 def _place_mines(bpy, template, scene, cfg: GenConfig, rng: random.Random):
     placed = []
-    for m in scene.mines:
+    for m, appearance in zip(scene.mines, scene.mine_appearances, strict=True):
         obj = template.copy()
         obj.data = template.data.copy()
         obj.hide_render = False
@@ -220,7 +220,7 @@ def _place_mines(bpy, template, scene, cfg: GenConfig, rng: random.Random):
             0.0,
             mine_blender_z_rotation(m.yaw),
         )
-        _jitter_mine_hue(obj, cfg.mine_hue_jitter, rng)
+        _set_mine_color(obj, appearance.color_srgb)
         _assign_tag_id(bpy, obj, rng)
         bpy.context.collection.objects.link(obj)
         placed.append(obj)
@@ -600,14 +600,14 @@ def main() -> None:
 # - Overlay tripwire ran and caught a real bug: matrix_world = list-of-rows
 #   fills column-major (transposed camera). All boxes now land on mines.
 # Still open:
-# - Mine retextured (tools/prep_mine_material.py): matte PLA in PFM-1 green
-#   (hue-jittered per instance), 1 in^2 tag36h11 decal on the body-top plateau,
-#   all 24 tag images packed; _assign_tag_id picks a per-mine id from the pool.
+# - Mine retextured (tools/prep_mine_material.py): matte PLA with a bounded
+#   lime/green/muddy-olive batch color recorded by the pure scene model, mild
+#   per-mine variation, and a 1 in^2 tag36h11 decal on the body-top plateau.
+#   All 24 tag images are packed; _assign_tag_id picks an id from the pool.
 #   tag_visible now actually changes pixels. Family + one-or-both-faces are
-#   assumptions until the IARC resource addendum lands; green->brown variation
-#   needs more than hue jitter (value/sat too) if the addendum shows brown.
-# - Hue jitter: verify visually that jitter reads on the retextured prop
-#   (tag material is named mine_tag and is skipped).
+#   assumptions until the IARC resource addendum lands.
+# - Mine color: verify visually that all three batch families and their mild
+#   per-mine variation read on the retextured prop while mine_tag stays neutral.
 # - Grass is two layers: the photo-PBR ground material (see the real-grass
 #   entry below; an interim synthetic nadir bake and its tools/
 #   bake_grass_tile.py are deleted), and _grass_grid/_move_grass_grid put

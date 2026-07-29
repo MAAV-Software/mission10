@@ -75,13 +75,13 @@ while the unresolved both-vs-one split remains neutral and sweepable.
 `tag_up_prob=0.5` remains the explicitly flagged landing-orientation guess.
 `MinePose.tag_visible` is derived as both -> true, one -> `tag_up`, none ->
 false. Layout, flip, visibility, and the per-scene visible fraction are recorded
-in schema `minefield-datagen/3` manifests. The independent `seed:scene:tags`
+in schema `minefield-datagen/4` manifests. The independent `seed:scene:tags`
 stream keeps these draws from changing geometry or YOLO boxes.
 
 **Bench-only:** `generate.py` rotates tag-invisible mines by pi around the
-template's local long axis and applies body hue jitter while excluding tag-named
-materials. Template origin/orientation, tag appearance, ground contact, and
-material-node behavior need visual verification.
+template's local long axis and applies the pure scene model's bounded filament
+color while excluding tag-named materials. Template origin/orientation, tag
+appearance, ground contact, and material-node behavior need visual verification.
 
 **Problem:** the rulebook doesn't specify whether the prop's AprilTag is on one
 face, both faces, or which way a scattered mine lands. If datagen renders every

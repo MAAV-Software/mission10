@@ -44,6 +44,13 @@ Same config + same scene index = byte-identical labels, render-identical
 scenes. Label-only runs and render runs share `write_scene`, so labels can
 never drift from renders.
 
+Mine color is bounded material-domain randomization, not arbitrary RGB. Each
+scene draws one filament batch from a lime / green / muddy-olive palette
+(weighted 10 / 45 / 45), and individual mines get mild hue, saturation, and
+value variation around that batch. The pure scene manifest records both the
+family and final sRGB value; Blender converts it to scene-linear color without
+tinting the AprilTag.
+
 ## Geometry contract
 
 Labels are computed by **projection through the same camera model the runtime

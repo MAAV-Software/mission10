@@ -122,6 +122,9 @@
 
 - `tools/prep_mine_material.py` textures the mine: matte olive PLA and a
   1 in² tag36h11 decal on the body-top plateau. 24 tag images are packed;
-  the adapter swaps the id per mine. `tag_visible` is live.
+  the adapter swaps the id per mine. The pure scene model selects one
+  lime/green/muddy-olive filament batch per scene (10/45/45) with mild
+  per-mine variation, and the adapter applies its recorded sRGB color in
+  scene-linear space while leaving the tag untouched. `tag_visible` is live.
 - The tag family and faces are assumptions pending the IARC resource
   addendum.

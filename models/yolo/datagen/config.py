@@ -61,6 +61,20 @@ class GenConfig:
     p_tag_none: float = 0.01
     tag_up_prob: float = 0.5  # guess: real resting orientation may be biased
 
+    # Mine-filament domain randomization. Pick one dominant batch color per
+    # scene, then vary each mine slightly around it. The lime tail covers our
+    # brighter replica without making it the synthetic dataset's main prior.
+    mine_color_names: Tuple[str, ...] = ("lime", "green", "muddy_olive")
+    mine_color_palette_srgb: Tuple[Tuple[float, float, float], ...] = (
+        (0x76 / 255, 0xA8 / 255, 0x2B / 255),  # #76A82B
+        (0x4F / 255, 0x7D / 255, 0x36 / 255),  # #4F7D36
+        (0x55 / 255, 0x57 / 255, 0x37 / 255),  # #555737
+    )
+    mine_color_weights: Tuple[float, ...] = (0.10, 0.45, 0.45)
+    mine_color_hue_jitter_deg: float = 4.0
+    mine_color_saturation_scale: Tuple[float, float] = (0.90, 1.10)
+    mine_color_value_scale: Tuple[float, float] = (0.85, 1.15)
+
     # render randomization (consumed by the bpy adapter only)
     # tallest blade length of the painter layer, sampled per scene: it sets
     # how much real blade occlusion mine silhouettes get. The managed arena
@@ -85,7 +99,6 @@ class GenConfig:
     # is imperfect, and the positive skew lets some frames run slightly hot
     # (clipped highlights) instead of every frame sitting at the same midtone
     exposure_jitter_ev: Tuple[float, float] = (-0.4, 0.9)
-    mine_hue_jitter: float = 0.05
     render_samples: int = 16
 
     def __post_init__(self) -> None:
@@ -120,6 +133,33 @@ class GenConfig:
         weights = (self.p_tag_both, self.p_tag_one, self.p_tag_none)
         if min(weights) < 0.0 or sum(weights) <= 0.0:
             raise ValueError(f"bad tag layout weights {weights}")
+        palette_lengths = (
+            len(self.mine_color_names),
+            len(self.mine_color_palette_srgb),
+            len(self.mine_color_weights),
+        )
+        if min(palette_lengths) == 0 or len(set(palette_lengths)) != 1:
+            raise ValueError(f"bad mine color palette lengths {palette_lengths}")
+        if (
+            min(self.mine_color_weights) < 0.0
+            or sum(self.mine_color_weights) <= 0.0
+        ):
+            raise ValueError(f"bad mine color weights {self.mine_color_weights}")
+        if any(
+            len(rgb) != 3 or any(channel < 0.0 or channel > 1.0 for channel in rgb)
+            for rgb in self.mine_color_palette_srgb
+        ):
+            raise ValueError(f"bad mine sRGB palette {self.mine_color_palette_srgb}")
+        if self.mine_color_hue_jitter_deg < 0.0:
+            raise ValueError(
+                f"bad mine color hue jitter {self.mine_color_hue_jitter_deg}"
+            )
+        for scale, name in (
+            (self.mine_color_saturation_scale, "mine_color_saturation_scale"),
+            (self.mine_color_value_scale, "mine_color_value_scale"),
+        ):
+            if not (0.0 < scale[0] <= scale[1]):
+                raise ValueError(f"bad {name} {scale}")
         if not (0.0 < self.grass_blade_m[0] <= self.grass_blade_m[1]):
             raise ValueError(f"bad grass_blade_m {self.grass_blade_m}")
         if not (0.0 < self.grass_density[0] <= self.grass_density[1] <= 1.0):

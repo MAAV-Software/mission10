@@ -1,12 +1,12 @@
 """Retexture the mine template to match the IARC prop: matte 3D-printed PLA
-in PFM-1 green (rules v3.1.2: "green/brown material"; hue is jittered per
-instance at render time) plus the rulebook's 1 in^2 AprilTag decal on the flat
-top of the body. The decal is a separate mine_tag material (hue jitter skips
-*tag* names) joined into the mesh so per-mine copy and the tag-down flip work
-unchanged. All 24 tag36h11 images (assets/textures/apriltags/, provenance in
-SOURCES.json) are packed so the render adapter can swap tag ids per mine while
-the blend stays self-contained; the family is an assumption until the IARC
-resource addendum names one.
+in PFM-1 green (rules v3.1.2: "green/brown material"; the pure scene model
+selects a bounded filament color) plus the rulebook's 1 in^2 AprilTag decal on
+the flat top of the body. The decal is a separate mine_tag material (appearance
+tint skips *tag* names) joined into the mesh so per-mine copy and the tag-down
+flip work unchanged. All 24 tag36h11 images (assets/textures/apriltags/,
+provenance in SOURCES.json) are packed so the render adapter can swap tag ids
+per mine while the blend stays self-contained; the family is an assumption
+until the IARC resource addendum names one.
 
     flatpak run --unset-env=PYTHONPATH org.blender.Blender \\
         -b <abs>/assets/m10-mine.blend --python tools/prep_mine_material.py
