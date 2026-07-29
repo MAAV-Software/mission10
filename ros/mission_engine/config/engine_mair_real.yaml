@@ -20,6 +20,7 @@
     takeoff_acceptance_m: 0.25
     takeoff_timeout_s: 40.0
     status_stale_timeout_s: 5.0
+    launch_stability_s: 3.0
 
     # eight fixed compass legs, center -> outer point -> center
     mission_pattern: center_return_rosette
@@ -46,11 +47,11 @@
     camera_roll_deg: 0.0
     camera_tilt_deg: 0.0
 
-    # EKF2 consumes the tag-EV position stream. Do not also move mission
-    # setpoints from the same tag observations.
+    # PX4 fuses CM2 optical flow. Tags 6 and 7 correct the mission-to-PX4
+    # transform at each center return; no tag EV stream is fused in this gate.
     anchor_tag_ids: [6, 7]
     anchor_aborts: false
-    anchor_corrects: false
+    anchor_corrects: true
     anchor_gate_m: 1.5
     anchor_persist_s: 1.0
     anchor_max_radial_m: 3.0
