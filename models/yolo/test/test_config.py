@@ -1,4 +1,6 @@
 import unittest
+import json
+from dataclasses import asdict
 from dataclasses import replace
 
 from datagen.config import GenConfig
@@ -21,6 +23,14 @@ class TestRandomizationConfig(unittest.TestCase):
         self.assertEqual(CFG.grass_dense_prob, 0.10)
         self.assertEqual(CFG.eevee_render_samples, 8)
         self.assertEqual(CFG.png_compression, 15)
+        self.assertEqual(CFG.n_scenes, 300)
+        self.assertEqual((CFG.mines_min, CFG.mines_max), (4, 20))
+        self.assertEqual(CFG.station_interval_m, 2.0)
+        self.assertEqual(CFG.negative_frame_keep, 0.05)
+
+    def test_manifest_config_roundtrip(self):
+        raw = json.loads(json.dumps(asdict(CFG)))
+        self.assertEqual(GenConfig.from_dict(raw), CFG)
 
     def test_silent_failure_guards(self):
         for changes in (
@@ -30,6 +40,8 @@ class TestRandomizationConfig(unittest.TestCase):
             {"mixed_surface_prob": 1.01},
             {"grass_dense_prob": -0.01},
             {"grass_dense_prob": 1.01},
+            {"negative_frame_keep": -0.01},
+            {"negative_frame_keep": 1.01},
             {"p_tag_one": -1.0},
             {"p_tag_both": 0.0, "p_tag_one": 0.0, "p_tag_none": 0.0},
             {"surface_materials": ("grass",), "mixed_surface_prob": 0.1},

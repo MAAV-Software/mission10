@@ -19,8 +19,8 @@ Two products, both under out/:
                      diversity. A tile a visible mine crosses without
                      keeping a label is poisoned (unlabeled mine pixels
                      teach suppression) and is skipped; empty tiles are
-                     subsampled; a seeded slice of frames is also emitted
-                     whole for the untiled inference mode.
+                     subsampled. Production emits only tiles because onboard
+                     inference always uses the same tiled geometry.
 
 Thresholds and tile knobs live here rather than at generation, so retuning
 never needs a re-render. Tile image cropping needs Pillow (RunPod has it);
@@ -43,6 +43,7 @@ from mission_engine.core.tiles import tile_grid
 
 from .config import GenConfig
 from .labels import box_from_extents, raw_extents, yolo_box
+from .manifest import OCCLUSION_SCHEMA, SCHEMA
 from .scene import build_scene, image_stem
 
 FULLFRAME_MODEL_PX = 640  # untiled inference letterboxes the frame to this
@@ -52,20 +53,82 @@ FULLFRAME_MODEL_PX = 640  # untiled inference letterboxes the frame to this
 class TileParams:
     tile: int = 640
     overlap: int = 192  # > the largest projected mine (~165 px at 1 m alt)
-    empty_keep: float = 0.25
-    fullframe_frac: float = 0.15
+    empty_keep: float = 0.03
+    fullframe_frac: float = 0.0
     images: bool = True
+
+    def __post_init__(self) -> None:
+        if self.tile < 1 or not 0 <= self.overlap < self.tile:
+            raise ValueError(
+                f"bad tile geometry tile={self.tile}, overlap={self.overlap}"
+            )
+        for name in ("empty_keep", "fullframe_frac"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"bad {name} {value}")
+
+
+def _scene_context(out: Path, occ: dict):
+    """Load the manifest-authoritative config and validate sparse stations."""
+    if occ.get("schema") != OCCLUSION_SCHEMA:
+        raise ValueError(
+            f"expected {OCCLUSION_SCHEMA}, got {occ.get('schema')!r}"
+        )
+    seed = occ.get("seed")
+    scene_index = occ.get("scene")
+    manifest_path = out / f"{seed}_s{scene_index:04d}.manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"missing scene manifest {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != SCHEMA:
+        raise ValueError(f"expected {SCHEMA}, got {manifest.get('schema')!r}")
+    if manifest.get("seed") != seed or manifest.get("scene") != scene_index:
+        raise ValueError("occlusion sidecar and manifest identify different scenes")
+    cfg = GenConfig.from_dict(manifest["config"])
+    if cfg.seed != seed:
+        raise ValueError("manifest config seed does not match dataset identity")
+    scene = build_scene(cfg, scene_index)
+    station_indices = occ.get("station_indices")
+    if not isinstance(station_indices, list) or any(
+        not isinstance(k, int) for k in station_indices
+    ):
+        raise ValueError("occlusion station_indices must be a list of integers")
+    if station_indices != sorted(set(station_indices)):
+        raise ValueError("occlusion station_indices must be sorted and unique")
+    if any(k < 0 or k >= len(scene.stations) for k in station_indices):
+        raise ValueError("occlusion station index outside the generated path")
+    manifest_indices = [
+        station.get("station_index") for station in manifest.get("stations", [])
+    ]
+    if station_indices != manifest_indices:
+        raise ValueError("occlusion and manifest station selections differ")
+    expected_stems = {
+        image_stem(cfg, scene, k) for k in station_indices
+    }
+    visible = occ.get("visible_frac")
+    if not isinstance(visible, dict) or set(visible) != expected_stems:
+        raise ValueError("occlusion entries do not exactly match selected stations")
+    expected_mines = {str(i) for i in range(len(scene.mines))}
+    for stem, fracs in visible.items():
+        if not isinstance(fracs, dict) or set(fracs) != expected_mines:
+            raise ValueError(f"occlusion mine entries are incomplete for {stem}")
+        if any(
+            not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0
+            for value in fracs.values()
+        ):
+            raise ValueError(f"invalid occlusion fraction for {stem}")
+    return cfg, scene, station_indices
 
 
 def materialize_scene(out: Path, occ: dict, min_frac: float) -> Tuple[int, int]:
     """Write filtered full-frame label files; returns (kept, dropped)."""
-    cfg = GenConfig(seed=occ["seed"])
-    scene = build_scene(cfg, occ["scene"])
+    cfg, scene, station_indices = _scene_context(out, occ)
     cam = replace(cfg.camera, tilt_deg=scene.tilt)
     dest = out / "labels_filtered"
     dest.mkdir(parents=True, exist_ok=True)
     kept = dropped = 0
-    for k, st in enumerate(scene.stations):
+    for k in station_indices:
+        st = scene.stations[k]
         stem = image_stem(cfg, scene, k)
         fracs = occ["visible_frac"][stem]
         lines = []
@@ -160,8 +223,7 @@ def tile_scene(
     out: Path, occ: dict, min_frac: float, tp: TileParams
 ) -> Tuple[int, int, int]:
     """Emit training tiles for one scene; returns (tiles, poisoned, boxes)."""
-    cfg = GenConfig(seed=occ["seed"])
-    scene = build_scene(cfg, occ["scene"])
+    cfg, scene, station_indices = _scene_context(out, occ)
     cam = replace(cfg.camera, tilt_deg=scene.tilt)
     w, h = cam.width_px, cam.height_px
     grid = tile_grid(w, h, tp.tile, tp.overlap)
@@ -179,7 +241,8 @@ def tile_scene(
             ) from e
     index = []
     n_tiles = n_poisoned = n_boxes = 0
-    for k, st in enumerate(scene.stations):
+    for k in station_indices:
+        st = scene.stations[k]
         stem = image_stem(cfg, scene, k)
         fracs = occ["visible_frac"][stem]
         rng = random.Random(f"{cfg.seed}:{stem}:tiles")

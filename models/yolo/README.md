@@ -32,16 +32,23 @@ cd models/yolo
 python3 -m datagen.dump --out /tmp/dump --scenes 0:5
 ```
 
-Production rendering uses Cycles by default. The adapter renders all stations
-for one scene as one animation operation, then computes exact geometry-based
-occlusion in a separate pass:
+The production corpus contains 300 independently randomized scenes, 4–20 mines
+per scene, and camera stations every 2 m. The adapter analytically projects
+every candidate station before Blender starts, renders every positive station
+plus a deterministic 5% sample of negatives as one compact animation, and
+then computes exact geometry-based occlusion for only those frames. Original
+`k####` station identities survive the compact animation mapping.
+
+Production rendering uses Cycles. On an RTX 3090, `auto` prefers OPTIX and
+falls back to CUDA, then CPU:
 
 ```sh
 blender -b assets/m10-base.blend -P datagen/generate.py -- \
-    --out dataset/raw --scenes 0:50
+    --out dataset/raw --scenes 0:300 --cycles-device auto
 ```
 
-Use EEVEE for local smoke tests and performance checks:
+Use EEVEE for local smoke tests and performance checks. It exercises the same
+station selection, animation, naming, and occlusion paths:
 
 ```sh
 blender -b assets/m10-base.blend -P datagen/generate.py -- \
@@ -51,7 +58,29 @@ blender -b assets/m10-base.blend -P datagen/generate.py -- \
 Determinism: everything derives from `random.Random(f"{seed}:{scene_index}")`.
 Same config + same scene index = byte-identical labels, render-identical
 scenes. Label-only runs and render runs share `write_scene`, so labels can
-never drift from renders.
+never drift from renders. Manifests store the complete configuration and are
+authoritative during materialization; later default changes cannot silently
+change geometry for already-rendered frames.
+
+After rendering, apply exact occlusion and create the 640 px inference-style
+training tiles:
+
+```sh
+python3 -m datagen.materialize --out dataset/raw --tiles
+```
+
+The production defaults keep 3% of empty tiles and emit no full-frame samples,
+because onboard inference always tiles. Empty YOLO label files are intentional.
+Ultralytics recommends roughly
+[0–10% background images](https://github.com/ultralytics/yolov5/issues/9908)
+to reduce false positives; the pure 300-scene projection currently yields
+19,761 tiles, including 1,330 empty tiles (6.7%), 20,577 boxes, and 390
+poisoned boundary tiles skipped before measured grass occlusion. Frames that
+become empty after the exact occlusion pass remain useful hard negatives.
+
+`train/tiles.json` retains the source scene and frame for every tile. Split
+training and validation data by whole scene, never by individual tile, so
+nearby views of one mine layout cannot leak across splits.
 
 Mine color is bounded material-domain randomization, not arbitrary RGB. Each
 scene draws one filament batch from a lime / green / muddy-olive palette

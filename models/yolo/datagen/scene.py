@@ -212,3 +212,24 @@ def scene_labels(cfg: GenConfig, scene: Scene) -> Dict[str, List[YoloBox]]:
                 boxes.append(box)
         out[image_stem(cfg, scene, k)] = boxes
     return out
+
+
+def selected_station_indices(
+    cfg: GenConfig,
+    scene: Scene,
+    labels: Optional[Dict[str, List[YoloBox]]] = None,
+) -> List[int]:
+    """Stations worth rendering, preserving their original path indices.
+
+    Every analytic positive is retained. Negative sampling uses its own
+    per-station RNG stream so the choice is stable if traversal changes.
+    """
+    labels = labels if labels is not None else scene_labels(cfg, scene)
+    selected = []
+    for k in range(len(scene.stations)):
+        stem = image_stem(cfg, scene, k)
+        if labels[stem] or random.Random(
+            f"{cfg.seed}:{stem}:negative-frame"
+        ).random() < cfg.negative_frame_keep:
+            selected.append(k)
+    return selected

@@ -43,6 +43,7 @@ from mission_engine.core.geometry import quat_rotate
 from .config import GenConfig
 from .dump import parse_range, write_scene
 from .flightpath import Station
+from .manifest import OCCLUSION_SCHEMA
 from .scene import build_scene, image_stem
 
 
@@ -97,7 +98,41 @@ def _configure_camera(bpy, cfg: GenConfig) -> None:
     render.resolution_percentage = 100
 
 
-def _configure_render(bpy, cfg: GenConfig, engine: str = "cycles") -> None:
+def _configure_cycles_device(bpy, requested: str) -> str:
+    """Select a Cycles backend, preferring RTX OPTIX and then CUDA."""
+    scene = bpy.context.scene
+    if requested == "cpu":
+        scene.cycles.device = "CPU"
+        return "CPU"
+    preferences = bpy.context.preferences.addons["cycles"].preferences
+    candidates = ("OPTIX", "CUDA") if requested == "auto" else (requested.upper(),)
+    for backend in candidates:
+        try:
+            preferences.compute_device_type = backend
+            preferences.get_devices()
+        except (TypeError, RuntimeError):
+            continue
+        selected = [
+            device for device in preferences.devices if device.type == backend
+        ]
+        if not selected:
+            continue
+        for device in preferences.devices:
+            device.use = device in selected
+        scene.cycles.device = "GPU"
+        return backend
+    if requested != "auto":
+        raise RuntimeError(f"Cycles backend {requested!r} is unavailable")
+    scene.cycles.device = "CPU"
+    return "CPU"
+
+
+def _configure_render(
+    bpy,
+    cfg: GenConfig,
+    engine: str = "cycles",
+    cycles_device: str = "auto",
+) -> str:
     scene = bpy.context.scene
     if engine == "cycles":
         scene.render.engine = "CYCLES"
@@ -105,6 +140,7 @@ def _configure_render(bpy, cfg: GenConfig, engine: str = "cycles") -> None:
         scene.cycles.use_denoising = True
         # grass blades are flat ribbons (~0.2 mm thick), not cylinders
         scene.cycles_curves.shape = "RIBBONS"
+        device = _configure_cycles_device(bpy, cycles_device)
     elif engine == "eevee":
         identifiers = {
             item.identifier
@@ -119,6 +155,7 @@ def _configure_render(bpy, cfg: GenConfig, engine: str = "cycles") -> None:
         )
         scene.render.engine = eevee
         scene.eevee.taa_render_samples = cfg.eevee_render_samples
+        device = "EEVEE"
     else:
         raise ValueError(f"unsupported render engine {engine!r}")
     # consecutive stations render an unchanged scene from a new camera pose;
@@ -130,7 +167,7 @@ def _configure_render(bpy, cfg: GenConfig, engine: str = "cycles") -> None:
     # EEVEE spent rasterizing. Level 15 is still lossless and near-minimal in
     # size without making PNG encoding the frame-time bottleneck.
     scene.render.image_settings.compression = cfg.png_compression
-    # device left at blender's default; pick METAL/CUDA/OPTIX on the bench
+    return device
 
 
 def _append_mine(bpy, blend: Path, object_name: str):
@@ -540,18 +577,24 @@ def _purge_orphans(bpy) -> None:
     bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=False, do_recursive=True)
 
 
-def _station_index(frame: int, station_count: int) -> int:
-    if not 0 <= frame < station_count:
-        raise IndexError(f"animation frame {frame} outside 0..{station_count - 1}")
-    return frame
+def _station_index(frame: int, station_indices) -> int:
+    if not 0 <= frame < len(station_indices):
+        raise IndexError(
+            f"animation frame {frame} outside 0..{len(station_indices) - 1}"
+        )
+    return station_indices[frame]
 
 
 def _animation_output_pattern(out: Path, cfg: GenConfig, scene) -> Path:
-    return out / "images" / f"{cfg.seed}_s{scene.index:04d}_k####"
+    # Blender animation output must be dense even when original stations are
+    # sparse. Files are promoted below under their original k#### identities.
+    return out / "images" / f"{cfg.seed}_s{scene.index:04d}_frame_####"
 
 
-def _render_animation(bpy, Matrix, cfg, scene, grass, mines, out: Path):
-    """Render all camera stations in one Blender animation operation.
+def _render_animation(
+    bpy, Matrix, cfg, scene, station_indices, grass, mines, out: Path
+):
+    """Render selected camera stations in one Blender animation operation.
 
     A frame-change handler updates scene state before Blender's dependency-
     graph evaluation. Frames render into a same-filesystem temporary directory
@@ -559,7 +602,7 @@ def _render_animation(bpy, Matrix, cfg, scene, grass, mines, out: Path):
     """
     blender_scene = bpy.context.scene
     cam_obj = blender_scene.camera
-    station_count = len(scene.stations)
+    station_count = len(station_indices)
     if station_count == 0:
         raise ValueError("cannot render a scene with no camera stations")
 
@@ -584,7 +627,7 @@ def _render_animation(bpy, Matrix, cfg, scene, grass, mines, out: Path):
             return
         frame = changed_scene.frame_current
         try:
-            k = _station_index(frame, station_count)
+            k = _station_index(frame, station_indices)
             station = scene.stations[k]
             cam_obj.matrix_world = Matrix(
                 blender_camera_matrix(station, scene.tilt)
@@ -631,8 +674,8 @@ def _render_animation(bpy, Matrix, cfg, scene, grass, mines, out: Path):
             # the renderer's hot scene state. frame_set runs the pre-handler
             # and completes dependency-graph evaluation before returning.
             occlusion_started = time.perf_counter()
-            for k in range(station_count):
-                blender_scene.frame_set(k)
+            for frame, k in enumerate(station_indices):
+                blender_scene.frame_set(frame)
                 if errors:
                     phase, frame, exc = errors[0]
                     raise RuntimeError(
@@ -645,20 +688,24 @@ def _render_animation(bpy, Matrix, cfg, scene, grass, mines, out: Path):
             occlusion_elapsed = time.perf_counter() - occlusion_started
 
             staged_images = [
-                staging_dir / f"{image_stem(cfg, scene, k)}.png"
-                for k in range(station_count)
+                (
+                    staging_dir
+                    / f"{cfg.seed}_s{scene.index:04d}_frame_{frame:04d}.png",
+                    images_dir / f"{image_stem(cfg, scene, k)}.png",
+                )
+                for frame, k in enumerate(station_indices)
             ]
             missing_images = [
-                path.name
-                for path in staged_images
-                if not path.is_file() or path.stat().st_size == 0
+                source.name
+                for source, _destination in staged_images
+                if not source.is_file() or source.stat().st_size == 0
             ]
             if missing_images:
                 raise RuntimeError(
                     f"animation did not write frames: {missing_images}"
                 )
-            for source in staged_images:
-                source.replace(images_dir / source.name)
+            for source, destination in staged_images:
+                source.replace(destination)
     finally:
         if pre_handler in handlers.frame_change_pre:
             handlers.frame_change_pre.remove(pre_handler)
@@ -694,6 +741,12 @@ def main() -> None:
         default="cycles",
         help="render engine; EEVEE is for local smoke tests and benchmarks",
     )
+    p.add_argument(
+        "--cycles-device",
+        choices=("auto", "cpu", "cuda", "optix"),
+        default="auto",
+        help="Cycles backend; auto prefers OPTIX, then CUDA, then CPU",
+    )
     ns = p.parse_args(argv)
 
     import bpy  # the ONLY bpy import in datagen
@@ -704,16 +757,20 @@ def main() -> None:
     (out / "images").mkdir(parents=True, exist_ok=True)
 
     _configure_camera(bpy, cfg)
-    _configure_render(bpy, cfg, ns.engine)
+    device = _configure_render(bpy, cfg, ns.engine, ns.cycles_device)
+    print(f"render engine={ns.engine} device={device}")
     template = _append_mine(bpy, Path(ns.mine_blend), ns.mine_object)
     grass_patch = None if ns.no_render else _grass_template(bpy)
 
     for index in parse_range(ns.scenes):
         scene_started = time.perf_counter()
-        write_scene(cfg, index, out)  # labels + manifest, pure pipeline
+        manifest = write_scene(cfg, index, out)  # labels + manifest, pure pipeline
         if ns.no_render:
             continue
         scene = build_scene(cfg, index)  # deterministic: same objects
+        station_indices = [
+            station["station_index"] for station in manifest["stations"]
+        ]
         _randomize_sun(
             bpy, cfg, random.Random(f"{cfg.seed}:{index}:render:sun")
         )
@@ -732,7 +789,7 @@ def main() -> None:
             random.Random(f"{cfg.seed}:{index}:render:mines"),
         )
         occlusion, animation_elapsed, occlusion_elapsed = _render_animation(
-            bpy, Matrix, cfg, scene, grass, mines, out
+            bpy, Matrix, cfg, scene, station_indices, grass, mines, out
         )
         # render-side sidecar: labels/manifest stay purely analytic, so the
         # measured occlusion lives beside them (datagen.materialize applies it)
@@ -741,9 +798,10 @@ def main() -> None:
         (occ_dir / f"{cfg.seed}_s{index:04d}.json").write_text(
             json.dumps(
                 {
-                    "schema": "minefield-occlusion/1",
+                    "schema": OCCLUSION_SCHEMA,
                     "seed": cfg.seed,
                     "scene": index,
+                    "station_indices": station_indices,
                     "visible_frac": occlusion,
                 },
                 indent=2,
@@ -753,11 +811,11 @@ def main() -> None:
         _purge_orphans(bpy)
         scene_elapsed = time.perf_counter() - scene_started
         print(
-            f"PERF scene={index} frames={len(scene.stations)} "
+            f"PERF scene={index} frames={len(station_indices)} "
             f"animation_s={animation_elapsed:.3f} "
             f"occlusion_s={occlusion_elapsed:.3f} "
             f"total_s={scene_elapsed:.3f} "
-            f"seconds_per_frame={scene_elapsed / len(scene.stations):.3f}"
+            f"seconds_per_frame={scene_elapsed / len(station_indices):.3f}"
         )
 
 

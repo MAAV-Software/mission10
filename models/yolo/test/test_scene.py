@@ -13,7 +13,7 @@ from datagen.generate import (
     _station_index,
 )
 from datagen.manifest import SCHEMA, scene_manifest
-from datagen.scene import build_scene, scene_labels
+from datagen.scene import build_scene, scene_labels, selected_station_indices
 
 CFG = GenConfig()
 
@@ -78,18 +78,39 @@ class TestScene(unittest.TestCase):
             _srgb_to_linear((0.5, 0.5, 0.5))[0], 0.214041, places=6
         )
 
-    def test_animation_frames_map_directly_to_station_indices(self):
-        for frame in range(4):
-            self.assertEqual(_station_index(frame, 4), frame)
-        for frame in (-1, 4):
+    def test_animation_frames_map_to_sparse_original_station_indices(self):
+        selected = [2, 7, 11, 18]
+        for frame, station_index in enumerate(selected):
+            self.assertEqual(_station_index(frame, selected), station_index)
+        for frame in (-1, len(selected)):
             with self.assertRaises(IndexError):
-                _station_index(frame, 4)
+                _station_index(frame, selected)
 
     def test_animation_output_pattern_preserves_image_stems(self):
         scene = build_scene(CFG, 2)
         pattern = _animation_output_pattern(Path("/dataset"), CFG, scene)
         self.assertEqual(
-            pattern, Path("/dataset/images/m10_s0002_k####")
+            pattern, Path("/dataset/images/m10_s0002_frame_####")
+        )
+
+    def test_station_selection_keeps_all_positives_and_is_deterministic(self):
+        scene = build_scene(CFG, 0)
+        labels = scene_labels(CFG, scene)
+        selected = selected_station_indices(CFG, scene, labels)
+        self.assertEqual(selected, selected_station_indices(CFG, scene, labels))
+        self.assertEqual(selected, sorted(set(selected)))
+        for k, boxes in enumerate(labels.values()):
+            if boxes:
+                self.assertIn(k, selected)
+
+    def test_zero_negative_rate_keeps_only_analytic_positives(self):
+        cfg = replace(CFG, negative_frame_keep=0.0)
+        scene = build_scene(cfg, 0)
+        labels = scene_labels(cfg, scene)
+        selected = selected_station_indices(cfg, scene, labels)
+        self.assertEqual(
+            selected,
+            [k for k, boxes in enumerate(labels.values()) if boxes],
         )
 
     def test_forced_single_and_mixed_surfaces(self):
@@ -245,9 +266,19 @@ class TestManifestAndDump(unittest.TestCase):
     def test_manifest_json_roundtrip(self):
         scene = build_scene(CFG, 0)
         labels = scene_labels(CFG, scene)
-        man = json.loads(json.dumps(scene_manifest(CFG, scene, labels)))
+        selected = selected_station_indices(CFG, scene, labels)
+        man = json.loads(
+            json.dumps(scene_manifest(CFG, scene, labels, selected))
+        )
         self.assertEqual(man["schema"], SCHEMA)
-        self.assertEqual(len(man["stations"]), len(scene.stations))
+        self.assertEqual(len(man["stations"]), len(selected))
+        self.assertEqual(
+            [station["station_index"] for station in man["stations"]],
+            selected,
+        )
+        self.assertEqual(
+            man["selection"]["candidate_stations"], len(scene.stations)
+        )
         self.assertEqual(len(man["mines"]), len(scene.mines))
         self.assertEqual(
             man["surface"],

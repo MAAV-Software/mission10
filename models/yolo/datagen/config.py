@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Tuple
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Mapping, Tuple
 
 from mission_engine.core.config import CameraModel
 
@@ -11,7 +11,7 @@ from mission_engine.core.config import CameraModel
 @dataclass(frozen=True)
 class GenConfig:
     seed: str = "m10"  # dataset identity; per-scene rngs derive from it
-    n_scenes: int = 50
+    n_scenes: int = 300
 
     camera: CameraModel = field(default_factory=CameraModel)
 
@@ -21,7 +21,7 @@ class GenConfig:
 
     # mines (PFM-1 replica footprint)
     mines_min: int = 4
-    mines_max: int = 12
+    mines_max: int = 20
     mine_dims_m: Tuple[float, float, float] = (0.12, 0.061, 0.020)
     min_separation_m: float = 1.0
     edge_margin_m: float = 0.5
@@ -29,7 +29,11 @@ class GenConfig:
     # camera stations (serpentine, lanes centered across the east extent)
     n_lanes: int = 3
     lane_spacing_m: float = 6.0
-    station_interval_m: float = 1.0
+    station_interval_m: float = 2.0
+    # Render every analytically positive station and a small, stable sample
+    # of negatives. Post-render occlusion may turn positives into additional
+    # hard negatives, which are deliberately retained.
+    negative_frame_keep: float = 0.05
     # sampled per scene; the survey cruises anywhere from near-ground dips to
     # max mapping altitude, so train across the full envelope
     alt_range_m: Tuple[float, float] = (1.0, 8.0)
@@ -105,6 +109,46 @@ class GenConfig:
     eevee_render_samples: int = 8
     png_compression: int = 15
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "GenConfig":
+        """Rebuild an exact config from a JSON-decoded manifest record."""
+        unknown = set(raw) - {f.name for f in fields(cls)}
+        if unknown:
+            raise ValueError(f"unknown GenConfig fields: {sorted(unknown)}")
+        defaults = cls()
+
+        def coerce(value: Any, exemplar: Any) -> Any:
+            if isinstance(exemplar, tuple):
+                if not isinstance(value, (list, tuple)):
+                    raise ValueError(f"expected sequence like {exemplar!r}")
+                if exemplar and isinstance(exemplar[0], tuple):
+                    return tuple(tuple(item) for item in value)
+                return tuple(value)
+            return value
+
+        values = {}
+        for f in fields(cls):
+            if f.name not in raw:
+                raise ValueError(f"manifest config missing {f.name}")
+            value = raw[f.name]
+            exemplar = getattr(defaults, f.name)
+            if f.name == "camera":
+                if not isinstance(value, Mapping):
+                    raise ValueError("manifest camera config is not an object")
+                value = CameraModel(**value)
+            else:
+                value = coerce(value, exemplar)
+            values[f.name] = value
+        cfg = cls(**values)
+        if asdict(cfg) != dict(raw):
+            # Lists in JSON compare differently to dataclass tuples, so compare
+            # through the JSON-shaped coercion used by manifests.
+            import json
+
+            if json.loads(json.dumps(asdict(cfg))) != dict(raw):
+                raise ValueError("manifest config did not round-trip exactly")
+        return cfg
+
     def __post_init__(self) -> None:
         if self.n_scenes < 1:
             raise ValueError(f"n_scenes must be >= 1, got {self.n_scenes}")
@@ -130,7 +174,12 @@ class GenConfig:
             raise ValueError("mixed surfaces require at least two surface_materials")
         # silent-failure guards: a bad probability skews the dataset without
         # raising anywhere downstream
-        for name in ("mixed_surface_prob", "tag_up_prob", "grass_dense_prob"):
+        for name in (
+            "mixed_surface_prob",
+            "tag_up_prob",
+            "grass_dense_prob",
+            "negative_frame_keep",
+        ):
             v = getattr(self, name)
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"bad {name} {v}")

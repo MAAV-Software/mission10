@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 from .config import GenConfig
 from .labels import YoloBox
 from .scene import Scene, image_stem
 
-SCHEMA = "minefield-datagen/5"
+SCHEMA = "minefield-datagen/6"
+OCCLUSION_SCHEMA = "minefield-occlusion/2"
 
 
 def scene_manifest(
-    cfg: GenConfig, scene: Scene, labels: Dict[str, List[YoloBox]]
+    cfg: GenConfig,
+    scene: Scene,
+    labels: Dict[str, List[YoloBox]],
+    station_indices: Sequence[int],
 ) -> dict:
+    positive = sum(bool(labels[image_stem(cfg, scene, k)]) for k in station_indices)
     return {
         "schema": SCHEMA,
         "seed": cfg.seed,
@@ -32,8 +37,16 @@ def scene_manifest(
                 scene.mines, scene.mine_appearances, strict=True
             )
         ],
+        "selection": {
+            "candidate_stations": len(scene.stations),
+            "selected_stations": len(station_indices),
+            "selected_positive_stations": positive,
+            "selected_negative_stations": len(station_indices) - positive,
+            "analytic_negative_keep": cfg.negative_frame_keep,
+        },
         "stations": [
             {
+                "station_index": k,
                 "stem": image_stem(cfg, scene, k),
                 "pos": list(st.pos),
                 "q_wxyz": list(st.q),
@@ -41,6 +54,7 @@ def scene_manifest(
                 "s": st.s,
                 "labels": [b.line() for b in labels[image_stem(cfg, scene, k)]],
             }
-            for k, st in enumerate(scene.stations)
+            for k in station_indices
+            for st in (scene.stations[k],)
         ],
     }

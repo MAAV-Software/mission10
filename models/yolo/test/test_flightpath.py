@@ -17,8 +17,12 @@ class TestFlightpath(unittest.TestCase):
         )
 
     def test_station_count(self):
-        # 25 m lanes, 1 m interval -> 26 stations per lane, 3 lanes
-        self.assertEqual(len(self.sts), 3 * 26)
+        # Both lane endpoints are included.
+        per_lane = int(
+            (CFG.north_extent[1] - CFG.north_extent[0])
+            // CFG.station_interval_m
+        ) + 1
+        self.assertEqual(len(self.sts), CFG.n_lanes * per_lane)
 
     def test_lanes_centered_across_field(self):
         # field east width 15, span 12 -> lanes at 1.5, 7.5, 13.5
@@ -30,7 +34,7 @@ class TestFlightpath(unittest.TestCase):
         for a in alts:
             self.assertGreaterEqual(a, CFG.alt_range_m[0])
             self.assertLessEqual(a, CFG.alt_range_m[1])
-        # 78 uniform draws over 1-8 m should span most of the envelope
+        # The production path's uniform draws should span most of the envelope.
         self.assertLess(min(alts), 2.0)
         self.assertGreater(max(alts), 7.0)
 

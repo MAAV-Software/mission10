@@ -7,13 +7,20 @@ from pathlib import Path
 from datagen.config import GenConfig
 from datagen.dump import write_scene
 from datagen.labels import raw_extents, yolo_box
+from datagen.manifest import OCCLUSION_SCHEMA
 from datagen.materialize import TileParams, materialize_scene, tile_scene
-from datagen.scene import build_scene, image_stem
+from datagen.scene import (
+    build_scene,
+    image_stem,
+    scene_labels,
+    selected_station_indices,
+)
 
 CFG = GenConfig()
 SCENE = build_scene(CFG, 0)
 CAM = replace(CFG.camera, tilt_deg=SCENE.tilt)
 W, H = CFG.camera.width_px, CFG.camera.height_px
+SELECTED = selected_station_indices(CFG, SCENE, scene_labels(CFG, SCENE))
 
 
 def _boxed_mines(k):
@@ -38,14 +45,15 @@ def _boxed_mines(k):
 def _sidecar(overrides):
     vis = {
         image_stem(CFG, SCENE, k): {str(i): 1.0 for i in range(len(SCENE.mines))}
-        for k in range(len(SCENE.stations))
+        for k in SELECTED
     }
     for (k, i), frac in overrides.items():
         vis[image_stem(CFG, SCENE, k)][str(i)] = frac
     return {
-        "schema": "minefield-occlusion/1",
+        "schema": OCCLUSION_SCHEMA,
         "seed": CFG.seed,
         "scene": 0,
+        "station_indices": SELECTED,
         "visible_frac": vis,
     }
 
@@ -58,7 +66,7 @@ class TestMaterialize(unittest.TestCase):
         # rule reduces to the occlusion fraction alone
         self.target_k, self.target_i = next(
             (k, i)
-            for k in range(len(SCENE.stations))
+            for k in SELECTED
             for i, box in _boxed_mines(k)
             if box.visible_frac == 1.0
         )
@@ -70,7 +78,7 @@ class TestMaterialize(unittest.TestCase):
         kept, dropped = materialize_scene(self.out, _sidecar({}), 0.15)
         self.assertEqual(dropped, 0)
         self.assertGreater(kept, 0)
-        for k in range(len(SCENE.stations)):
+        for k in SELECTED:
             stem = image_stem(CFG, SCENE, k)
             self.assertEqual(
                 self._labels("labels", stem), self._labels("labels_filtered", stem)
@@ -80,7 +88,7 @@ class TestMaterialize(unittest.TestCase):
         occ = _sidecar({(self.target_k, self.target_i): 0.02})
         kept, dropped = materialize_scene(self.out, occ, 0.15)
         self.assertEqual(dropped, 1)
-        for k in range(len(SCENE.stations)):
+        for k in SELECTED:
             stem = image_stem(CFG, SCENE, k)
             analytic = self._labels("labels", stem).splitlines()
             filtered = self._labels("labels_filtered", stem).splitlines()
@@ -101,7 +109,7 @@ class TestMaterialize(unittest.TestCase):
         clipped = next(
             (
                 (k, i, box)
-                for k in range(len(SCENE.stations))
+                for k in SELECTED
                 for i, box in _boxed_mines(k)
                 if box.visible_frac < 0.6
             ),
@@ -115,6 +123,45 @@ class TestMaterialize(unittest.TestCase):
         self.assertLess(occ_f * box.visible_frac, 0.15)
         _, dropped = materialize_scene(self.out, _sidecar({(k, i): occ_f}), 0.15)
         self.assertEqual(dropped, 1)
+
+    def test_manifest_config_is_authoritative(self):
+        cfg = replace(
+            CFG,
+            seed="banked",
+            n_scenes=2,
+            mines_min=7,
+            mines_max=7,
+            station_interval_m=2.5,
+        )
+        scene = build_scene(cfg, 1)
+        labels = scene_labels(cfg, scene)
+        selected = selected_station_indices(cfg, scene, labels)
+        out = Path(tempfile.mkdtemp())
+        write_scene(cfg, 1, out)
+        occ = {
+            "schema": OCCLUSION_SCHEMA,
+            "seed": cfg.seed,
+            "scene": 1,
+            "station_indices": selected,
+            "visible_frac": {
+                image_stem(cfg, scene, k): {
+                    str(i): 1.0 for i in range(len(scene.mines))
+                }
+                for k in selected
+            },
+        }
+        kept, dropped = materialize_scene(out, occ, 0.15)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(
+            kept,
+            sum(len(labels[image_stem(cfg, scene, k)]) for k in selected),
+        )
+
+    def test_sidecar_station_selection_must_match_manifest(self):
+        occ = _sidecar({})
+        occ["station_indices"] = occ["station_indices"][:-1]
+        with self.assertRaisesRegex(ValueError, "selections differ"):
+            materialize_scene(self.out, occ, 0.15)
 
 
 class TestTileScene(unittest.TestCase):
@@ -240,6 +287,19 @@ class TestTileScene(unittest.TestCase):
         tile_scene(out2, _sidecar({}), 0.15, self.TP)
         index2 = json.loads((out2 / "train" / "tiles.json").read_text())
         self.assertEqual(self.index, index2[f"{CFG.seed}_s0000"])
+
+    def test_tile_parameter_validation(self):
+        for changes in (
+            {"tile": 0},
+            {"overlap": self.TP.tile},
+            {"empty_keep": -0.01},
+            {"empty_keep": 1.01},
+            {"fullframe_frac": -0.01},
+            {"fullframe_frac": 1.01},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    replace(self.TP, **changes)
 
 
 if __name__ == "__main__":
