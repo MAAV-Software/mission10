@@ -75,9 +75,11 @@
   transparent, so the photo ground shows through.
 - Knobs (tuned near the author's look): Thickness 0.15, Random Rotation
   1.0, Height ≈0.22 m per unit (linear through Height 3.2; stable at
-  thickness 0.15–0.25; shrinks below ~0.1 — re-probe after a change),
-  density baseline 6000. Blade draws of 5–35 cm select the tallest blades
-  (~17–23 s/frame Cycles, ~3 s EEVEE).
+  thickness 0.15–0.25; shrinks below ~0.1 — re-probe after a change).
+  Sparse scenes use density 210–600 and 12–35 cm tallest blades. Rare
+  dense scenes use density 1800–2500, 50–55 cm blades, and less patchiness
+  to supply hard occlusion. The pure scene manifest records the profile
+  and exact inputs.
 - Distribution is object-local. Per-cell determinism goes through the
   Patch Seed input.
 - Paint Group weight is brush strength. Height and density scale about
@@ -85,8 +87,8 @@
   template carries a 289-vert "brush" vertex group; the adapter fills it
   with per-scene noise (floor drawn 0.3–0.6) for height and hue mottling.
   The pattern repeats per grid cell (accepted).
-- The adapter overrides root/tip radius to ~3.6 mm and scales per-scene
-  density via the `maav_base_count` ID prop.
+- The adapter overrides root/tip radius to ~3.6 mm and applies the
+  manifest-recorded absolute density.
 
 ## Sky and exposure
 

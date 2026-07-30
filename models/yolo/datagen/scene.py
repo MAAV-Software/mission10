@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import math
 import random
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
@@ -31,12 +32,22 @@ class MineAppearance:
 
 
 @dataclass(frozen=True)
+class GrassChoice:
+    """Auditable GG Grass Painter inputs for one grass-primary scene."""
+
+    profile: str
+    blade_m: float
+    density: float
+
+
+@dataclass(frozen=True)
 class Scene:
     index: int
     mines: List[MinePose]
     stations: List[Station]
     mine_appearances: List[MineAppearance] = field(default_factory=list)
     surface: SurfaceChoice = field(default_factory=lambda: SurfaceChoice("grass"))
+    grass: Optional[GrassChoice] = None
     tilt: float = 0.0  # camera tilt from nadir, degrees
 
     def __post_init__(self) -> None:
@@ -96,6 +107,52 @@ def _sample_mine_appearances(
     return appearances
 
 
+def _sample_grass(
+    cfg: GenConfig,
+    surface: SurfaceChoice,
+    dense: bool,
+    rng: random.Random,
+) -> Optional[GrassChoice]:
+    if surface.primary != "grass":
+        return None
+    # Reserve the former Bernoulli slot so changing to a balanced profile
+    # schedule does not shift the established blade/density draws.
+    rng.random()
+    if dense:
+        profile = "dense"
+        blade_range = cfg.grass_dense_blade_m
+        density_range = cfg.grass_dense_density
+    else:
+        profile = "sparse"
+        blade_range = cfg.grass_sparse_blade_m
+        density_range = cfg.grass_sparse_density
+    return GrassChoice(
+        profile=profile,
+        blade_m=rng.uniform(*blade_range),
+        density=rng.uniform(*density_range),
+    )
+
+
+def _dense_grass_for_ordinal(probability: float, ordinal: int) -> bool:
+    """Low-discrepancy profile schedule with at most one-scene count error."""
+    phase = 1.0 - probability
+    epsilon = 1e-12
+    before = math.floor(ordinal * probability + phase + epsilon)
+    after = math.floor((ordinal + 1) * probability + phase + epsilon)
+    return after > before
+
+
+def _grass_primary_ordinal(cfg: GenConfig, index: int) -> int:
+    """Zero-based position among grass-primary scenes before this index."""
+    return sum(
+        _sample_surface(
+            cfg, random.Random(f"{cfg.seed}:{prior}:surface")
+        ).primary
+        == "grass"
+        for prior in range(index)
+    )
+
+
 def build_scene(cfg: GenConfig, index: int) -> Scene:
     if not (0 <= index < cfg.n_scenes):
         raise ValueError(f"scene index {index} outside 0..{cfg.n_scenes - 1}")
@@ -109,12 +166,24 @@ def build_scene(cfg: GenConfig, index: int) -> Scene:
     appearances = _sample_mine_appearances(
         cfg, len(mines), random.Random(f"{cfg.seed}:{index}:mine-colors")
     )
+    grass_ordinal = (
+        _grass_primary_ordinal(cfg, index)
+        if surface.primary == "grass"
+        else 0
+    )
+    grass = _sample_grass(
+        cfg,
+        surface,
+        _dense_grass_for_ordinal(cfg.grass_dense_prob, grass_ordinal),
+        random.Random(f"{cfg.seed}:{index}:grass-profile"),
+    )
     return Scene(
         index=index,
         mines=mines,
         stations=sts,
         mine_appearances=appearances,
         surface=surface,
+        grass=grass,
         tilt=tilt,
     )
 

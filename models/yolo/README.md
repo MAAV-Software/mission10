@@ -32,11 +32,20 @@ cd models/yolo
 python3 -m datagen.dump --out /tmp/dump --scenes 0:5
 ```
 
-Rendering (Blender adapter; see the bench list in `datagen/generate.py`
-before trusting output):
+Production rendering uses Cycles by default. The adapter renders all stations
+for one scene as one animation operation, then computes exact geometry-based
+occlusion in a separate pass:
 
 ```sh
-blender -b assets/Grass.blend -P datagen/generate.py -- --out dataset/raw --scenes 0:50
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out dataset/raw --scenes 0:50
+```
+
+Use EEVEE for local smoke tests and performance checks:
+
+```sh
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out dataset/smoke --scenes 0:1 --engine eevee
 ```
 
 Determinism: everything derives from `random.Random(f"{seed}:{scene_index}")`.
@@ -50,6 +59,19 @@ scene draws one filament batch from a lime / green / muddy-olive palette
 value variation around that batch. The pure scene manifest records both the
 family and final sRGB value; Blender converts it to scene-linear color without
 tinting the AprilTag.
+
+Grass-primary scenes use a deterministic, manifest-recorded grass profile.
+Sparse cover is the default (90%, density 210–600, tallest blade 12–35 cm).
+Rare dense cover supplies hard occlusion cases (10%, density 1800–2500,
+tallest blade 50–55 cm). The profile draw is independent of mine placement,
+which prevents a density halo from becoming a detector shortcut. A balanced
+deterministic schedule keeps small shards close to the requested 90/10 mix
+instead of relying on a high-variance Bernoulli count.
+
+The generator writes lossless PNG at compression level 15. Cycles uses 16
+samples for production output. Local EEVEE uses 8 samples; this keeps the
+1640×1232 smoke-render path below the two-second weighted performance target
+without changing the Cycles dataset.
 
 ## Geometry contract
 

@@ -18,6 +18,9 @@ class TestRandomizationConfig(unittest.TestCase):
         )
         self.assertEqual(CFG.mine_color_names, ("lime", "green", "muddy_olive"))
         self.assertEqual(CFG.mine_color_weights, (0.10, 0.45, 0.45))
+        self.assertEqual(CFG.grass_dense_prob, 0.10)
+        self.assertEqual(CFG.eevee_render_samples, 8)
+        self.assertEqual(CFG.png_compression, 15)
 
     def test_silent_failure_guards(self):
         for changes in (
@@ -25,11 +28,20 @@ class TestRandomizationConfig(unittest.TestCase):
             {"tag_up_prob": 1.01},
             {"mixed_surface_prob": -0.01},
             {"mixed_surface_prob": 1.01},
+            {"grass_dense_prob": -0.01},
+            {"grass_dense_prob": 1.01},
             {"p_tag_one": -1.0},
             {"p_tag_both": 0.0, "p_tag_one": 0.0, "p_tag_none": 0.0},
             {"surface_materials": ("grass",), "mixed_surface_prob": 0.1},
-            {"grass_blade_m": (0.0, 0.1)},
-            {"grass_blade_m": (0.1, 0.04)},
+            {"grass_sparse_blade_m": (0.0, 0.1)},
+            {"grass_sparse_blade_m": (0.1, 0.04)},
+            {"grass_dense_blade_m": (0.0, 0.1)},
+            {"grass_sparse_density": (0.0, 600.0)},
+            {"grass_dense_density": (6000.0, 3000.0)},
+            {"render_samples": 0},
+            {"eevee_render_samples": 0},
+            {"png_compression": -1},
+            {"png_compression": 101},
             {"mine_color_names": ()},
             {"mine_color_names": ("green",)},
             {"mine_color_weights": (-1.0, 1.0, 1.0)},

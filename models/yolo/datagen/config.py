@@ -75,16 +75,18 @@ class GenConfig:
     mine_color_saturation_scale: Tuple[float, float] = (0.90, 1.10)
     mine_color_value_scale: Tuple[float, float] = (0.85, 1.15)
 
+    # Grass-primary scenes are usually sparse, with rare deliberately hard
+    # dense/tall scenes. A balanced deterministic schedule realizes this
+    # fraction without small-shard Bernoulli variance. These are absolute GG
+    # Grass Painter density inputs, sampled by the pure scene model so the
+    # choice is manifest-auditable.
+    grass_dense_prob: float = 0.10
+    grass_sparse_blade_m: Tuple[float, float] = (0.12, 0.35)
+    grass_sparse_density: Tuple[float, float] = (210.0, 600.0)
+    grass_dense_blade_m: Tuple[float, float] = (0.50, 0.55)
+    grass_dense_density: Tuple[float, float] = (1800.0, 2500.0)
+
     # render randomization (consumed by the bpy adapter only)
-    # tallest blade length of the painter layer, sampled per scene: it sets
-    # how much real blade occlusion mine silhouettes get. The managed arena
-    # ground plausibly spans mowed stubble to shin-high August growth at the
-    # edges; the per-area brush-weight noise then varies actual height (and
-    # hue) well below the draw, so short cover appears within tall scenes too
-    grass_blade_m: Tuple[float, float] = (0.05, 0.35)
-    # per-scene multiplier on the strand count: thin patchy cover through
-    # full density, never lush-only
-    grass_density: Tuple[float, float] = (0.35, 1.0)
     sun_elevation_deg: Tuple[float, float] = (25.0, 80.0)
     sun_azimuth_deg: Tuple[float, float] = (0.0, 360.0)
     # clear-sky daylight is sun-dominated (~4:1 over sky fill); the bpy
@@ -100,6 +102,8 @@ class GenConfig:
     # (clipped highlights) instead of every frame sitting at the same midtone
     exposure_jitter_ev: Tuple[float, float] = (-0.4, 0.9)
     render_samples: int = 16
+    eevee_render_samples: int = 8
+    png_compression: int = 15
 
     def __post_init__(self) -> None:
         if self.n_scenes < 1:
@@ -126,7 +130,7 @@ class GenConfig:
             raise ValueError("mixed surfaces require at least two surface_materials")
         # silent-failure guards: a bad probability skews the dataset without
         # raising anywhere downstream
-        for name in ("mixed_surface_prob", "tag_up_prob"):
+        for name in ("mixed_surface_prob", "tag_up_prob", "grass_dense_prob"):
             v = getattr(self, name)
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"bad {name} {v}")
@@ -160,10 +164,21 @@ class GenConfig:
         ):
             if not (0.0 < scale[0] <= scale[1]):
                 raise ValueError(f"bad {name} {scale}")
-        if not (0.0 < self.grass_blade_m[0] <= self.grass_blade_m[1]):
-            raise ValueError(f"bad grass_blade_m {self.grass_blade_m}")
-        if not (0.0 < self.grass_density[0] <= self.grass_density[1] <= 1.0):
-            raise ValueError(f"bad grass_density {self.grass_density}")
+        for values, name in (
+            (self.grass_sparse_blade_m, "grass_sparse_blade_m"),
+            (self.grass_dense_blade_m, "grass_dense_blade_m"),
+            (self.grass_sparse_density, "grass_sparse_density"),
+            (self.grass_dense_density, "grass_dense_density"),
+        ):
+            if not (0.0 < values[0] <= values[1]):
+                raise ValueError(f"bad {name} {values}")
+        if self.render_samples < 1 or self.eevee_render_samples < 1:
+            raise ValueError(
+                "render sample counts must be positive: "
+                f"{self.render_samples}, {self.eevee_render_samples}"
+            )
+        if not 0 <= self.png_compression <= 100:
+            raise ValueError(f"bad png_compression {self.png_compression}")
         if not (0.0 <= self.tilt_range_deg[0] <= self.tilt_range_deg[1]):
             raise ValueError(f"bad tilt_range_deg {self.tilt_range_deg}")
         if self.exposure_jitter_ev[1] < self.exposure_jitter_ev[0]:

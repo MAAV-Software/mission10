@@ -38,6 +38,7 @@ p = argparse.ArgumentParser()
 p.add_argument("--scene", type=int, default=2)
 p.add_argument("--station", type=int, default=41)
 p.add_argument("--out", default=str(YOLO_DIR / "dataset" / "smoke" / "images"))
+p.add_argument("--engine", choices=("cycles", "eevee"), default="cycles")
 ns = p.parse_args(argv)
 
 cfg = GenConfig()
@@ -45,7 +46,7 @@ out = Path(ns.out)
 out.mkdir(parents=True, exist_ok=True)
 
 _configure_camera(bpy, cfg)
-_configure_render(bpy, cfg)
+_configure_render(bpy, cfg, ns.engine)
 template = _append_mine(bpy, YOLO_DIR / "assets" / "m10-mine.blend", "IARC_PFM-1_mine")
 
 grass_patch = _grass_template(bpy)
@@ -53,8 +54,12 @@ grass_patch = _grass_template(bpy)
 scene = build_scene(cfg, ns.scene)
 _randomize_sun(bpy, cfg, random.Random(f"{cfg.seed}:{ns.scene}:render:sun"))
 _apply_surface(bpy, cfg, scene, "Ground")
-grass = _grass_grid(bpy, grass_patch, scene, cfg,
-                    random.Random(f"{cfg.seed}:{ns.scene}:render:grass"))
+grass = _grass_grid(
+    bpy,
+    grass_patch,
+    scene,
+    random.Random(f"{cfg.seed}:{ns.scene}:render:grass"),
+)
 _place_mines(bpy, template, scene, cfg,
              random.Random(f"{cfg.seed}:{ns.scene}:render:mines"))
 

@@ -7,7 +7,11 @@ from pathlib import Path
 
 from datagen.config import GenConfig
 from datagen.dump import write_scene
-from datagen.generate import _srgb_to_linear
+from datagen.generate import (
+    _animation_output_pattern,
+    _srgb_to_linear,
+    _station_index,
+)
 from datagen.manifest import SCHEMA, scene_manifest
 from datagen.scene import build_scene, scene_labels
 
@@ -74,6 +78,20 @@ class TestScene(unittest.TestCase):
             _srgb_to_linear((0.5, 0.5, 0.5))[0], 0.214041, places=6
         )
 
+    def test_animation_frames_map_directly_to_station_indices(self):
+        for frame in range(4):
+            self.assertEqual(_station_index(frame, 4), frame)
+        for frame in (-1, 4):
+            with self.assertRaises(IndexError):
+                _station_index(frame, 4)
+
+    def test_animation_output_pattern_preserves_image_stems(self):
+        scene = build_scene(CFG, 2)
+        pattern = _animation_output_pattern(Path("/dataset"), CFG, scene)
+        self.assertEqual(
+            pattern, Path("/dataset/images/m10_s0002_k####")
+        )
+
     def test_forced_single_and_mixed_surfaces(self):
         single = replace(
             CFG, surface_materials=("concrete",), mixed_surface_prob=0.0
@@ -91,6 +109,66 @@ class TestScene(unittest.TestCase):
         self.assertNotEqual(surface.primary, surface.secondary)
         self.assertIn(surface.strip_axis, ("north", "east"))
         self.assertEqual(surface.strip_width_m, 3.0)
+
+    def test_grass_profiles_are_forced_and_bounded(self):
+        common = {
+            "surface_materials": ("grass",),
+            "mixed_surface_prob": 0.0,
+            "grass_sparse_blade_m": (0.11, 0.11),
+            "grass_sparse_density": (321.0, 321.0),
+            "grass_dense_blade_m": (0.29, 0.29),
+            "grass_dense_density": (4321.0, 4321.0),
+        }
+        sparse = build_scene(replace(CFG, grass_dense_prob=0.0, **common), 0)
+        dense = build_scene(replace(CFG, grass_dense_prob=1.0, **common), 0)
+        self.assertEqual(sparse.grass.profile, "sparse")
+        self.assertEqual(sparse.grass.blade_m, 0.11)
+        self.assertEqual(sparse.grass.density, 321.0)
+        self.assertEqual(dense.grass.profile, "dense")
+        self.assertEqual(dense.grass.blade_m, 0.29)
+        self.assertEqual(dense.grass.density, 4321.0)
+
+        nongrass = replace(
+            CFG, surface_materials=("dirt",), mixed_surface_prob=0.0
+        )
+        self.assertIsNone(build_scene(nongrass, 0).grass)
+
+    def test_grass_config_only_changes_grass_choice(self):
+        sparse_cfg = replace(
+            CFG,
+            surface_materials=("grass",),
+            mixed_surface_prob=0.0,
+            grass_dense_prob=0.0,
+        )
+        dense_cfg = replace(
+            sparse_cfg,
+            grass_dense_prob=1.0,
+        )
+        sparse = build_scene(sparse_cfg, 2)
+        dense = build_scene(dense_cfg, 2)
+        self.assertNotEqual(sparse.grass, dense.grass)
+        self.assertEqual(sparse.mines, dense.mines)
+        self.assertEqual(sparse.stations, dense.stations)
+        self.assertEqual(sparse.mine_appearances, dense.mine_appearances)
+        self.assertEqual(sparse.surface, dense.surface)
+        self.assertEqual(sparse.tilt, dense.tilt)
+        self.assertEqual(
+            scene_labels(sparse_cfg, sparse), scene_labels(dense_cfg, dense)
+        )
+
+    def test_grass_profile_schedule_is_balanced(self):
+        cfg = replace(
+            CFG,
+            n_scenes=20,
+            surface_materials=("grass",),
+            mixed_surface_prob=0.0,
+            grass_dense_prob=0.10,
+        )
+        profiles = [build_scene(cfg, i).grass.profile for i in range(20)]
+        self.assertEqual(
+            [i for i, profile in enumerate(profiles) if profile == "dense"],
+            [0, 10],
+        )
 
     def test_new_knobs_do_not_perturb_geometry_or_labels(self):
         untagged_grass = replace(
@@ -180,6 +258,18 @@ class TestManifestAndDump(unittest.TestCase):
                 "strip_center_m": scene.surface.strip_center_m,
                 "strip_width_m": scene.surface.strip_width_m,
             },
+        )
+        self.assertEqual(
+            man["grass"],
+            (
+                {
+                    "profile": scene.grass.profile,
+                    "blade_m": scene.grass.blade_m,
+                    "density": scene.grass.density,
+                }
+                if scene.grass is not None
+                else None
+            ),
         )
         visible = sum(m.tag_visible for m in scene.mines)
         self.assertEqual(man["tag_visible_fraction"], visible / len(scene.mines))

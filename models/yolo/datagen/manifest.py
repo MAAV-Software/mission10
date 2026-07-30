@@ -9,7 +9,7 @@ from .config import GenConfig
 from .labels import YoloBox
 from .scene import Scene, image_stem
 
-SCHEMA = "minefield-datagen/4"
+SCHEMA = "minefield-datagen/5"
 
 
 def scene_manifest(
@@ -22,6 +22,7 @@ def scene_manifest(
         "tilt_deg": scene.tilt,
         "config": asdict(cfg),
         "surface": asdict(scene.surface),
+        "grass": asdict(scene.grass) if scene.grass is not None else None,
         "tag_visible_fraction": (
             sum(m.tag_visible for m in scene.mines) / len(scene.mines)
         ),
