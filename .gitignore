@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv/
+env/
 
 build/
 install/
@@ -14,3 +15,5 @@ models/*/out/
 models/*/dataset/
 
 .DS_Store
+
+test*

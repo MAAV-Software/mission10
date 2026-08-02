@@ -43,7 +43,6 @@ class ExploreDrone:
         self.manager_host = manager_host
         self.manager_port = manager_port
         self.registered = False
-        self.coords_path = "DervinSmellsLikePoop.csv"
 
         self.coords_lock = threading.Lock()
         self.coords_cv = threading.Condition()
@@ -180,9 +179,6 @@ class ExploreDrone:
             if mine_x_min == -1:
                 continue
 
-            old_lat = pt_latitude
-            old_lon = pt_longitude
-
             pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
 
             # Get the dimension of the camera frame
@@ -306,29 +302,29 @@ class ExploreDrone:
         else:
             print("Message Unknown")
 
-    def fake_gps_coords_generation(self):
-        fake_timestamp = 0
-        print("Entered fake gps coords generation")
-        while fake_timestamp < 100:
-            print("Waiting fo the coords_lock")
-            with self.coords_lock:
-                print("Acquired the lock in fake_gps_coords_generation")
-                fake_lat = random.randint(1, 100)
-                fake_lon = random.randint(1, 100)
-                fake_alt = random.randint(1, 100)
-                fake_gps_point = {}
-                self.TMP_gps_data[fake_timestamp] = {
-                    "latitude": fake_lat,
-                    "longitude": fake_lon,
-                    "altitude": fake_alt
-                }
-                self.TMP_timestamp_queue.put(fake_timestamp)
-            fake_timestamp += 1
+    # def fake_gps_coords_generation(self):
+    #     fake_timestamp = 0
+    #     print("Entered fake gps coords generation")
+    #     while fake_timestamp < 100:
+    #         print("Waiting fo the coords_lock")
+    #         with self.coords_lock:
+    #             print("Acquired the lock in fake_gps_coords_generation")
+    #             fake_lat = random.randint(1, 100)
+    #             fake_lon = random.randint(1, 100)
+    #             fake_alt = random.randint(1, 100)
+    #             fake_gps_point = {}
+    #             self.TMP_gps_data[fake_timestamp] = {
+    #                 "latitude": fake_lat,
+    #                 "longitude": fake_lon,
+    #                 "altitude": fake_alt
+    #             }
+    #             self.TMP_timestamp_queue.put(fake_timestamp)
+    #         fake_timestamp += 1
 
-            print(f"{fake_lat}, {fake_lon}, {fake_alt}")
-            with self.coords_cv:
-                self.coords_cv.notify()
-            time.sleep(0.1)
+    #         print(f"{fake_lat}, {fake_lon}, {fake_alt}")
+    #         with self.coords_cv:
+    #             self.coords_cv.notify()
+    #         time.sleep(0.1)
 
     def handle_run_drones(self):
         # subprocess.run("ros2", ...) # Run that ros2 command to publish to the start topic
@@ -355,7 +351,7 @@ class ExploreDrone:
         #         node.destroy_node()
         #         rclpy.shutdown()
 
-        self.fake_gps_coords_generation()
+        # self.fake_gps_coords_generation()
     
     
     def register(self):

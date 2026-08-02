@@ -316,29 +316,29 @@ class ManagerDrone:
         }
         self.drone_last_seen[drone_key] = time.monotonic()
     
-    def fake_gps_coords_generation(self):
-        fake_timestamp = 0
-        print("Entered fake gps coords generation")
-        while fake_timestamp < 100:
-            print("Waiting fo the mine_data_lock")
-            with self.mine_data_lock:
-                print("Acquired the lock in fake_gps_coords_generation")
-                fake_lat = random.randint(1, 100)
-                fake_lon = random.randint(1, 100)
-                fake_alt = random.randint(1, 100)
-                fake_gps_point = {}
-                self.TMP_gps_data[fake_timestamp] = {
-                    "latitude": fake_lat,
-                    "longitude": fake_lon,
-                    "altitude": fake_alt
-                }
-                self.TMP_timestamp_queue.put(fake_timestamp)
-            fake_timestamp += 1
+    # def fake_gps_coords_generation(self):
+    #     fake_timestamp = 0
+    #     print("Entered fake gps coords generation")
+    #     while fake_timestamp < 100:
+    #         print("Waiting fo the mine_data_lock")
+    #         with self.mine_data_lock:
+    #             print("Acquired the lock in fake_gps_coords_generation")
+    #             fake_lat = random.randint(1, 100)
+    #             fake_lon = random.randint(1, 100)
+    #             fake_alt = random.randint(1, 100)
+    #             fake_gps_point = {}
+    #             self.TMP_gps_data[fake_timestamp] = {
+    #                 "latitude": fake_lat,
+    #                 "longitude": fake_lon,
+    #                 "altitude": fake_alt
+    #             }
+    #             self.TMP_timestamp_queue.put(fake_timestamp)
+    #         fake_timestamp += 1
 
-            print(f"{fake_lat}, {fake_lon}, {fake_alt}")
-            with self.mine_data_cv:
-                self.mine_data_cv.notify()
-            time.sleep(0.1)
+    #         print(f"{fake_lat}, {fake_lon}, {fake_alt}")
+    #         with self.mine_data_cv:
+    #             self.mine_data_cv.notify()
+    #         time.sleep(0.1)
 
     def handle_run_drones(self):
         self.mission_status = "in_mission"
@@ -382,7 +382,7 @@ class ManagerDrone:
             rclpy.shutdown()
 
         """
-        self.fake_gps_coords_generation()
+        # self.fake_gps_coords_generation()
 
         # Now that the ros has finished running...
         # drones_directory = Path(__file__).parent.parent
