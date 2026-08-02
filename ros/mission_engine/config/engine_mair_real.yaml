@@ -28,7 +28,7 @@
     rosette_outer_hold_s: 0.5
     rosette_center_hold_s: 0.5
     survey_alt_m: 2.0
-    lane_speed_mps: 1.5
+    lane_speed_mps: 1.0
     reach_tolerance_m: 0.20
     land_settle_s: 3.0
     land_speed_tolerance_mps: 0.20
