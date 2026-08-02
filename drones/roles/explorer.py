@@ -11,13 +11,13 @@ import queue
 import sys
 from pyproj import Transformer, CRS
 
-# import rclpy
-# from rclpy.node import Node
-# from std_msgs.msg import String
-# from drones.roles.MissionNode import MissionNode
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+from drones.roles.MissionNode import MissionNode
 
 # TEMP imports
-import random
+# import random
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
@@ -155,22 +155,22 @@ class ExploreDrone:
             pt_longitude = 0
 
             with self.coords_cv:
-                # while self.mission_node.timestamp_queue.qsize == 0:
-                while self.TMP_timestamp_queue.qsize() == 0:
+                while self.mission_node.timestamp_queue.qsize == 0:
+                # while self.TMP_timestamp_queue.qsize() == 0:
                     print("Waiting for timestamp to fill up")
                     self.coords_cv.wait()
 
             with self.coords_lock:
                 print("Acquired the lock in find_mines")
-                # next_timestamp = self.mission_node.timestamp_queue.get()
-                # absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
-                # pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
-                # pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
+                next_timestamp = self.mission_node.timestamp_queue.get()
+                absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
+                pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
+                pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
 
-                next_timestamp = self.TMP_timestamp_queue.get()
-                absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
-                pt_latitude = self.TMP_gps_data[next_timestamp]["latitude"]
-                pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
+                # next_timestamp = self.TMP_timestamp_queue.get()
+                # absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
+                # pt_latitude = self.TMP_gps_data[next_timestamp]["latitude"]
+                # pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
 
             # Get the location of the mines within the image (bounding box or smth I dunno)
             print("Got everything that I needed, thanks")
@@ -330,26 +330,26 @@ class ExploreDrone:
         # subprocess.run("ros2", ...) # Run that ros2 command to publish to the start topic
         # time.sleep(5)
 
-        # rclpy.init()
+        rclpy.init()
         
-        # node = MissionNode(self.coords_lock, self.coords_cv)
-        # self.mission_node = node
+        node = MissionNode(self.coords_lock, self.coords_cv)
+        self.mission_node = node
 
-        # while not self.shutdown_flag:
-        #     try:
-        #         # Start the mission
-        #         node.start_mission()
+        while not self.shutdown_flag:
+            try:
+                # Start the mission
+                # node.start_mission()
 
-        #         # Continue processing GPS messages
-        #         rclpy.spin(node)
+                # Continue processing GPS messages
+                rclpy.spin(node)
 
-        #     except KeyboardInterrupt:
-        #         pass
+            except KeyboardInterrupt:
+                pass
 
-        #     finally:
-        #         print(f"Collected {len(node.gps_data)} GPS points")
-        #         node.destroy_node()
-        #         rclpy.shutdown()
+            finally:
+                print(f"Collected {len(node.gps_data)} GPS points")
+                node.destroy_node()
+                rclpy.shutdown()
 
         # self.fake_gps_coords_generation()
     

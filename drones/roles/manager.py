@@ -8,13 +8,13 @@ import queue
 import math
 import numpy as np
 from pyproj import Transformer, CRS
-# import rclpy
-# from rclpy.node import Node
-# from std_msgs.msg import Bool
-# from roles.MissionNode import MissionNode
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
+from roles.MissionNode import MissionNode
 
 # Temp inclusions
-import random
+# import random
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
@@ -140,8 +140,8 @@ class ManagerDrone:
             pt_longitude = 0
 
             with self.mine_data_cv:
-                # while self.mission_node is None or self.mission_node.timestamp_queue.qsize == 0:
-                while self.TMP_timestamp_queue.qsize() == 0:
+                while self.mission_node is None or self.mission_node.timestamp_queue.qsize == 0:
+                # while self.TMP_timestamp_queue.qsize() == 0:
                     print("Waiting for mission to start")
                     self.mine_data_cv.wait()
                 print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
@@ -152,15 +152,15 @@ class ManagerDrone:
 
             with self.mine_data_lock:
                 print("Acquired the lock in find_mines")
-                # next_timestamp = self.mission_node.timestamp_queue.get()
-                # absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
-                # pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
-                # pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
+                next_timestamp = self.mission_node.timestamp_queue.get()
+                absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
+                pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
+                pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
 
-                next_timestamp = self.TMP_timestamp_queue.get()
-                absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
-                pt_latitude = self.TMP_gps_data[next_timestamp]["latitude"]
-                pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
+                # next_timestamp = self.TMP_timestamp_queue.get()
+                # absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
+                # pt_latitude = self.TMP_gps_data[next_timestamp]["latitude"]
+                # pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
 
             # Get the location of the mines within the image (bounding box or smth I dunno)
             print("Got everything that I needed, thanks")
@@ -357,7 +357,7 @@ class ManagerDrone:
                     except ConnectionRefusedError:
                         print("Worker drone is not up yet")
                         continue
-        """
+        
         rclpy.init()
 
         node = MissionNode(self.mine_data_lock, self.mine_data_cv)
@@ -366,7 +366,7 @@ class ManagerDrone:
         # while not self.shutdown_flag:
         try:
             # Start the mission
-            self.mission_node.start_mission()
+            # self.mission_node.start_mission()
 
             # Continue processing GPS messages
             print("Attempting to spin the node")
@@ -381,15 +381,8 @@ class ManagerDrone:
             node.destroy_node()
             rclpy.shutdown()
 
-        """
+        
         # self.fake_gps_coords_generation()
-
-        # Now that the ros has finished running...
-        # drones_directory = Path(__file__).parent.parent
-        # skib_path = drones_directory / "skib.py"
-        # bidi_path = drones_directory / "bidi.py"
-        # subprocess.run(["python3", f"{str(skib_path)}"])
-        # subprocess.run(["python3", f"{str(bidi_path)}"])
         
 
     # adds one pair of coords
@@ -446,13 +439,13 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
-        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        fake_gps_thread.start()
+        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
+        # fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()
         find_mines_thread.join()
-        fake_gps_thread.join()
+        # fake_gps_thread.join()
         
 
         with open(aggregate_path, "w") as f: # Write the coords into it
