@@ -8,10 +8,10 @@ import queue
 import math
 import numpy as np
 from pyproj import Transformer, CRS
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Bool
-from roles.MissionNode import MissionNode
+# import rclpy
+# from rclpy.node import Node
+# from std_msgs.msg import Bool
+# from roles.MissionNode import MissionNode
 
 # Temp inclusions
 import random
@@ -27,8 +27,8 @@ class ManagerDrone:
 
         self.host = host
         self.port = port
-        self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data
-        self.TMP_timestamp_queue = queue.Queue() # Replace instances of this with self.mission_node.timestamp_queue
+        self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
+        self.TMP_timestamp_queue = queue.Queue() # Replace instances of this with self.mission_node.timestamp_queue and delete afterwards
         self.mission_node = None
         self.detected_mine_data = []
         self.exp_drones = {}
@@ -159,8 +159,9 @@ class ManagerDrone:
 
                 next_timestamp = self.TMP_timestamp_queue.get()
                 absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
-                pt_latitude = self.TMP_gps_data[next_timestamp]["altitude"]
+                pt_latitude = self.TMP_gps_data[next_timestamp]["latitude"]
                 pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
+
             # Get the location of the mines within the image (bounding box or smth I dunno)
             print("Got everything that I needed, thanks")
 
@@ -201,8 +202,8 @@ class ManagerDrone:
 
             with self.mine_data_lock:
                 print("Acquired the lock in find_mines but lower")
-                print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
                 self.detected_mine_data.append((new_lat, new_long))
+                print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
 
 
     def tcp_server(self):
@@ -221,14 +222,22 @@ class ManagerDrone:
                 # Wait for a connection for 1s.  The socket library avoids consuming
                 # CPU while waiting for a connection.
                 try:
+                    print("Trying TCP stuff")
                     clientsocket, address = sock.accept()
+                    print("SERVER")
+                    print("  Accepted:", address)
+                    print("  Local   :", clientsocket.getsockname())
+                    print("  Remote  :", clientsocket.getpeername())
                 except socket.timeout:
+                    print("Here I am")
                     continue
                 print("Connection from", address[0])
 
                 # Socket recv() will block for a maximum of 1 second.  If you omit
                 # this, it blocks indefinitely, waiting for packets.
                 clientsocket.settimeout(1)
+
+                buffer = ""
 
                 # Receive data, one chunk at a time.  If recv() times out before we
                 # can read a chunk, then go back to the top of the loop and try
@@ -241,22 +250,20 @@ class ManagerDrone:
                     while True:
                         try:
                             data = clientsocket.recv(4096)
+                            # print("DATA:", repr(data))
                         except socket.timeout:
                             continue
                         if not data:
                             break
                         message_chunks.append(data)
 
-                # Decode list-of-byte-strings to UTF8 and parse JSON data
-                message_bytes = b''.join(message_chunks)
-                message_str = message_bytes.decode("utf-8")
+                        buffer += data.decode("utf-8")
 
-                try:
-                    message_dict = json.loads(message_str)
-                except json.JSONDecodeError:
-                    continue
-                print(message_dict)
-                self.handle_message(message_dict)
+                        while "\n" in buffer:
+                            message, buffer = buffer.split("\n", 1)
+                            obj = json.loads(message)
+                            print(f"MESSAGE: {obj}")
+                            self.handle_message(obj)
     
     def udp_server(self):
         """Test UDP Socket Server."""
@@ -312,7 +319,7 @@ class ManagerDrone:
     def fake_gps_coords_generation(self):
         fake_timestamp = 0
         print("Entered fake gps coords generation")
-        while True:
+        while fake_timestamp < 100:
             print("Waiting fo the mine_data_lock")
             with self.mine_data_lock:
                 print("Acquired the lock in fake_gps_coords_generation")
@@ -340,12 +347,16 @@ class ManagerDrone:
             if drone_status["status"] == "working":
                 worker_host, worker_port = drone_id.strip().split("_")
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    print(f"The worker host is {worker_host} and the port is {worker_port}")
-                    sock.connect((worker_host, int(worker_port))) 
-                    message = json.dumps({
-                        "message_type": "run_drones"
-                    })
-                    sock.sendall(message.encode('utf-8'))
+                    try:
+                        print(f"The worker host is {worker_host} and the port is {worker_port}")
+                        sock.connect((worker_host, int(worker_port))) 
+                        message = json.dumps({
+                            "message_type": "run_drones"
+                        })
+                        sock.sendall(message.encode('utf-8'))
+                    except ConnectionRefusedError:
+                        print("Worker drone is not up yet")
+                        continue
         """
         rclpy.init()
 
@@ -371,10 +382,7 @@ class ManagerDrone:
             rclpy.shutdown()
 
         """
-        fake_gps_thread = threading.Thread(target=self.fake_gps_coords_generation)
-        fake_gps_thread.start()
-
-        fake_gps_thread.join()
+        self.fake_gps_coords_generation()
 
         # Now that the ros has finished running...
         # drones_directory = Path(__file__).parent.parent
@@ -386,6 +394,7 @@ class ManagerDrone:
 
     # adds one pair of coords
     def handle_coordinates(self, message_dict):
+        print("Here in handle coordinates")
         with self.mine_data_lock:
             print("Acquired the lock in handle_coordinates")
             worker_host = message_dict["host"]
@@ -393,6 +402,7 @@ class ManagerDrone:
             drone_key = str(worker_host) + "_" + str(worker_port)
             if drone_key in self.exp_drones:
                 self.detected_mine_data.append(message_dict["coords"])
+                print(f"The new length of the mines is {len(self.detected_mine_data)}")
     
     def handle_registration(self, message_dict):
         drone_host = message_dict["drone_host"]
@@ -436,7 +446,7 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
-        fake_gps_thread = threading.Thread(target=self.fake_gps_coords_generation)
+        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         fake_gps_thread.start()
 
         tcp_thread.join()
