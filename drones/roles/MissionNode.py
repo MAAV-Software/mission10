@@ -51,7 +51,8 @@ class MissionNode(Node):
 
             print(gps_point)
 
-            self.mission_node_cv.notify()
+            with self.mission_node_cv:
+                self.mission_node_cv.notify()
 
     # def start_mission(self):
     #     msg = Bool()

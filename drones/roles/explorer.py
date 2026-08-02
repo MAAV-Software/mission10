@@ -14,7 +14,7 @@ from pyproj import Transformer, CRS
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from drones.roles.MissionNode import MissionNode
+from roles.MissionNode import MissionNode
 
 # TEMP imports
 # import random
@@ -155,7 +155,7 @@ class ExploreDrone:
             pt_longitude = 0
 
             with self.coords_cv:
-                while self.mission_node.timestamp_queue.qsize == 0:
+                while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
                 # while self.TMP_timestamp_queue.qsize() == 0:
                     print("Waiting for timestamp to fill up")
                     self.coords_cv.wait()

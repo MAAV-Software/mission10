@@ -140,7 +140,7 @@ class ManagerDrone:
             pt_longitude = 0
 
             with self.mine_data_cv:
-                while self.mission_node is None or self.mission_node.timestamp_queue.qsize == 0:
+                while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
                 # while self.TMP_timestamp_queue.qsize() == 0:
                     print("Waiting for mission to start")
                     self.mine_data_cv.wait()
@@ -340,24 +340,7 @@ class ManagerDrone:
     #             self.mine_data_cv.notify()
     #         time.sleep(0.1)
 
-    def handle_run_drones(self):
-        self.mission_status = "in_mission"
-
-        for drone_id, drone_status in self.exp_drones.items():
-            if drone_status["status"] == "working":
-                worker_host, worker_port = drone_id.strip().split("_")
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    try:
-                        print(f"The worker host is {worker_host} and the port is {worker_port}")
-                        sock.connect((worker_host, int(worker_port))) 
-                        message = json.dumps({
-                            "message_type": "run_drones"
-                        })
-                        sock.sendall(message.encode('utf-8'))
-                    except ConnectionRefusedError:
-                        print("Worker drone is not up yet")
-                        continue
-        
+    def run_mission_node(self):
         rclpy.init()
 
         node = MissionNode(self.mine_data_lock, self.mine_data_cv)
@@ -381,6 +364,27 @@ class ManagerDrone:
             node.destroy_node()
             rclpy.shutdown()
 
+    def handle_run_drones(self):
+        self.mission_status = "in_mission"
+
+        for drone_id, drone_status in self.exp_drones.items():
+            if drone_status["status"] == "working":
+                worker_host, worker_port = drone_id.strip().split("_")
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    try:
+                        print(f"The worker host is {worker_host} and the port is {worker_port}")
+                        sock.connect((worker_host, int(worker_port))) 
+                        message = json.dumps({
+                            "message_type": "run_drones"
+                        })
+                        sock.sendall(message.encode('utf-8'))
+                    except ConnectionRefusedError:
+                        print("Worker drone is not up yet")
+                        continue
+        
+        mission_node_thread = threading.Thread(target=self.run_mission_node)
+        mission_node_thread.start()
+        mission_node_thread.join()
         
         # self.fake_gps_coords_generation()
         
@@ -439,13 +443,13 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
-        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        # fake_gps_thread.start()
+        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
+        fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()
         find_mines_thread.join()
-        # fake_gps_thread.join()
+        fake_gps_thread.join()
         
 
         with open(aggregate_path, "w") as f: # Write the coords into it
