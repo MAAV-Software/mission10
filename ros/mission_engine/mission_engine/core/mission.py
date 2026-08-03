@@ -115,7 +115,13 @@ class MissionEngine:
     """Deterministic mission sequencer. Drive it with tick(t, pos);
     feed detections into `log` via the ingest module; read `phase`."""
 
-    def __init__(self, cfg: MissionConfig, log: Optional[MineLog] = None) -> None:
+    def __init__(
+        self,
+        cfg: MissionConfig,
+        log: Optional[MineLog] = None,
+        *,
+        initial_yaw: float = 0.0,
+    ) -> None:
         self.cfg = cfg
         self.log = log if log is not None else MineLog()
         self.lanes: List[Lane] = serpentine(
@@ -142,7 +148,7 @@ class MissionEngine:
         self._dip_t0: Optional[float] = None
         self._last_detector_t: Optional[float] = None
         self._last_reset_counter: Optional[int] = None
-        self._last_yaw = 0.0
+        self._last_yaw = initial_yaw
         self._petal_i = 0
         self._petal_stage = "center"
         self._petal_hold_t0: Optional[float] = None
@@ -491,8 +497,6 @@ class MissionEngine:
                 command[2] + d[2] * step / remaining,
             )
             self._position_command = command
-        if math.hypot(target[0] - pos[0], target[1] - pos[1]) > 0.3:
-            self._last_yaw = math.atan2(target[1] - pos[1], target[0] - pos[0])
         return Setpoint(pos=command, yaw=self._last_yaw)
 
     def tick_lane(self, pos: Vec3, dt: float) -> Setpoint:
