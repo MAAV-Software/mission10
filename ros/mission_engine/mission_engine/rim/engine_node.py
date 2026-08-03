@@ -383,7 +383,10 @@ class EngineNode(OffboardController):
             return
         self._begun = True
         self._anchor_ne = (float(self.x), float(self.y))
-        self.engine = MissionEngine(self._mission_config())
+        self.engine = MissionEngine(
+            self._mission_config(),
+            initial_yaw=self._launch_yaw,
+        )
         self.engine.start()
         self.get_logger().info(
             f"survey begun: anchor N {self._anchor_ne[0]:.2f} E {self._anchor_ne[1]:.2f}, "
