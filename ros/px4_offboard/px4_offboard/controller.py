@@ -255,6 +255,13 @@ class OffboardController(Node):
             from_external=not self.force_arm,
         )
 
+    def command_disarm(self, force: bool = False):
+        self._publish_command(
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+            param1=0.0,
+            param2=FORCE_ARM_MAGIC if force else 0.0,
+        )
+
     def on_link_acquired(self):
         """Mission hook called once when PX4 telemetry first arrives (pre-arm)."""
 
