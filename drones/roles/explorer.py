@@ -332,10 +332,7 @@ class ExploreDrone:
     #             self.coords_cv.notify()
     #         time.sleep(0.1)
 
-    def handle_run_drones(self):
-        # subprocess.run("ros2", ...) # Run that ros2 command to publish to the start topic
-        # time.sleep(5)
-
+    def run_mission_node(self):
         rclpy.init()
         
         node = MissionNode(self.coords_lock, self.coords_cv)
@@ -357,6 +354,13 @@ class ExploreDrone:
                 node.destroy_node()
                 rclpy.shutdown()
 
+    def handle_run_drones(self):
+        # subprocess.run("ros2", ...) # Run that ros2 command to publish to the start topic
+        # time.sleep(5)
+
+        mission_node_thread = threading.Thread(target=self.run_mission_node)
+        mission_node_thread.start()
+
         # self.fake_gps_coords_generation()
     
     
@@ -371,7 +375,6 @@ class ExploreDrone:
                         except ConnectionRefusedError:
                             print("Manager not started yet")
                         time.sleep(0.1)
-                    sock.connect((self.manager_host, self.manager_port))
                     message = json.dumps({
                         "message_type": "registration",
                         "drone_host": self.host,
@@ -406,10 +409,10 @@ class ExploreDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
-        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        fake_gps_thread.start()
+        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
+        # fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()
         find_mines_thread.join()
-        fake_gps_thread.join()
+        # fake_gps_thread.join()

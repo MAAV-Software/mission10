@@ -48,8 +48,6 @@ class ManagerDrone:
 
         self.mine_data_lock = threading.Lock()
         self.mine_data_cv = threading.Condition()
-        self.receiving_cv = threading.Condition()
-        self.receiving_state = False
 
         with open(bounds_path, "r") as f:
             for line in f:
@@ -145,10 +143,6 @@ class ManagerDrone:
                     print("Waiting for mission to start")
                     self.mine_data_cv.wait()
                 print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
-
-            with self.receiving_cv:
-                while self.receiving_state:
-                    self.receiving_cv.wait()
 
             with self.mine_data_lock:
                 print("Acquired the lock in find_mines")
@@ -384,7 +378,6 @@ class ManagerDrone:
         
         mission_node_thread = threading.Thread(target=self.run_mission_node)
         mission_node_thread.start()
-        mission_node_thread.join()
         
         # self.fake_gps_coords_generation()
         
@@ -446,9 +439,9 @@ class ManagerDrone:
         # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         # fake_gps_thread.start()
 
+        find_mines_thread.join()
         tcp_thread.join()
         udp_thread.join()
-        find_mines_thread.join()
         # fake_gps_thread.join()
         
 
