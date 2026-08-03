@@ -61,6 +61,9 @@ from mission_engine.core.mission import (
 )
 
 TAG_PREFIX = "tag36h11:"
+CRASH_DISARM_RANGE_M = 0.10
+CRASH_DISARM_HOLD_S = 0.10
+CRASH_DISARM_RETRY_US = 100_000
 
 
 class EngineNode(OffboardController):
@@ -177,6 +180,10 @@ class EngineNode(OffboardController):
         self.q = (1.0, 0.0, 0.0, 0.0)
         self._agl = None
         self._agl_t = 0.0
+        self._range_airborne = False
+        self._ground_range_t0 = None
+        self._crash_disarm = False
+        self._last_crash_disarm_us = 0
         self._anchor_ne = None
         self._begun = False
         self._dumped = False
@@ -272,11 +279,37 @@ class EngineNode(OffboardController):
 
     def _dist_cb(self, msg: DistanceSensor) -> None:
         d = float(msg.current_distance)
+        now_us = self._now_us()
+        now = now_us * 1e-6
+
+        if self.is_armed and d >= msg.min_distance:
+            self._range_airborne = True
+
+        if self.is_armed and self._range_airborne and d <= CRASH_DISARM_RANGE_M:
+            if self._ground_range_t0 is None:
+                self._ground_range_t0 = now
+            elif now - self._ground_range_t0 >= CRASH_DISARM_HOLD_S:
+                if not self._crash_disarm:
+                    self._crash_disarm = True
+                    self.get_logger().error(
+                        "dToF returned to ground after takeoff; cutting motor power"
+                    )
+        else:
+            self._ground_range_t0 = None
+
+        if (
+            self._crash_disarm
+            and self.is_armed
+            and now_us - self._last_crash_disarm_us >= CRASH_DISARM_RETRY_US
+        ):
+            self._last_crash_disarm_us = now_us
+            self.command_disarm(force=True)
+
         if msg.min_distance <= d <= msg.max_distance:
             # dToF measures along body -z; level it with the current attitude.
             tilt = self._tilt_from_level()
             self._agl = d * math.cos(tilt)
-            self._agl_t = self._now_us() * 1e-6
+            self._agl_t = now
 
     def _tilt_from_level(self) -> float:
         """Angle between body -z and the local vertical, from the attitude."""
