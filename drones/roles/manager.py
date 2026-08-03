@@ -443,13 +443,13 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
-        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        fake_gps_thread.start()
+        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
+        # fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()
         find_mines_thread.join()
-        fake_gps_thread.join()
+        # fake_gps_thread.join()
         
 
         with open(aggregate_path, "w") as f: # Write the coords into it

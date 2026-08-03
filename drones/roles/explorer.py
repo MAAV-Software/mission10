@@ -218,8 +218,14 @@ class ExploreDrone:
             if len(self.send_buffer) >= 10:
                 print("Should try to send soon")
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    self.try_connect_to_manager()
-                    sock.connect((self.manager_host, self.manager_port))
+                    while True:
+                        try:
+                            sock.connect((self.manager_host, self.manager_port))
+                            break
+                        except ConnectionRefusedError:
+                            print("Manager not started yet")
+                        time.sleep(0.1)
+
                     print("Got the lock and am about to send now")
                     self.sending_state = True
                     for coord in self.send_buffer:
@@ -358,7 +364,13 @@ class ExploreDrone:
         if not self.registered:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    self.try_connect_to_manager()
+                    while True:
+                        try:
+                            sock.connect((self.manager_host, self.manager_port))
+                            break
+                        except ConnectionRefusedError:
+                            print("Manager not started yet")
+                        time.sleep(0.1)
                     sock.connect((self.manager_host, self.manager_port))
                     message = json.dumps({
                         "message_type": "registration",
@@ -387,9 +399,9 @@ class ExploreDrone:
         
     def run_drone(self):
         tcp_thread = threading.Thread(target=self.tcp_server)
-        # udp_thread = threading.Thread(target=self.send_heartbeat)
+        udp_thread = threading.Thread(target=self.send_heartbeat)
         tcp_thread.start()
-        # udp_thread.start()
+        udp_thread.start()
 
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
@@ -398,6 +410,6 @@ class ExploreDrone:
         fake_gps_thread.start()
 
         tcp_thread.join()
-        # udp_thread.join()
+        udp_thread.join()
         find_mines_thread.join()
         fake_gps_thread.join()
