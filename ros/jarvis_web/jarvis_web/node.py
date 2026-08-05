@@ -5,13 +5,9 @@ it has no callbacks for an executor. DDS discovery operates in the threads of th
 middleware. A publish from a Flask request thread is the only ROS operation in
 this process.
 
-The node publishes one message, not a burst. The mission nodes subscribe RELIABLE
-with a depth of 10 (px4_offboard/controller.py and
-flight_intelligent/phased_orbits_mission.py). Thus DDS sends the message again
-until it arrives. The `--times 5` option in scripts/sitl.sh is necessary for a
-different reason. A short-lived CLI publisher can start to publish before DDS
-discovery is complete. This node keeps its publishers for the life of the process
-and does not have that problem.
+The publishers use the shared RELIABLE, TRANSIENT_LOCAL, depth-one gate profile.
+They live for the life of the process, so a mission node that joins after a gate
+fires receives the last value.
 """
 
 from __future__ import annotations
@@ -21,17 +17,22 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 
 from jarvis_web.grammar import INTENTS, Intent
+from px4_offboard.gate_qos import MISSION_GATE_QOS
 
 NODE_NAME = "jarvis_web"
-QUEUE_DEPTH = 10
 
 
 class GatePublisher:
-    def __init__(self) -> None:
+    def __init__(self, expected_fleet_size: int = 1) -> None:
+        if expected_fleet_size < 1:
+            raise ValueError("expected_fleet_size must be at least 1")
         rclpy.init()
         self._node = Node(NODE_NAME)
+        self.expected_fleet_size = expected_fleet_size
         self._publishers = {
-            intent.topic: self._node.create_publisher(Bool, intent.topic, QUEUE_DEPTH)
+            intent.topic: self._node.create_publisher(
+                Bool, intent.topic, MISSION_GATE_QOS
+            )
             for intent in INTENTS
         }
 
@@ -42,8 +43,7 @@ class GatePublisher:
     def subscriber_count(self, intent: Intent) -> int:
         """The number of subscribers that DDS matched to this gate.
 
-        The webapp publishes one message and does not repeat it. Thus a count of
-        zero means that the command goes nowhere.
+        The webapp checks this against expected_fleet_size before it publishes.
         """
         return self._publishers[intent.topic].get_subscription_count()
 

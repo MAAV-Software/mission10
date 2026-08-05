@@ -3,9 +3,9 @@
 The operator webapp for the master drone. Voice in, mission gates out, and the
 result map at the end.
 
-This webapp only publishes. It subscribes to nothing and it holds no mission
-state. No code comes between a known phrase and the publish. The mission nodes
-control their own state.
+This webapp only publishes and holds no mission state. Before it fires a known
+gate, it checks that DDS has matched the configured number of fleet subscribers.
+The mission nodes control their own state.
 
 ## Vocabulary
 
@@ -108,12 +108,20 @@ source install/setup.bash
 
 ros2 run jarvis_web jarvis_web \
   --cert <name>.pem --key <name>-key.pem \
-  --results-dir /tmp/maav_results
+  --results-dir /tmp/maav_results \
+  --expected-fleet-size 4
 ```
 
 The default paths are `models/speech/assets` and `/tmp/maav_results`, relative to
 the root of the workspace. To change them, use `--models-dir`, `--vosk-model`,
 `--piper-voice`, `--results-dir` and `--threshold`.
+
+`--expected-fleet-size` is the minimum subscriber count required on the selected
+gate topic. If fewer mission nodes are matched, Jarvis publishes nothing, speaks
+`FLEET NOT READY.`, and reports both counts in the JSON response and error log.
+The default is 1 for single-drone development; fleet deployments must set their
+configured fleet size with this option or `JARVIS_EXPECTED_FLEET_SIZE` (for
+example, in the systemd service environment).
 
 Without `--cert` and `--key`, the webapp uses plain HTTP and writes a warning. A
 desktop browser on localhost can use this mode for development, and the space bar
@@ -155,8 +163,8 @@ journalctl -u jarvis-web.service
   cannot make a state that publishes a gate for a command it did not recognize.
 - `stt.py` — the engine interface and the vosk implementation behind it.
 - `tts.py` — the piper wrapper. Text in, WAV bytes out.
-- `node.py` — the ROS rim. Four publishers, and one publish for each accepted
-  intent.
+- `node.py` — the ROS rim. Four durable publishers and one publish for each
+  accepted, delivery-checked intent.
 - `app.py` — the Flask routes and the entry point. It makes the outcome flat only
   at the JSON boundary, because JSON has no sum types.
 - `static/` — the page, the push-to-talk client and the PCM worklet. The CSS holds
@@ -176,8 +184,9 @@ The two tests that matter most use the real parts:
 - `test_round_trip.py` — piper says a phrase, vosk transcribes it, and grammar.py
   classifies the result. This is the only test that shows what the recognizer does
   with sound. It skips without the speech models.
-- `test_publish.py` — a real node, a real subscriber and real DDS. It shows that
-  each topic name is correct, and that one publish is sufficient.
+- `test_publish.py` — a real node, a late-joining real subscriber and real DDS.
+  It shows that each topic name is correct and the retained gate reaches a node
+  that starts after publication.
 
 The other two use fakes. `test_grammar.py` holds the properties of the phrase
 table that an edit can break. `test_app.py` holds the contract of the `/utterance`

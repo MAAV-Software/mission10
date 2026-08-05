@@ -44,19 +44,32 @@ class FakeLogger:
         self.lines.append(line)
 
     warn = info
+    error = info
 
 
 class FakeGates:
-    def __init__(self):
+    def __init__(self, subscriber_count=1, expected_fleet_size=1):
         self.published = []
         self.logger = FakeLogger()
+        self._subscriber_count = subscriber_count
+        self.expected_fleet_size = expected_fleet_size
+
+    def subscriber_count(self, intent):
+        return self._subscriber_count
 
     def publish(self, intent):
         self.published.append(intent)
 
 
-def build(text, confidences=CONFIDENT, results_dir=Path("/nonexistent"), threshold=0.5):
-    gates = FakeGates()
+def build(
+    text,
+    confidences=CONFIDENT,
+    results_dir=Path("/nonexistent"),
+    threshold=0.5,
+    subscriber_count=1,
+    expected_fleet_size=1,
+):
+    gates = FakeGates(subscriber_count, expected_fleet_size)
     app = create_app(FakeEngine(text, confidences), FakeVoice(), gates, results_dir, threshold)
     app.config.update(TESTING=True)
     return app.test_client(), gates
@@ -71,6 +84,22 @@ class TestUtterance(unittest.TestCase):
         self.assertTrue(body["accepted"])
         self.assertEqual(body["intent"], "launch")
         self.assertEqual(body["response"], "LAUNCHING.")
+        self.assertEqual(body["topic"], "/start_mission")
+        self.assertEqual(body["subscriber_count"], 1)
+        self.assertEqual(body["expected_subscriber_count"], 1)
+
+    def test_a_gate_is_refused_when_the_fleet_is_not_matched(self):
+        client, gates = build(
+            "jarvis launch", subscriber_count=3, expected_fleet_size=4
+        )
+        body = client.post("/utterance", data=b"\x00\x01").get_json()
+
+        self.assertEqual(gates.published, [])
+        self.assertFalse(body["accepted"])
+        self.assertEqual(body["reason"], "insufficient_subscribers")
+        self.assertEqual(body["response"], "FLEET NOT READY.")
+        self.assertEqual(body["subscriber_count"], 3)
+        self.assertEqual(body["expected_subscriber_count"], 4)
 
     def test_a_rejection_publishes_nothing(self):
         for text, confidences, cause in (

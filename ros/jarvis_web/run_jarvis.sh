@@ -36,7 +36,7 @@ source /opt/ros/jazzy/setup.bash
 source "$VENV/bin/activate"
 set -u
 
-export PYTHONPATH="$HERE:${PYTHONPATH:-}"
+export PYTHONPATH="$HERE:$WORKSPACE/ros/px4_offboard:${PYTHONPATH:-}"
 cd "$WORKSPACE"
 exec python3 -m jarvis_web.app \
   --cert "$CERT" \

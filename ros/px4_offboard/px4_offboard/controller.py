@@ -44,6 +44,8 @@ from px4_msgs.msg import (
 )
 from std_msgs.msg import Bool
 
+from px4_offboard.gate_qos import MISSION_GATE_QOS
+
 FORCE_ARM_MAGIC = 21196.0
 ORIGIN_RESEND_INTERVAL_S = 0.5
 ORIGIN_CONFIRM_TIMEOUT_S = 20.0
@@ -119,9 +121,13 @@ class OffboardController(Node):
         self.create_subscription(VehicleGlobalPosition, self._topic("out/vehicle_global_position"), self._gpos_cb, sensor_qos)
         self.create_subscription(VehicleGlobalPosition, self._topic("out/vehicle_global_position_v1"), self._gpos_cb, sensor_qos)
 
-        self.create_subscription(Bool, "start_mission", self._start_cb, 10)
-        self.create_subscription(Bool, "end_mission", self._end_cb, 10)
-        self.create_subscription(Bool, "abort_mission", self._abort_cb, 10)
+        self.create_subscription(
+            Bool, "start_mission", self._start_cb, MISSION_GATE_QOS
+        )
+        self.create_subscription(Bool, "end_mission", self._end_cb, MISSION_GATE_QOS)
+        self.create_subscription(
+            Bool, "abort_mission", self._abort_cb, MISSION_GATE_QOS
+        )
 
         self.nav_state = VehicleStatus.NAVIGATION_STATE_MAX
         self.arm_state = VehicleStatus.ARMING_STATE_DISARMED

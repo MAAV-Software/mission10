@@ -84,6 +84,7 @@ from flight_lib import (
     phased_orbit_setpoint,
 )
 from px4_offboard.controller import OffboardController, wrap_pi
+from px4_offboard.gate_qos import MISSION_GATE_QOS
 
 YAW_ACCEPTANCE_RAD = math.radians(10.0)  # climb-phase yaw alignment gate
 MODE_NOMINAL = UwbState.MODE_NOMINAL if UwbState is not None else 0
@@ -268,7 +269,9 @@ class PhasedOrbitsMission(OffboardController):
         self._last_nominal = None
         self._last_goal_xy = None
         self._last_goal_us = 0
-        self.create_subscription(Bool, "begin_orbit", self._orbit_gate_cb, 10)
+        self.create_subscription(
+            Bool, "begin_orbit", self._orbit_gate_cb, MISSION_GATE_QOS
+        )
 
         self._seq = 0
         self.peer_state: dict = {}

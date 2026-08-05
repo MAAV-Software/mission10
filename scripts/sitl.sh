@@ -9,16 +9,15 @@
 #   - liveness via the pidfile + a self-safe child count (a pgrep run from this
 #     script does not match the pattern, since the script's cmdline is just
 #     "bash sitl.sh ...", so counts are never inflated by the grep itself).
-#   - gate firing with -w scaled to the drone count (VOLATILE subs need a few
-#     publishes after the wait).
+#   - gate firing with -w scaled to the drone count and the shared durable QoS.
 #
 # Usage:
 #   scripts/sitl.sh up [mission_config.yaml]   # launch (GUI), write pidfile
 #   scripts/sitl.sh up-random [seed] [mission_config.yaml]
 #                                               # seeded random M-Air spawns
 #   scripts/sitl.sh ready                       # one-shot readiness snapshot
-#   scripts/sitl.sh takeoff                     # fire /start_mission  (-w N)
-#   scripts/sitl.sh orbit                       # fire /begin_orbit    (-w N)
+#   scripts/sitl.sh takeoff                     # fire /start_mission
+#   scripts/sitl.sh orbit                       # fire /begin_orbit
 #   scripts/sitl.sh home                        # fire /end_mission   (peel off,
 #                                               #   return, land at the anchor)
 #   scripts/sitl.sh land                        # fire /abort_mission (land in
@@ -47,8 +46,12 @@ _source_ws() { set +u; source "$REPO/install/setup.bash"; set -u; }
 _pub_gate() {
   local topic="$1"
   _source_ws
-  echo "firing /$topic (-w $N)"
-  ros2 topic pub -w "$N" --times 5 -r 5 "/$topic" std_msgs/msg/Bool "{data: true}"
+  echo "firing /$topic (TRANSIENT_LOCAL, waiting for $N subscribers)"
+  # The second publish is a small operator-path safety margin. Reliability and
+  # transient history make the old five-message discovery workaround unnecessary.
+  ros2 topic pub -w "$N" --times 2 -r 2 --keep-alive 1 \
+    --qos-depth 1 --qos-reliability reliable --qos-durability transient_local \
+    "/$topic" std_msgs/msg/Bool "{data: true}"
 }
 
 _launch_up() {

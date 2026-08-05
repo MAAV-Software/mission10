@@ -4,9 +4,9 @@ The browser sends one POST for each utterance. Push-to-talk shows when the speec
 stops, because the operator releases the button. Thus there is no stream session,
 and the server keeps no state between two requests.
 
-The path from an intent to a gate is direct: transcribe, recognize, publish. No
-code between them decides if the command is legal. The mission nodes control
-their own state.
+The path from an intent to a gate is direct: transcribe, recognize, check DDS
+delivery readiness, publish. The mission nodes still decide if the command is
+legal in their current state.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ DEFAULT_MODELS_DIR = Path(
 )
 DEFAULT_RESULTS_DIR = Path(os.environ.get("JARVIS_RESULTS_DIR", "/tmp/maav_results"))
 DEFAULT_THRESHOLD = 0.5
+DEFAULT_EXPECTED_FLEET_SIZE = int(os.environ.get("JARVIS_EXPECTED_FLEET_SIZE", "1"))
+FLEET_NOT_READY_RESPONSE = "FLEET NOT READY."
 
 
 def static_dir() -> Path:
@@ -99,14 +101,35 @@ def create_app(engine, voice, gates, results_dir: Path, threshold: float) -> Fla
         heard = engine.transcribe(pcm)
         result = grammar.recognize(heard.text, heard.word_confidences, threshold)
         intent_name, cause = describe(result.outcome)
+        topic = None
+        subscriber_count = None
+        expected_subscriber_count = None
+        spoken_response = result.response
 
         # Only this statement decides if the webapp publishes. It has one branch
         # for each outcome. If a new outcome appears later, `accepted` stays
         # unbound and the request fails. The webapp does not publish by accident.
         match result.outcome:
             case grammar.Accepted(intent):
-                gates.publish(intent)
-                accepted = True
+                topic = intent.topic
+                subscriber_count = gates.subscriber_count(intent)
+                expected_subscriber_count = gates.expected_fleet_size
+                gates.logger.info(
+                    f"delivery check {intent.topic}: subscribers="
+                    f"{subscriber_count}/{expected_subscriber_count}"
+                )
+                if subscriber_count < expected_subscriber_count:
+                    gates.logger.error(
+                        f"refusing {intent.name} -> {intent.topic}: only "
+                        f"{subscriber_count}/{expected_subscriber_count} "
+                        "expected subscribers are matched"
+                    )
+                    accepted = False
+                    cause = "insufficient_subscribers"
+                    spoken_response = FLEET_NOT_READY_RESPONSE
+                else:
+                    gates.publish(intent)
+                    accepted = True
             case grammar.Rejected():
                 gates.logger.info(
                     f"rejected ({cause}): {result.transcript!r} "
@@ -120,8 +143,11 @@ def create_app(engine, voice, gates, results_dir: Path, threshold: float) -> Fla
             accepted=accepted,
             reason=cause,
             confidence=result.confidence,
-            response=result.response,
-            audio=base64.b64encode(voice.say(result.response)).decode("ascii"),
+            response=spoken_response,
+            audio=base64.b64encode(voice.say(spoken_response)).decode("ascii"),
+            topic=topic,
+            subscriber_count=subscriber_count,
+            expected_subscriber_count=expected_subscriber_count,
         )
 
     @app.get("/result")
@@ -147,6 +173,12 @@ def main() -> None:
     parser.add_argument("--piper-voice", type=Path, default=None)
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    parser.add_argument(
+        "--expected-fleet-size",
+        type=int,
+        default=DEFAULT_EXPECTED_FLEET_SIZE,
+        help="minimum matched gate subscribers required before publishing",
+    )
     # A browser gives access to the microphone only in a secure context. Thus
     # these two options are necessary in the field. The package README gives the
     # mkcert procedure.
@@ -159,7 +191,7 @@ def main() -> None:
 
     engine = VoskEngine(vosk_model, grammar.VOCABULARY)
     voice = PiperVoice(piper_voice)
-    gates = GatePublisher()
+    gates = GatePublisher(args.expected_fleet_size)
     app = create_app(engine, voice, gates, args.results_dir, args.threshold)
 
     ssl_context = (str(args.cert), str(args.key)) if args.cert and args.key else None

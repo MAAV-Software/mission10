@@ -41,6 +41,7 @@ from vision_msgs.msg import Detection2DArray
 
 from px4_msgs.msg import DistanceSensor, VehicleAttitude, VehicleLocalPosition
 from px4_offboard.controller import ACTIVE, OffboardController
+from px4_offboard.gate_qos import MISSION_GATE_QOS
 
 from mission_engine.core.anchor import (
     AnchorConfig,
@@ -195,8 +196,10 @@ class EngineNode(OffboardController):
             self._dist_cb,
             self.sensor_qos,
         )
-        self.create_subscription(Bool, "begin_survey", self._begin_cb, 10)
-        self.create_subscription(Bool, "begin_orbit", self._begin_cb, 10)
+        self.create_subscription(
+            Bool, "begin_survey", self._begin_cb, MISSION_GATE_QOS
+        )
+        self.create_subscription(Bool, "begin_orbit", self._begin_cb, MISSION_GATE_QOS)
 
         self.get_logger().info(
             f"mission_engine rim up: detections={self.detections_topic} "

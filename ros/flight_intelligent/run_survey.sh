@@ -6,10 +6,10 @@
 #
 #   ./run_survey.sh                    # start node, waits for /start_mission
 # then, from another shell on the network:
-#   ros2 topic pub -1 /start_mission std_msgs/msg/Bool '{data: true}'  # arm + climb, hold
-#   ros2 topic pub -1 /begin_survey  std_msgs/msg/Bool '{data: true}'  # fly the schedule
-#   ros2 topic pub -1 /end_mission   std_msgs/msg/Bool '{data: true}'  # abandon rest, home + land
-#   ros2 topic pub -1 /abort_mission std_msgs/msg/Bool '{data: true}'  # AUTO.LAND in place, now
+#   ros2 topic pub -1 --qos-depth 1 --qos-reliability reliable --qos-durability transient_local /start_mission std_msgs/msg/Bool '{data: true}'  # arm + climb, hold
+#   ros2 topic pub -1 --qos-depth 1 --qos-reliability reliable --qos-durability transient_local /begin_survey  std_msgs/msg/Bool '{data: true}'  # fly the schedule
+#   ros2 topic pub -1 --qos-depth 1 --qos-reliability reliable --qos-durability transient_local /end_mission   std_msgs/msg/Bool '{data: true}'  # abandon rest, home + land
+#   ros2 topic pub -1 --qos-depth 1 --qos-reliability reliable --qos-durability transient_local /abort_mission std_msgs/msg/Bool '{data: true}'  # AUTO.LAND in place, now
 #
 # Env: CONFIG (parameter file, default config/survey_mair_real.yaml),
 #      NODE (node name, default survey_mission_0)

@@ -33,6 +33,7 @@ from px4_msgs.msg import (
     VehicleCommandAck,
     VehicleStatus,
 )
+from px4_offboard.gate_qos import MISSION_GATE_QOS
 
 
 WAIT_LINK = "wait_link"
@@ -116,9 +117,13 @@ class PropIdleDummyMission(Node):
                 self._ack_cb,
                 sensor_qos,
             )
-        self.create_subscription(Bool, "start_mission", self._start_cb, 10)
-        self.create_subscription(Bool, "end_mission", self._end_cb, 10)
-        self.create_subscription(Bool, "abort_mission", self._abort_cb, 10)
+        self.create_subscription(
+            Bool, "start_mission", self._start_cb, MISSION_GATE_QOS
+        )
+        self.create_subscription(Bool, "end_mission", self._end_cb, MISSION_GATE_QOS)
+        self.create_subscription(
+            Bool, "abort_mission", self._abort_cb, MISSION_GATE_QOS
+        )
 
         self.status = None
         self.last_status_us = 0

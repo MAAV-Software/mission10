@@ -12,7 +12,8 @@ AUTO.RTL returns each drone to its own spawn.
 
 px4_dir (or PX4_DIR) must point at the PX4 fork checkout. Fire the mission gates
 from another terminal for a simultaneous commanded start (scripts/sitl.sh
-takeoff/orbit, or `ros2 pub -1 -w N` on /start_mission and /begin_orbit), or set
+takeoff/orbit, or `ros2 topic pub -1 --qos-depth 1 --qos-reliability reliable
+--qos-durability transient_local` on /start_mission and /begin_orbit), or set
 wait_for_start:=false to auto-start once each drone is armed + OFFBOARD.
 """
 from __future__ import annotations

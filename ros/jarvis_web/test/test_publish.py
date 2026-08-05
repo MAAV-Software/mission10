@@ -16,6 +16,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from std_msgs.msg import Bool
+    from px4_offboard.gate_qos import MISSION_GATE_QOS
 
     HAVE_ROS = True
 except ImportError:  # a machine with no ROS: the pure tests still run
@@ -35,19 +36,13 @@ class TestGatePublisher(unittest.TestCase):
         # GatePublisher calls rclpy.init(). The listener then uses the same
         # default context.
         cls.gates = GatePublisher()
-        cls.listener = Node("jarvis_web_test_listener")
+        cls.listener = None
         cls.received = {intent.topic: [] for intent in INTENTS}
-        for intent in INTENTS:
-            cls.listener.create_subscription(
-                Bool,
-                intent.topic,
-                lambda msg, topic=intent.topic: cls.received[topic].append(msg.data),
-                10,
-            )
 
     @classmethod
     def tearDownClass(cls):
-        cls.listener.destroy_node()
+        if cls.listener is not None:
+            cls.listener.destroy_node()
         cls.gates.shutdown()
 
     def wait_until(self, done, timeout_s):
@@ -58,15 +53,26 @@ class TestGatePublisher(unittest.TestCase):
             rclpy.spin_once(self.listener, timeout_sec=SPIN_S)
         return done()
 
-    def test_one_publish_reaches_a_subscriber_on_each_topic(self):
+    def test_a_late_joiner_receives_the_last_gate_on_each_topic(self):
+        # Publish before the subscriber exists. The long-lived GatePublisher
+        # retains each sample for a later TRANSIENT_LOCAL subscription.
+        for intent in INTENTS:
+            self.gates.publish(intent)
+
+        self.__class__.listener = Node("jarvis_web_test_late_listener")
+        for intent in INTENTS:
+            self.listener.create_subscription(
+                Bool,
+                intent.topic,
+                lambda msg, topic=intent.topic: self.received[topic].append(msg.data),
+                MISSION_GATE_QOS,
+            )
+
         matched = self.wait_until(
             lambda: all(self.gates.subscriber_count(i) > 0 for i in INTENTS),
             DISCOVERY_TIMEOUT_S,
         )
         self.assertTrue(matched, "DDS did not match the publishers to the listener")
-
-        for intent in INTENTS:
-            self.gates.publish(intent)
 
         self.wait_until(
             lambda: all(self.received[i.topic] for i in INTENTS), DELIVERY_TIMEOUT_S
@@ -74,8 +80,7 @@ class TestGatePublisher(unittest.TestCase):
 
         for intent in INTENTS:
             with self.subTest(intent=intent.name):
-                # Exactly one message, and its value is True. This holds the claim
-                # in node.py that a burst is unnecessary.
+                # Exactly one retained message, and its value is True.
                 self.assertEqual(self.received[intent.topic], [True])
 
 

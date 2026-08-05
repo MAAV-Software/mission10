@@ -38,6 +38,7 @@ from flight_lib import (
     schedule_setpoint,
 )
 from px4_offboard.controller import OffboardController, wrap_pi
+from px4_offboard.gate_qos import MISSION_GATE_QOS
 
 
 def enu_to_ned_setpoint(position_enu, yaw_enu):
@@ -140,8 +141,8 @@ class SurveyMission(OffboardController):
         self._land_settle_us = 0
         self._land_requested = False
         self._landing_logged = False
-        self.create_subscription(Bool, "begin_survey", self._gate_cb, 10)
-        self.create_subscription(Bool, "begin_orbit", self._gate_cb, 10)
+        self.create_subscription(Bool, "begin_survey", self._gate_cb, MISSION_GATE_QOS)
+        self.create_subscription(Bool, "begin_orbit", self._gate_cb, MISSION_GATE_QOS)
 
     def on_link_acquired(self):
         if not bool(self.get_parameter("set_global_origin_on_link").value):
