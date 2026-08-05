@@ -1,62 +1,159 @@
-# Wi-Fi proof of concept
+# Fleet WiFi
 
-## Purpose
+The qualifier fleet uses one field SSID on the onboard `wlan0` radio. One
+drone has the `master` role and hosts the access point. Every other drone has
+the `client` role and joins it. The role comes from `/etc/maav/fleet-role`.
 
-This test connects drone1 to an access point on drone2.
+The network uses NetworkManager AP mode. NetworkManager also owns the client
+profiles and their priority. This avoids a handoff between NetworkManager,
+`hostapd`, and `wpa_supplicant`. A separate `dnsmasq` process gives addresses
+to operator devices. It does not provide DNS, a default route, forwarding, or
+NAT.
 
-Drone2 uses its onboard Wi-Fi interface for the access point. Its USB Wi-Fi
-adapter stays connected to MWireless.
+The old `wifi_poc` script and `maav-wifi-poc.service` are replaced by the image
+overlay and provisioning files in `px4_ros_build`.
 
-Drone1 uses its onboard Wi-Fi interface as a station. Drone1 has the static
-address `10.77.0.11`.
+## Address and role model
 
-## Files
+| Host | Fleet address on `wlan0` | Initial role | PX4 namespace |
+| --- | --- | --- | --- |
+| `drone0` | `10.77.0.1/24` | `master` | `px4_0` |
+| `drone1` | `10.77.0.11/24` | `client` | `px4_1` |
+| `drone2` | `10.77.0.12/24` | `client` | `px4_2` |
+| `drone3` | `10.77.0.13/24` | `client` | `px4_3` |
 
-Copy these files to each drone:
+The address belongs to the drone. A role change does not change any address.
+The master can therefore host the access point from `.11`, `.12`, or `.13`.
+The CycloneDDS peer list remains valid after a role change.
 
-```text
-/home/maav/wifi_poc
-/etc/systemd/system/maav-wifi-poc.service
-```
+The field SSID, field PSK, channel, DHCP range, operator hotspot, and static
+operator-device leases come from `px4_ros_build/provision/inventory.yml`.
+Drone addresses and roles are in the `qualifier_fleet` host entries. The drones
+use static addresses. They do not use the DHCP range or static DHCP leases.
 
-The script contains all settings for this test. The test does not use a
-separate configuration file.
+## Boot behavior
 
-## Start the test
+`maav-fleet-network.service` reads these provisioned files:
 
-1. Start the service on drone2.
+- `/etc/maav/fleet-role` contains `master` or `client`.
+- `/etc/maav/fleet-network.conf` contains the common WiFi settings and the
+  drone's fixed fleet address.
+- `/etc/maav/dnsmasq-fleet.conf` contains the operator-device DHCP settings.
 
-   ```bash
-   sudo systemctl start maav-wifi-poc.service
-   ```
+The master activates `maav-field-ap` on `wlan0` with its own fleet address.
+`maav-fleet-dhcp.service` then starts `dnsmasq` on that interface.
 
-2. Start the service on drone1.
+A client creates `maav-field-client` with its own fleet address. NetworkManager
+keeps retrying the profile if no known SSID is in range. This condition does not
+fail the fleet network unit. ROS can start and use loopback DDS while the radio
+is disconnected.
 
-   ```bash
-   sudo systemctl start maav-wifi-poc.service
-   ```
+Client autoconnect priority is:
 
-3. Connect from drone2 to drone1.
+| Priority | Network | Address source |
+| --- | --- | --- |
+| 300 | `MWireless` | DHCP |
+| 200 | Operator hotspot from inventory | DHCP |
+| 100 | Fleet field SSID | Static `fleet_ip` |
 
-   ```bash
-   ssh drone1
-   ```
+NetworkManager selects the highest available priority when it needs a
+connection. It does not leave an active field connection when a higher-priority
+SSID later appears.
 
-## Show the status
+If the master has a USB WiFi adapter at service start, the service creates
+adapter-specific MWireless and hotspot profiles. The onboard radio remains the
+field access point. The USB adapter is optional and is not part of the flight
+configuration. Restart `maav-fleet-network.service` after inserting an adapter
+that was not present at boot.
 
-Run this command on a drone:
+## Provisioning
+
+The image includes the controller, systemd units, and `dnsmasq`. `flash.nu`
+writes the durable development WiFi source at
+`/usr/lib/netplan/50-maav-wifi.yaml`. For a qualifier host, it also writes the
+role, address, and DHCP files from inventory.
+
+Apply or update the same configuration on reachable drones with:
 
 ```bash
-sudo /home/maav/wifi_poc status
+cd px4_ros_build/provision
+ansible-playbook playbooks/fleet-network.yml -K
 ```
 
-## Stop the test
+The playbook installs the files, applies netplan, and restarts the role service.
+Use `--limit` when only selected drones must change.
 
-Run this command on a drone:
+## Field operations
+
+### Switch to flight mode
+
+Turn off the operator hotspot or move it out of range. No drone command is
+required. A disconnected client joins the field SSID when the master access
+point becomes available.
+
+If a client is already connected to the operator hotspot, turn the hotspot off.
+NetworkManager then selects the field profile.
+
+### Return to development mode
+
+Turn on MWireless or the operator hotspot. NetworkManager does not roam away
+from an active field connection only because a higher-priority SSID appears.
+Run the reconnect nudge from the operator laptop:
 
 ```bash
-sudo systemctl stop maav-wifi-poc.service
+cd px4_ros_build/provision
+ansible-playbook playbooks/wifi-dev-reconnect.yml -K
 ```
 
-A reboot returns drone1 to MWireless. The proof-of-concept service is not
-enabled at startup.
+The playbook schedules the reconnect and returns before SSH can move to the new
+network. Each client then asks NetworkManager to select the best visible
+profile. The master continues to host the field SSID on `wlan0`; its optional
+USB adapter selects the development network.
+
+### Change the master
+
+Change `fleet_role` to `client` for the old master and to `master` for the new
+master in `px4_ros_build/provision/inventory.yml`. Apply the client flag to the
+old master first. Then apply the master flag to the new master:
+
+```bash
+cd px4_ros_build/provision
+ansible-playbook playbooks/fleet-network.yml --limit old-master -K
+ansible-playbook playbooks/fleet-network.yml --limit new-master -K
+```
+
+Do this while the drones also have a development or wired management path. This
+order stops the old AP before the new AP starts. Restart
+`maav-fleet-network.service` on the old master first and the new master second if
+the files are changed by hand. There must be one active master. The `fleet_ip`,
+PX4 namespace, and CycloneDDS peer entries do not change.
+
+## Checks
+
+Check one provisioned drone with:
+
+```bash
+sudo /usr/local/sbin/maav-fleet-network check
+systemctl status maav-fleet-network.service maav-fleet-dhcp.service
+nmcli -f NAME,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY connection show
+ip -4 address show dev wlan0
+```
+
+Run the controller test without WiFi hardware with:
+
+```bash
+mission10/network/test_fleet_network.sh
+```
+
+Hardware tests at M-Air must confirm:
+
+- the CM5 onboard radio supports the selected NetworkManager AP settings;
+- all four drones associate and retain their inventory addresses after boot;
+- a phone and laptop receive dynamic or MAC-keyed leases;
+- MWireless, hotspot, and field fallback order works after each reconnect;
+- a client with no known SSID keeps retrying while ROS stays healthy;
+- the master's USB adapter joins each development network without changing the
+  onboard AP;
+- moving the master role between two drones stops the old AP before the new AP
+  starts and does not change either address;
+- fleet DDS discovery and operator access work at the required field range.
