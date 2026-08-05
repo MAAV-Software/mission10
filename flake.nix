@@ -85,6 +85,7 @@
               (with pkgs.rosPackages.jazzy; buildEnv {
                 paths = [
                   ros-core # rclpy, ros2cli, ament, ...
+                  rmw-cyclonedds-cpp # drone image RMW; needed to talk to the fleet
                   nav-msgs # gz truth odometry -> sim_truth_ev
                   vision-msgs # detection wire contract
                   ros-gz-sim # Gazebo (gz) integration
