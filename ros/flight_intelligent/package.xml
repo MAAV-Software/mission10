@@ -13,6 +13,7 @@
   <depend>px4_offboard</depend>
   <depend>flight_lib</depend>
   <depend>flight_interfaces</depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

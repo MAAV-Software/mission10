@@ -1,4 +1,4 @@
-# Single-drone phased-orbit for the REAL drone at M-Air (no sim).
+# Four-drone phased-orbit parameters for real vehicles at M-Air (no sim).
 #
 # Same node and trajectory as the SITL config (phased_orbits_mair.yaml) — that is
 # the sim2real point: PX4 consumes the identical 20 Hz OFFBOARD setpoint stream
@@ -9,7 +9,7 @@
 #                                  send SET_GPS_GLOBAL_ORIGIN (it can shove the
 #                                  local frame mid-air). (SITL needed it because
 #                                  the EV-only estimate had no global anchor.)
-#   - no peer namespaces        -> single drone, no deconfliction traffic
+#   - peer namespaces and identity come from bringup/config/fleet.yaml
 # Flight controller side (NOT set here — set on the Pixhawk): a GPS airframe (not
 # the EV airframe 4023), real RC/datalink/battery failsafes, and a geofence
 # (cap alt < ~12 m + tight radius) as the net backstop.
@@ -26,15 +26,15 @@
     takeoff_acceptance_m: 0.5
     takeoff_timeout_s: 40.0
     status_stale_timeout_s: 5.0
-    drone_count: 1
+    drone_count: 4
     orbit_center_e_m: 0.0
     orbit_center_n_m: 0.0      # orbit the takeoff point (EKF local origin)
     orbit_radius_m: 4.0
     orbit_speed_mps: 2.0
     phase_step_deg: 90.0
     phase0_deg: -90.0
-    orbit_mod_amp: [0.0]
-    orbit_mod_phase_deg: [0.0]
+    orbit_mod_amp: [0.0, 0.0, 0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0, 0.0, 0.0]
     insertion_spin_deg: 235.0
     to_center_time_s: 3.0
     spiral_time_s: 10.0
@@ -56,7 +56,7 @@
     land_xy_acceptance_m: 0.35
     land_vxy_acceptance_mps: 0.20
     land_settle_time_s: 1.0
-    orca_protected_radius_m: 1.25  # dormant in this single-drone profile
+    orca_protected_radius_m: 1.25
     orca_response_time_s: 0.6
     orca_horizon_s: 5.0
     orca_max_speed_mps: 3.0
