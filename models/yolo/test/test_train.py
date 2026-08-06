@@ -15,6 +15,7 @@ class TestTrainingConfig(unittest.TestCase):
         self.assertEqual(args["imgsz"], 640)
         self.assertEqual(args["batch"], 16)
         self.assertEqual(args["epochs"], 50)
+        self.assertEqual(args["cache"], "ram")
         self.assertEqual(args["optimizer"], "AdamW")
         self.assertEqual(args["seed"], 10)
         self.assertTrue(args["deterministic"])
@@ -31,6 +32,12 @@ class TestTrainingConfig(unittest.TestCase):
         self.assertEqual(args["patience"], 0)
         self.assertEqual(args["warmup_epochs"], 0.0)
         self.assertEqual(args["close_mosaic"], 0)
+
+    def test_cache_can_be_disabled_for_memory_limited_pods(self):
+        args = training_args(
+            Path("data.yaml"), Path("runs"), "streamed", 50, 16, False
+        )
+        self.assertFalse(args["cache"])
 
     def test_archive_source_marker_supplies_commit(self):
         root = Path(tempfile.mkdtemp())

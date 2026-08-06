@@ -34,6 +34,7 @@ def training_args(
     name: str,
     epochs: int = 50,
     batch: int = 16,
+    cache: str | bool = "ram",
 ) -> dict:
     """Explicit pilot settings; no behavior-changing Ultralytics defaults."""
     return {
@@ -47,7 +48,7 @@ def training_args(
         "batch": batch,
         "device": 0,
         "workers": 8,
-        "cache": "ram",
+        "cache": cache,
         "amp": True,
         "optimizer": "AdamW",
         "lr0": 0.001,
@@ -116,6 +117,7 @@ def run(
     name: str,
     epochs: int,
     batch: int,
+    cache: str | bool,
     qualitative: Path | None,
 ) -> Path:
     if not data.is_file():
@@ -136,7 +138,7 @@ def run(
     from ultralytics import YOLO
 
     repo = Path(__file__).resolve().parents[3]
-    args = training_args(data, project, name, epochs, batch)
+    args = training_args(data, project, name, epochs, batch, cache)
     lock = {
         "schema": RUN_SCHEMA,
         "status": "started",
@@ -221,6 +223,12 @@ def main(argv=None) -> None:
     parser.add_argument("--name", required=True)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument(
+        "--cache",
+        choices=("ram", "disk", "none"),
+        default="ram",
+        help="image cache policy; 'none' streams from the prepared dataset",
+    )
     parser.add_argument("--qualitative", type=Path)
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.batch < 1:
@@ -232,6 +240,7 @@ def main(argv=None) -> None:
         args.name,
         args.epochs,
         args.batch,
+        False if args.cache == "none" else args.cache,
         args.qualitative,
     )
     print(f"completed {run_dir}")

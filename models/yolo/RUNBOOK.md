@@ -254,8 +254,16 @@ full job from preflight output:
     --data /workspace/dataset/production300-v1/prepared/dataset.yaml \
     --model /workspace/inputs/pilot40/best.pt \
     --project /workspace/runs/mission10-yolo \
-    --name production300-yolo11m-640-pilotwarm --epochs 50 --batch 16
+    --name production300-yolo11m-640-pilotwarm --epochs 50 --batch 16 \
+    --cache none
 ```
+
+Do not trust `free` inside a RunPod container for its assigned RAM limit: it
+reports the host. Read `/sys/fs/cgroup/memory/memory.limit_in_bytes` and
+`memory.usage_in_bytes` on these cgroup-v1 pods. Production300's decoded RAM
+cache plus filesystem cache reached 61.97 GB against a 62.00 GB (57.75 GiB)
+limit during preflight. Keep RAM caching for the one-epoch diagnostic only;
+stream the full job with `--cache none` to retain OOM headroom.
 
 After `best.pt` is frozen, select the confidence threshold on validation with
 F2 and a 90% precision floor, then apply it unchanged to test:
