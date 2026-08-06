@@ -81,10 +81,10 @@ view. Per-frame training jitter coalesces near-duplicate rows or columns made
 by edge clamping, so one-pixel-shifted copies are not emitted.
 Ultralytics recommends roughly
 [0–10% background images](https://github.com/ultralytics/yolov5/issues/9908)
-to reduce false positives; the pure 300-scene projection currently yields
-12,075 tiles, including 912 empty tiles (7.6%), 12,092 boxes, and 694
-poisoned boundary tiles skipped before measured grass occlusion. Frames that
-become empty after the exact occlusion pass remain useful hard negatives.
+to reduce false positives. The measured 300-scene production render yields
+12,033 tiles, including 912 empty tiles (7.6%), 12,046 boxes, and 724 poisoned
+boundary tiles skipped after exact grass occlusion. Frames that become empty
+after the exact occlusion pass remain useful hard negatives.
 
 `train/tiles.json` retains the source scene and frame for every tile. Split
 training and validation data by whole scene, never by individual tile, so
@@ -106,6 +106,14 @@ files, rejects leakage and stale/unindexed products, and writes `dataset.yaml`.
 `train/run.py` owns the explicit YOLO11m/640 training settings and records the
 source-weight, dataset, package, CUDA, GPU, and git identities in
 `run.lock.json`. Ultralytics is pinned in `train/requirements.txt`.
+
+The production warm start assigns scenes 0–39 to training because the pilot
+checkpoint has already learned from that shard. Its committed 240/30/30 split
+draws validation and test only from scenes 40–299. After training,
+`train/evaluate.py` chooses a confidence threshold on validation by maximizing
+F2 subject to 90% precision, then applies it unchanged to test. The report
+includes empty-tile false-positive rate and recall by altitude, projected box
+size, surface, grass profile, and filament-color family.
 
 Mine color is bounded material-domain randomization, not arbitrary RGB. Each
 scene draws one filament batch from a lime / green / muddy-olive palette

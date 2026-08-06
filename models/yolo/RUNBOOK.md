@@ -54,6 +54,56 @@ non-redistributable**: never push them to a public or shared registry, never
 bake them into anything committed, never attach to a release. Build/keep them
 local to the pod or in private storage only.
 
+### DFC 3.34 fresh-pod gotchas
+
+DFC 3.34 and Model Zoo 2.19 need Python 3.10. On the minimal RunPod CUDA image,
+the following details are easy to miss:
+
+- Install the proprietary DFC wheel before Model Zoo. Model Zoo's `setup.py`
+  probes the installed `hailo-dataflow-compiler` metadata, so pip build
+  isolation fails with a misleading "DFC package was not found" error.
+- Ubuntu 22.04's venv starts with setuptools 59, which cannot perform the
+  editable PEP 660 build used by current pip. Install `setuptools==75.3.2`,
+  then install Model Zoo with `pip install --no-build-isolation -e .`.
+- The DFC wheel installs plain TensorFlow 2.18. Borrowing CUDA libraries from a
+  pod's system Torch environment can make TensorFlow list the GPU but fail its
+  first convolution with `No DNN in stream executor`. Install
+  `tensorflow[and-cuda]==2.18.0` inside the DFC venv and expose that venv's
+  `site-packages/nvidia/*/lib` directories through `LD_LIBRARY_PATH`.
+- Hailo's GPU auto-selector accepts only a GPU using at most 5% of its memory.
+  A concurrent Blender render therefore makes DFC silently set
+  `CUDA_VISIBLE_DEVICES=99` and fall back to CPU. Serialize render and DFC
+  optimization, and set `CUDA_VISIBLE_DEVICES=0` explicitly for DFC commands.
+- For a custom class count, `hailomz optimize --classes N` writes the changed
+  NMS configuration into the optimized HAR. Do not pass that HAR back through
+  `hailomz compile`: Model Zoo's compile path reloads its stock ALLS script,
+  while its `--classes` handling runs only when optimization runs again. Use
+  `hailo compiler <optimized.har>` directly so compilation retains the HAR's
+  embedded ALLS and NMS JSON. Extract and archive both files so the class count
+  can be audited without reverse-engineering the HEF.
+- Do not mistake the compiler's quiet partition search for a hang. The
+  one-class YOLO11m pilot took 244 iterations and 1 h 5 min 24 s to map three
+  contexts at the default compiler optimization level on a 48-core EPYC pod;
+  the native worker used only about two cores. Watch its CPU time and wait for
+  `Partition to contexts finished successfully` rather than restarting it.
+- `hailo profiler` can report static model details from a compiled HAR and HEF
+  without HailoRT, but throughput, latency, bandwidth, and MAC utilization are
+  `N/A` without runtime data. Hailo's published `compiled_runtime_data` report
+  includes measurements that a compiler-only pod cannot reproduce. Archive
+  the static report on the pod, then collect runtime data on a Hailo-8 device
+  for the performance comparison.
+
+Fail the bootstrap unless this probe creates a real TensorFlow GPU device and
+imports Hailo after a GPU convolution:
+
+```sh
+DFC_SITE=/opt/venvs/hailo-dfc-3.34-py310/lib/python3.10/site-packages/nvidia
+export LD_LIBRARY_PATH="$DFC_SITE/cublas/lib:$DFC_SITE/cuda_cupti/lib:$DFC_SITE/cuda_nvcc/lib:$DFC_SITE/cuda_nvrtc/lib:$DFC_SITE/cuda_runtime/lib:$DFC_SITE/cudnn/lib:$DFC_SITE/cufft/lib:$DFC_SITE/curand/lib:$DFC_SITE/cusolver/lib:$DFC_SITE/cusparse/lib:$DFC_SITE/nccl/lib:$DFC_SITE/nvjitlink/lib"
+export CUDA_VISIBLE_DEVICES=0
+/opt/venvs/hailo-dfc-3.34-py310/bin/python -c \
+    'import tensorflow as tf; x=tf.ones((1,8,8,3)); k=tf.ones((3,3,3,4)); tf.nn.conv2d(x,k,1,"SAME"); assert tf.config.list_physical_devices("GPU"); import hailo_sdk_client; print("DFC GPU OK")'
+```
+
 ## Prime Intellect CLI — first run
 
 ```sh
@@ -167,6 +217,60 @@ A4000 default; if and only if the preflight CUDA-OOMs, rerun both jobs at batch
     --name pilot40-yolo11m-640 --epochs 50 --batch 16 \
     --qualitative /workspace/dataset/smoke-animation-a4000-7m-jitterfix/train/images
 ```
+
+### Production300 warm-start run
+
+The production split is 240/30/30 scenes. Because the source checkpoint was
+trained on the pilot, scenes 0–39 are pinned to training and both holdouts draw
+only from scenes 40–299. The committed split balances each holdout to all five
+primary surfaces, one dense-grass scene, three lime scenes, seven mixed-surface
+scenes, and nearly equal tile/box/empty counts:
+
+```sh
+cd /workspace/src/mission10/models/yolo
+/opt/venvs/mission10-yolo/bin/python train/prepare.py \
+    --raw /workspace/dataset/production300-v1/raw \
+    --out /workspace/dataset/production300-v1/prepared \
+    --split train/production300-split.json
+
+PYTHONPATH=. /opt/venvs/mission10-yolo/bin/python export/calibrate.py \
+    --prepared /workspace/dataset/production300-v1/prepared \
+    --raw /workspace/dataset/production300-v1/raw \
+    --out /workspace/dataset/production300-v1/calibration-1024 \
+    --count 1024
+```
+
+Run the preflight and full job from the same pilot checkpoint. Never seed the
+full job from preflight output:
+
+```sh
+/opt/venvs/mission10-yolo/bin/python train/run.py \
+    --data /workspace/dataset/production300-v1/prepared/dataset.yaml \
+    --model /workspace/inputs/pilot40/best.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name production300-preflight --epochs 1 --batch 16
+
+/opt/venvs/mission10-yolo/bin/python train/run.py \
+    --data /workspace/dataset/production300-v1/prepared/dataset.yaml \
+    --model /workspace/inputs/pilot40/best.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name production300-yolo11m-640-pilotwarm --epochs 50 --batch 16
+```
+
+After `best.pt` is frozen, select the confidence threshold on validation with
+F2 and a 90% precision floor, then apply it unchanged to test:
+
+```sh
+/opt/venvs/mission10-yolo/bin/python train/evaluate.py \
+    --weights /workspace/runs/mission10-yolo/production300-yolo11m-640-pilotwarm/weights/best.pt \
+    --prepared /workspace/dataset/production300-v1/prepared \
+    --raw /workspace/dataset/production300-v1/raw \
+    --out /workspace/runs/mission10-yolo/production300-yolo11m-640-pilotwarm/operational-evaluation \
+    --beta 2 --precision-floor 0.90 --batch 16
+```
+
+Do not compile the final HEF unless `evaluation.json` passes its numeric gates
+and the training/validation curves show no sustained validation degradation.
 
 ## Fail-fast gates (no `|| true` anywhere)
 
