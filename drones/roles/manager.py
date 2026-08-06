@@ -25,6 +25,8 @@ import iarc_pathfinder
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
+camera_specs_path = Path(__file__).parent.parent.parent / "constants/camera_specs.txt"
+base_altitude_path = Path(__file__).parent.parent.parent / "constants/altitude.txt"
 weights_path = Path(__file__).parent.parent / "1-2-26.onnx" # Also this model weight sucks ass
 
 class ManagerDrone:
@@ -42,14 +44,13 @@ class ManagerDrone:
         self.exp_drones = {}
         self.drone_last_seen = {}
         self.finished_drones = 0
-        self.self_finished = False
+        self.self_finished = False # this flag is for indicating when the workers are done, and we can close the server connections, since we may still want them open for drones if the master drone finishes first for example
         self.bounds = []
-        self.shutdown_flag = False
+        self.shutdown_flag = False # this flag is for indicating when the ROS stuff finishes, so we don't need to keep taking pictures
         self.mission_status = "pre-mission"
         self.next_action = "scout"
         self.camera_mode = camera_mode
         self.timestamp_bounding_boxes = {}
-        self.image_take = False
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -59,7 +60,6 @@ class ManagerDrone:
 
         self.mine_data_lock = threading.Lock()
         self.mine_data_cv = threading.Condition()
-        self.camera_cv = threading.Condition()
 
         with open(bounds_path, "r") as f:
             for line in f:
@@ -70,14 +70,14 @@ class ManagerDrone:
         self.camera_VFOV = 0
         self.base_altitude = 0
 
-        with open(Path(__file__).parent.parent.parent / "constants/camera_specs.txt", "r") as f:
+        with open(camera_specs_path, "r") as f:
             for line in f:
                 line_contents = line.strip().split()
                 self.camera_HFOV= float(line_contents[0])
                 self.cammera_VFOV = float(line_contents[1])
                 break
         
-        with open(Path(__file__).parent.parent.parent / "constants/altitude.txt", "r") as f:
+        with open(base_altitude_path, "r") as f:
             for line in f:
                 line_contents = line.strip().split()
                 self.base_altitude = float(line_contents[0])
@@ -217,10 +217,15 @@ class ManagerDrone:
 
             with self.mine_data_cv:
                 # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
-                while self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0:
+                while (self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0):
                     print("Waiting for mission to start")
+                    print(self.mission_node)
+                    print(self.TMP_timestamp_queue.qsize())
                     self.mine_data_cv.wait()
                 print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
+            
+            if self.shutdown_flag:
+                return
 
             with self.mine_data_lock:
                 print("Acquired the lock in find_mines")
@@ -292,18 +297,16 @@ class ManagerDrone:
             # omit this, it blocks indefinitely, waiting for a connection.
             sock.settimeout(1)
 
-            while not self.shutdown_flag:
+            while not self.self_finished:
                 # Wait for a connection for 1s.  The socket library avoids consuming
                 # CPU while waiting for a connection.
                 try:
-                    print("Trying TCP stuff")
                     clientsocket, address = sock.accept()
                     print("SERVER")
                     print("  Accepted:", address)
                     print("  Local   :", clientsocket.getsockname())
                     print("  Remote  :", clientsocket.getpeername())
                 except socket.timeout:
-                    print("Here I am")
                     continue
                 print("Connection from", address[0])
 
@@ -350,7 +353,7 @@ class ManagerDrone:
             sock.settimeout(1)
 
             # Receive incoming UDP messages
-            while not self.shutdown_flag:
+            while not self.self_finished:
                 try:
                     message_bytes = sock.recv(4096)
                 except socket.timeout:
@@ -375,6 +378,8 @@ class ManagerDrone:
             self.handle_heartbeat(message_dict)
         elif message_dict["message_type"] == "run_drones":
             self.handle_run_drones()
+        elif message_dict["message_type"] == "finished":
+            self.handle_finished(message_dict)
         else:
             print("Message Unknown")
         
@@ -489,6 +494,7 @@ class ManagerDrone:
             sock.sendall(message.encode('utf-8'))
 
     def handle_finished(self, message_dict):
+        print("Handling finished message")
         drone_host = message_dict["drone_host"]
         drone_port = message_dict["drone_port"]
         drone_key = str(drone_host) + "_" + str(drone_port)
@@ -497,7 +503,7 @@ class ManagerDrone:
             self.finished_drones += 1
             print(self.finished_drones, len(self.exp_drones))
             if self.finished_drones == len(self.exp_drones):
-                self.shutdown_flag = True
+                self.self_finished = True
         else:
             print("Error: Received a 'finished' message from a finished worker")
             exit(1)
@@ -521,9 +527,14 @@ class ManagerDrone:
 
         tcp_thread.join()
         udp_thread.join()
-        # fake_gps_thread.join()
-        
 
         iarc_pathfinder.run_iarc_pathfinder(self.detected_mine_data)
+
+        print("Finished Pathfinding")
+
+        self.TMP_timestamp_queue.put(-1) # Putting a -1, lets the teimstamp queue know that we should be done
+
+        with self.mine_data_cv:
+            self.mine_data_cv.notify_all()
     
             
