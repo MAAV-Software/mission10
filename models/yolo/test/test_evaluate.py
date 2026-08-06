@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from train.evaluate import (
     Box,
@@ -7,11 +8,29 @@ from train.evaluate import (
     evaluate_records,
     iou,
     match_image,
+    _predict_paths,
     threshold_sweep,
 )
 
 
 class TestOperationalEvaluation(unittest.TestCase):
+    def test_prediction_paths_are_submitted_in_bounded_chunks(self):
+        class FakeModel:
+            def __init__(self):
+                self.calls = []
+
+            def predict(self, **kwargs):
+                self.calls.append(kwargs)
+                return kwargs["source"]
+
+        model = FakeModel()
+        paths = [Path(f"tile-{index}.png") for index in range(35)]
+        results = list(_predict_paths(model, paths, batch=16))
+
+        self.assertEqual([len(call["source"]) for call in model.calls], [16, 16, 3])
+        self.assertEqual(len(results), len(paths))
+        self.assertTrue(all(call["stream"] is False for call in model.calls))
+
     def test_iou_and_one_to_one_matching(self):
         ground_truth = [Box(0, 0, 10, 10)]
         predictions = [

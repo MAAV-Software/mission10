@@ -254,21 +254,28 @@ def _image_groups(manifest: dict, station: dict) -> tuple[tuple[str, str], ...]:
     )
 
 
+def _predict_paths(model, image_paths: Sequence[Path], batch: int):
+    """Predict explicit path chunks so Ultralytics cannot batch the whole list."""
+    for start in range(0, len(image_paths), batch):
+        chunk = image_paths[start : start + batch]
+        yield from model.predict(
+            source=[str(path) for path in chunk],
+            imgsz=IMAGE_PX,
+            conf=0.001,
+            iou=0.7,
+            max_det=100,
+            batch=batch,
+            device=0,
+            verbose=False,
+            stream=False,
+        )
+
+
 def _predict_split(model, prepared: Path, raw: Path, lock: dict, split: str, batch: int):
     entries = lock["entries"][split]
     manifests, stations = _scene_metadata(raw, (entry["scene"] for entry in entries))
     image_paths = [prepared / "images" / split / f"{entry['tile']}.png" for entry in entries]
-    results = model.predict(
-        source=[str(path) for path in image_paths],
-        imgsz=IMAGE_PX,
-        conf=0.001,
-        iou=0.7,
-        max_det=100,
-        batch=batch,
-        device=0,
-        verbose=False,
-        stream=True,
-    )
+    results = _predict_paths(model, image_paths, batch)
     records = []
     for entry, result in zip(entries, results, strict=True):
         tile = entry["tile"]

@@ -277,6 +277,13 @@ F2 and a 90% precision floor, then apply it unchanged to test:
     --beta 2 --precision-floor 0.90 --batch 16
 ```
 
+When inference sources are passed as an explicit Python list, Ultralytics
+8.4.115 can combine the entire list into one tensor even when `batch` is set.
+Production300's 1,196-image validation list then requested 29.2 GiB on a 20 GB
+A4500. `train/evaluate.py` therefore submits bounded path chunks itself. Keep
+that chunking if the evaluator is refactored; `stream=True` alone does not bound
+the input tensor for this source type.
+
 Do not compile the final HEF unless `evaluation.json` passes its numeric gates
 and the training/validation curves show no sustained validation degradation.
 
