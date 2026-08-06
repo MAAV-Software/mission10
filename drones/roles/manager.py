@@ -8,24 +8,24 @@ import queue
 import math
 import numpy as np
 from pyproj import Transformer, CRS
-from ultralytics import YOLOWorld
-
-# Dunno if these work
-# import cv2
+import cv2
 from picamera2 import Picamera2
 import os
+import matplotlib
+import onnxruntime as ort
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from roles.MissionNode import MissionNode
+import iarc_pathfinder
 
 # Temp inclusions
 # import random
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
-weights_path = Path(__file__).parent.parent / "1-2-26.pt"
+weights_path = Path(__file__).parent.parent / "1-2-26.onnx" # Also this model weight sucks ass
 
 class ManagerDrone:
     "Construct an instance of the main drone"
@@ -36,7 +36,7 @@ class ManagerDrone:
         self.host = host
         self.port = port
         self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
-        self.TMP_timestamp_queue = queue.Queue() # Replace instances of this with self.mission_node.timestamp_queue and delete afterwards
+        self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
         self.mission_node = None
         self.detected_mine_data = []
         self.exp_drones = {}
@@ -49,6 +49,7 @@ class ManagerDrone:
         self.next_action = "scout"
         self.camera_mode = camera_mode
         self.timestamp_bounding_boxes = {}
+        self.image_take = False
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -58,6 +59,7 @@ class ManagerDrone:
 
         self.mine_data_lock = threading.Lock()
         self.mine_data_cv = threading.Condition()
+        self.camera_cv = threading.Condition()
 
         with open(bounds_path, "r") as f:
             for line in f:
@@ -82,72 +84,6 @@ class ManagerDrone:
                 break
 
         self.run_drone()
-
-    def take_picture(self):
-        # print(cv2.getBuildInformation())
-
-        """
-        gst_pipeline = (
-            "nvarguscamerasrc sensor_id=0"
-            "video/x-raw(memory:NVMM), width=3280. height=2464, framerate=30/01 !"
-            "nvvidconv !"
-            "videoconvert ! "
-            "video/x-raw, format=BGR ! appsink"
-        )
-        """
-        
-        # Open a connection to the webcam (0 is the default camera)
-        # cap = cv2.VideoCapture(0)
-        # cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-        cam = Picamera2()
-        # cam.take_photo("test1.jpg")
-
-        config = cam.create_still_configuration()
-        cam.configure(config)
-
-        cam.start()
-        time.sleep(2)
-
-        cam.capture_file("image.jpg")
-
-        cam.stop()
-
-    def backup_camerea_func(self):
-        # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
-        
-        while not self.shutdown_flag:
-            # Run Camera picture, and then run the YOLO, and then place those detection values to that timestamp value?
-            image = None
-
-
-
-            img_height, img_width, channels = image.shape
-            image_timestamp = 0
-            with self.mine_data_lock:
-                image_timestamp = self.mission_node.latest_timestamp
-
-            # Run YOLO, get the bounding boxes and then just store that at the timestamp in like a map again
-            model_path = "./weights/blender-weights.pt"
-            model = YOLOWorld(model_path)
-
-            results = model.predict(image,conf=0.3)
-            bounding_boxes = results[0].boxes
-
-            self.timestamp_bounding_boxes[image_timestamp] = []
-
-            for box in bounding_boxes:
-                # Get the coordinates for each box
-                x_min, y_min, x_max, y_max = box.xyxy[0].tolist()
-                norm_x_min = x_min / img_width
-                norm_y_min = y_min / img_height
-                norm_x_max = x_max / img_width
-                norm_y_max = y_max / img_height 
-
-                self.timestamp_bounding_boxes[image_timestamp].append((norm_x_min, norm_y_min, norm_x_max, norm_y_max))
-
-            time.sleep(1) # have it take pictures at this interval, I guess try to do it one time a second I guess?
-
-        pass
 
     def rotate_coords(self, pt_latitude, pt_longitude):
 
@@ -193,13 +129,79 @@ class ManagerDrone:
         rand_rotated_latlon = convert_from_spcs(rand_rotated, self.from_spcs)
 
         return (rand_rotated_latlon[0], rand_rotated_latlon[1])
+    
+    def backup_camera_func(self):
+
+        with self.mine_data_cv:
+            # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
+            while self.mission_node is None:
+                print("Waiting for mission to start")
+                self.mine_data_cv.wait()
+
+        # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
+        cam = Picamera2()
+        config = cam.create_still_configuration()
+        cam.configure(config)
+        cam.start()
+
+        session = ort.InferenceSession(weights_path)
+        input_name = session.get_inputs()[0].name
+
+        num_pictures_taken = 0
+
+        while not self.shutdown_flag:
+            # Run Camera picture, and then run the YOLO, and then place those detection values to that timestamp value?
+            image = cam.capture_array()
+
+            img_height, img_width, channels = image.shape
+            image_timestamp = 0
+            with self.mine_data_lock:
+                image_timestamp = self.mission_node.latest_timestamp
+                self.TMP_timestamp_queue.put(image_timestamp)
+                num_pictures_taken += 1
+                if num_pictures_taken > 10:
+                    self.shutdown_flag = True
+
+            print(f"Image taken at timestamp {image_timestamp}!")
+
+            img = cv2.resize(image, (256, 256))
+            img = img.astype(np.float32) / 255.0
+            img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+            img = np.expand_dims(img, axis=0)   # CHW -> NCHW
+
+            outputs = session.run(
+                None,
+                {input_name: img}
+            )
+
+            pred = outputs[0]
+            pred = pred[0]
+            pred = pred.T
+
+            confidence_threshold = 0.3 # also need to calibrate this threshold
+
+            detections = []
+
+            # Going to have to do some more post-processing for these raw onnx output, but it's a start for sure
+            for x, y, w, h, conf in pred:
+                if conf > confidence_threshold:
+                    x_min = x - (w / 2)
+                    x_max = x + (w / 2)
+                    y_min = y - (h / 2)
+                    y_max = y + (h / 2)
+                    detections.append((x_min, x_max, y_min, y_max))
+
+            self.timestamp_bounding_boxes[image_timestamp] = detections
+
+            time.sleep(1) # have it take pictures at this interval, I guess try to do it one time a second I guess?
 
     def get_mine_loc_in_img(self, timestamp):
-        if True:
-            # Will need to reference the timestamp to know which frame to look at
-            return (0.5, 0.5, 0.5, 0.5)
-        else:
-            return (-1, -1, -1, -1)
+        with self.mine_data_lock:
+            try:
+                return self.timestamp_bounding_boxes[timestamp]
+            except Exception as e:
+                print(f"There wasn't a photo taken here lol")
+                return [(-1, -1, -1, -1)]
 
     def find_mines(self):
         # Initialize the camera interface
@@ -214,15 +216,15 @@ class ManagerDrone:
             pt_longitude = 0
 
             with self.mine_data_cv:
-                while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
-                # while self.TMP_timestamp_queue.qsize() == 0:
+                # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
+                while self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0:
                     print("Waiting for mission to start")
                     self.mine_data_cv.wait()
                 print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
 
             with self.mine_data_lock:
                 print("Acquired the lock in find_mines")
-                next_timestamp = self.mission_node.timestamp_queue.get()
+                next_timestamp = self.TMP_timestamp_queue.get()
                 absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
                 pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
                 pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
@@ -233,47 +235,49 @@ class ManagerDrone:
                 # pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
 
             # Get the location of the mines within the image (bounding box or smth I dunno)
-            print("Got everything that I needed, thanks")
-
-            mine_x_min, mine_x_max, mine_y_min, mine_y_max = self.get_mine_loc_in_img(next_timestamp)
-
-            if mine_x_min == -1:
-                continue
-
-            pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
-
-            # Get the dimension of the camera frame
-            hor_rad = math.radians(self.camera_HFOV)
-            img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad) 
             
-            vert_rad = math.radians(self.camera_VFOV)
-            img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad)
+            # mine_x_min, mine_x_max, mine_y_min, mine_y_max = self.get_mine_loc_in_img(next_timestamp)
+            bboxes = self.get_mine_loc_in_img(next_timestamp)
+            for mine_x_min, mine_x_max, mine_y_min, mine_y_max in bboxes:
+                print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
+                if mine_x_min == -1:
+                    print("No boxes in img")
+                    continue
 
-            img_height_cm = (img_height_m) / 100 #convert to cm
-            img_width_cm = (img_width_m) / 100
-            
-            # mine_x_min, mine_y_min, mine_x_max, mine_y_max = (0.11155333116319445, 0.15966543579101564, 0.19914363606770832, 0.22527638753255208)
-            mine_x , mine_y = (mine_x_min + mine_x_max ) / 2, (mine_y_min + mine_y_max ) / 2
-            mine_x_relative = mine_x - 0.5
-            mine_y_relative = mine_y - 0.5
-            
-            scaled_x = mine_x_relative * img_width_cm
-            scaled_y = mine_y_relative * img_height_cm
+                pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
 
-            #from 4/5 onwards
-            scaled_x_meters = scaled_x / 100 #convert to meters
-            scaled_y_meters = scaled_y / 100
+                # Get the dimension of the camera frame
+                hor_rad = math.radians(self.camera_HFOV)
+                img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad) 
+                
+                vert_rad = math.radians(self.camera_VFOV)
+                img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad)
 
-            change_in_lat = scaled_y_meters/111320 #find change in latitude from center to point
-            change_in_long = scaled_x_meters/(111320*np.cos(math.radians(pt_latitude)))
+                img_height_cm = (img_height_m) / 100 #convert to cm
+                img_width_cm = (img_width_m) / 100
+                
+                # mine_x_min, mine_y_min, mine_x_max, mine_y_max = (0.11155333116319445, 0.15966543579101564, 0.19914363606770832, 0.22527638753255208)
+                mine_x , mine_y = (mine_x_min + mine_x_max ) / 2, (mine_y_min + mine_y_max ) / 2
+                mine_x_relative = mine_x - 0.5
+                mine_y_relative = mine_y - 0.5
+                
+                scaled_x = mine_x_relative * img_width_cm
+                scaled_y = mine_y_relative * img_height_cm
 
-            new_lat = change_in_lat + pt_latitude #calculate new lat/long
-            new_long = change_in_long + pt_longitude
+                #from 4/5 onwards
+                scaled_x_meters = scaled_x / 100 #convert to meters
+                scaled_y_meters = scaled_y / 100
 
-            with self.mine_data_lock:
-                print("Acquired the lock in find_mines but lower")
-                self.detected_mine_data.append((new_lat, new_long))
-                print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
+                change_in_lat = scaled_y_meters/111320 #find change in latitude from center to point
+                change_in_long = scaled_x_meters/(111320*np.cos(math.radians(pt_latitude)))
+
+                new_lat = change_in_lat + pt_latitude #calculate new lat/long
+                new_long = change_in_long + pt_longitude
+
+                with self.mine_data_lock:
+                    print("Acquired the lock in find_mines but lower")
+                    self.detected_mine_data.append((new_lat, new_long))
+                    print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
 
 
     def tcp_server(self):
@@ -417,22 +421,18 @@ class ManagerDrone:
         self.mission_node = node
 
         # while not self.shutdown_flag:
-        try:
-            # Start the mission
-            # self.mission_node.start_mission()
+        # Start the mission
+        # self.mission_node.start_mission()
 
-            # Continue processing GPS messages
-            print("Attempting to spin the node")
-            rclpy.spin(self.mission_node)
-            print("Spinning the node")
+        # Continue processing GPS messages
+        print("Attempting to spin the node")
+        while not self.shutdown_flag:
+            rclpy.spin_once(self.mission_node, timeout_sec=0.1)
 
-        except KeyboardInterrupt:
-            pass
-
-        finally:
-            print(f"Collected {len(node.gps_data)} GPS points")
-            node.destroy_node()
-            rclpy.shutdown()
+        print("Stopping ROS")
+        self.mission_node.destroy_node()
+        rclpy.shutdown()
+        print(f"Collected {len(node.gps_data)} GPS points")
 
     def handle_run_drones(self):
         self.mission_status = "in_mission"
@@ -513,10 +513,9 @@ class ManagerDrone:
         find_mines_thread.start()
 
         if self.camera_mode == "backup":
-            take_pictures_thread = threading.Thread(target=self.backup_camerea_func)
+            take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
         
-
         # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         # fake_gps_thread.start()
 
@@ -525,8 +524,6 @@ class ManagerDrone:
         # fake_gps_thread.join()
         
 
-        with open(aggregate_path, "w") as f: # Write the coords into it
-            for coord in self.detected_mine_data:
-                f.write(f"{coord["latitude"]},{coord["longitude"]}\n")
+        iarc_pathfinder.run_iarc_pathfinder(self.detected_mine_data)
     
             

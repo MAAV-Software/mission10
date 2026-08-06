@@ -1,4 +1,6 @@
 pyproj
 numpy
 pyYaml
-ultralytics
+matplotlib
+onnxruntime
+opencv-python

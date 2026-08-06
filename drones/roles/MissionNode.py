@@ -48,7 +48,6 @@ class MissionNode(Node):
             }
 
             self.gps_data[msg.timestamp] = gps_point
-            self.timestamp_queue.put(msg.timestamp)
             self.latest_timestamp = msg.timestamp
 
             print(gps_point)

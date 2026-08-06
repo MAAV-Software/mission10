@@ -10,7 +10,7 @@ def main():
     # closed when an exception is raised or control flow returns.
     hostname = socket.gethostname()
     print(hostname)
-    ManagerDrone("localhost", 8000, "backup")
+    ManagerDrone("35.3.34.40", 8000, "backup")
 
     args = []
     args.append("python3")

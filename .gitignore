@@ -17,3 +17,5 @@ models/*/dataset/
 .DS_Store
 
 test*
+*.jpg
+*.png

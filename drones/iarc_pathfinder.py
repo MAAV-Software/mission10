@@ -54,7 +54,7 @@ lons = []
 # Minefield generation
 # ====================================================================
 
-def generate_minefield():
+def generate_minefield(mine_locations):
     with open(constants_path, "r") as f:
         for line in f:
             line_contents = line.strip().split()
@@ -69,20 +69,18 @@ def generate_minefield():
     LAT_DIST = MAX_LAT - MIN_LAT
     LON_DIST = MAX_LON - MIN_LON
 
-    delta_lat = LAT_DIST / COLS
+    delta_lat = LAT_DIST / COLS 
     delta_lon = LON_DIST / ROWS
 
     mine_locs = []
 
-    with open(mines_path, "r") as f:
-        for line in f:
-            line_contents = line.strip().split(',')
-            mine_lat = float(line_contents[0])
-            mine_lon = float(line_contents[1])
+    for lat, lon in mine_locations:
+        mine_lat = float(lat)
+        mine_lon = float(lon)
 
-            idx = int((mine_lat - MIN_LAT) / delta_lat)
-            idy = int((mine_lon - MIN_LON) / delta_lon)
-            mine_locs.append((idx, idy))
+        idx = int((mine_lat - MIN_LAT) / max(delta_lat, 1))
+        idy = int((mine_lon - MIN_LON) / max(delta_lon, 1))
+        mine_locs.append((idx, idy))
     
     return set(mine_locs)
 
@@ -376,7 +374,7 @@ def visualize(mines, path_cells, G, result, title="IARC Pathfinder", save_path='
 # Main
 # ====================================================================
 
-def main():
+def run_iarc_pathfinder(mine_locations):
     parser = argparse.ArgumentParser(description='IARC Mission 10 Pathfinder')
     parser.add_argument('--seed', type=float, default=None, help='Random seed (default: random)')
     parser.add_argument('--mines', type=int, default=135, help='Number of mines (default: 135)')
@@ -399,7 +397,7 @@ def main():
         scores = []
         for i in range(args.batch):
             seed = round(np.random.random() * 10000, 4)
-            mines = generate_minefield()
+            mines = generate_minefield(mine_locations)
 
             t0 = time.time()
             path, G, clearance = find_best_path(mines, args.scan_time)
@@ -428,7 +426,7 @@ def main():
     if args.fexl:
         mines = fetch_fexl_mines(seed=args.seed, num_mines=args.mines)
     else:
-        mines = generate_minefield()
+        mines = generate_minefield(mine_locations)
     print(f"IARC Pathfinder | {len(mines)} mines | seed={args.seed} | A={args.scan_time}"
           + (" | SOURCE: fexl.com" if args.fexl else ""))
 
@@ -454,10 +452,7 @@ def main():
 
         if not args.no_plot:
             maav_IARCM10_compweb_dir = Path(__file__).parent.parent.parent
-            visualize(mines, path, G, result, f"seed={args.seed} | {args.mines} mines", save_path=f"{maav_IARCM10_compweb_dir}/maav-IARCM10-compweb/compweb/static/images/iarc_result.png")
+            # visualize(mines, path, G, result, f"seed={args.seed} | {args.mines} mines", save_path=f"{maav_IARCM10_compweb_dir}/maav-IARCM10-compweb/compweb/static/images/iarc_result.png")
+            visualize(mines, path, G, result, f"seed={args.seed} | {args.mines} mines", save_path=f"iarc_result.png") # temp line for now
     else:
         print("  No path found!")
-
-
-if __name__ == "__main__":
-    main()
