@@ -133,10 +133,21 @@ python3 train/prepare.py \
     --out /workspace/dataset/pilot40-v1/prepared \
     --split train/pilot40-split.json
 
-uv venv --system-site-packages /workspace/venvs/mission10-yolo
-uv pip install --python /workspace/venvs/mission10-yolo/bin/python \
+uv venv --system-site-packages --seed /workspace/venvs/mission10-yolo
+/workspace/venvs/mission10-yolo/bin/python -m pip install \
     -r train/requirements.txt
+/workspace/venvs/mission10-yolo/bin/python -c \
+    'import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda)'
+/workspace/venvs/mission10-yolo/bin/python -c \
+    'import ultralytics; print(ultralytics.__version__)'
 ```
+
+Use the seeded `pip` from inside this system-site-packages environment. It
+recognizes the CUDA-matched torch and torchvision supplied by the pod image and
+installs only the missing Ultralytics dependencies. Do not use `uv pip install`
+for this step: its resolver does not count system-site packages as satisfying
+dependencies and can replace the working CUDA framework with a different torch
+build.
 
 Run one epoch under a distinct name before the 50-epoch job. Batch 16 is the
 A4000 default; if and only if the preflight CUDA-OOMs, rerun both jobs at batch
