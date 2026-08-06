@@ -13,6 +13,7 @@ class MissionNode(Node):
         self.mission_node_lock = mission_node_lock
         self.mission_node_cv = mission_node_cv
         self.timestamp_queue = queue.Queue()
+        self.latest_timestamp = 0
 
         # self.start_publisher = self.create_publisher(
         #     Bool,
@@ -48,6 +49,7 @@ class MissionNode(Node):
 
             self.gps_data[msg.timestamp] = gps_point
             self.timestamp_queue.put(msg.timestamp)
+            self.latest_timestamp = msg.timestamp
 
             print(gps_point)
 

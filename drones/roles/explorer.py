@@ -414,5 +414,4 @@ class ExploreDrone:
 
         tcp_thread.join()
         udp_thread.join()
-        find_mines_thread.join()
         # fake_gps_thread.join()

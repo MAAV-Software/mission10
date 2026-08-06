@@ -8,6 +8,13 @@ import queue
 import math
 import numpy as np
 from pyproj import Transformer, CRS
+from ultralytics import YOLOWorld
+
+# Dunno if these work
+# import cv2
+from picamera2 import Picamera2
+import os
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
@@ -18,11 +25,12 @@ from roles.MissionNode import MissionNode
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
+weights_path = Path(__file__).parent.parent / "1-2-26.pt"
 
 class ManagerDrone:
     "Construct an instance of the main drone"
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, camera_mode):
         """Construct a Manager instance and start listening for messages."""
 
         self.host = host
@@ -39,6 +47,8 @@ class ManagerDrone:
         self.shutdown_flag = False
         self.mission_status = "pre-mission"
         self.next_action = "scout"
+        self.camera_mode = camera_mode
+        self.timestamp_bounding_boxes = {}
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -72,6 +82,72 @@ class ManagerDrone:
                 break
 
         self.run_drone()
+
+    def take_picture(self):
+        # print(cv2.getBuildInformation())
+
+        """
+        gst_pipeline = (
+            "nvarguscamerasrc sensor_id=0"
+            "video/x-raw(memory:NVMM), width=3280. height=2464, framerate=30/01 !"
+            "nvvidconv !"
+            "videoconvert ! "
+            "video/x-raw, format=BGR ! appsink"
+        )
+        """
+        
+        # Open a connection to the webcam (0 is the default camera)
+        # cap = cv2.VideoCapture(0)
+        # cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+        cam = Picamera2()
+        # cam.take_photo("test1.jpg")
+
+        config = cam.create_still_configuration()
+        cam.configure(config)
+
+        cam.start()
+        time.sleep(2)
+
+        cam.capture_file("image.jpg")
+
+        cam.stop()
+
+    def backup_camerea_func(self):
+        # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
+        
+        while not self.shutdown_flag:
+            # Run Camera picture, and then run the YOLO, and then place those detection values to that timestamp value?
+            image = None
+
+
+
+            img_height, img_width, channels = image.shape
+            image_timestamp = 0
+            with self.mine_data_lock:
+                image_timestamp = self.mission_node.latest_timestamp
+
+            # Run YOLO, get the bounding boxes and then just store that at the timestamp in like a map again
+            model_path = "./weights/blender-weights.pt"
+            model = YOLOWorld(model_path)
+
+            results = model.predict(image,conf=0.3)
+            bounding_boxes = results[0].boxes
+
+            self.timestamp_bounding_boxes[image_timestamp] = []
+
+            for box in bounding_boxes:
+                # Get the coordinates for each box
+                x_min, y_min, x_max, y_max = box.xyxy[0].tolist()
+                norm_x_min = x_min / img_width
+                norm_y_min = y_min / img_height
+                norm_x_max = x_max / img_width
+                norm_y_max = y_max / img_height 
+
+                self.timestamp_bounding_boxes[image_timestamp].append((norm_x_min, norm_y_min, norm_x_max, norm_y_max))
+
+            time.sleep(1) # have it take pictures at this interval, I guess try to do it one time a second I guess?
+
+        pass
 
     def rotate_coords(self, pt_latitude, pt_longitude):
 
@@ -436,10 +512,14 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
+        if self.camera_mode == "backup":
+            take_pictures_thread = threading.Thread(target=self.backup_camerea_func)
+            take_pictures_thread.start()
+        
+
         # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         # fake_gps_thread.start()
 
-        find_mines_thread.join()
         tcp_thread.join()
         udp_thread.join()
         # fake_gps_thread.join()
