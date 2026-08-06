@@ -6,9 +6,10 @@ recomputes each station's geometry through the deterministic pipeline —
 which also recovers box-to-mine identity, since label lines carry none —
 and applies the visibility policy:
 
-  A box survives when occlusion_frac x clip_frac >= --min-frac: a mine 30%
-  in-window and 50% grass-covered is ~15% visible, and neither gate alone
-  sees that.
+  A box survives when occlusion_frac x clip_frac >= --min-frac. The production
+  default is 40%: severely cropped or grass-hidden mines are not useful
+  supervision, and the overlapping tile grid supplies a better view. A crop
+  containing 15--40% is skipped rather than emitted as a false negative.
 
 Two products, both under out/:
 
@@ -47,6 +48,8 @@ from .manifest import OCCLUSION_SCHEMA, SCHEMA
 from .scene import build_scene, image_stem
 
 FULLFRAME_MODEL_PX = 640  # untiled inference letterboxes the frame to this
+DEFAULT_MIN_FRAC = 0.40
+POISON_MIN_FRAC = 0.15
 
 
 @dataclass(frozen=True)
@@ -185,6 +188,7 @@ def _station_tiles(
         raw_extents(cam, st.pos, st.q, mine, cfg.mine_dims_m)
         for mine in scene_mines
     ]
+    poison_min_frac = min(min_frac, POISON_MIN_FRAC)
     out: List[Optional[List[str]]] = []
     for win in windows:
         lines: Optional[List[str]] = []
@@ -208,7 +212,7 @@ def _station_tiles(
                 0.0, min(v1, y1) - max(v0, y0)
             )
             raw = (u1 - u0) * (v1 - v0)
-            if raw > 0.0 and occ_f * inter / raw >= min_frac:
+            if raw > 0.0 and occ_f * inter / raw >= poison_min_frac:
                 lines = None  # learnable mine pixels with no label
                 break
         out.append(lines)
@@ -314,9 +318,12 @@ def tile_scene(
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", required=True)
-    # below ~0.15 there is nothing learnable in the pixels; between that and
-    # ~0.5 partial occlusion is exactly what the detector must learn
-    p.add_argument("--min-frac", type=float, default=0.15)
+    p.add_argument(
+        "--min-frac",
+        type=float,
+        default=DEFAULT_MIN_FRAC,
+        help="minimum occlusion x crop fraction for a labeled mine",
+    )
     p.add_argument("--tiles", action="store_true", help="emit train/ tile set")
     p.add_argument("--tile-px", type=int, default=TileParams.tile)
     p.add_argument("--overlap-px", type=int, default=TileParams.overlap)

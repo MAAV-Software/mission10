@@ -742,7 +742,8 @@ def main() -> None:
         help="render engine; EEVEE is for local smoke tests and benchmarks",
     )
     p.add_argument(
-        "--cycles-device",
+        "--cycles-backend",
+        dest="cycles_device",
         choices=("auto", "cpu", "cuda", "optix"),
         default="auto",
         help="Cycles backend; auto prefers OPTIX, then CUDA, then CPU",
@@ -866,10 +867,9 @@ def main() -> None:
 # - Gravel/pavement/concrete are real Poly Haven CC0 PBR sets, meters-true
 #   world-space mapping, packed into m10-base (tools/prep_surface_textures.py;
 #   download URLs + md5 provenance in assets/textures/SOURCES.json).
-# - alt_range_m widened to (1, 8) for the full cruise envelope. At 8 m the
-#   footprint's far corner can reach ~7.3 m from the camera vs the 6.8 m the
-#   3x3 grass grid guarantees: a rare bare-of-strands corner, which shows the
-#   (view-consistent) baked grass — acceptable, revisit only if it reads.
+# - alt_range_m is (1, 7): it covers the planned 6 m survey with margin while
+#   keeping the smallest training objects useful. At 7 m the footprint's far
+#   corner stays inside the 6.8 m radius guaranteed by the 3x3 grass grid.
 # - Camera mount is nadir (CameraModel tilt_deg default 0, decision closed
 #   2026-07-17); datagen draws per-scene tilt from tilt_range_deg (0-15) on
 #   its own RNG stream, threaded through Scene.tilt into both the label
@@ -928,7 +928,9 @@ def main() -> None:
 #   lives in mission_engine.core.tiles so onboard tiled inference and the
 #   training materializer cannot drift — 640 px tiles, 192 px min overlap
 #   (> the largest projected mine at 1 m alt, so every mine appears whole in
-#   some tile). Box survival is occlusion x clip product >= --min-frac;
+#   some tile). Box survival is occlusion x clip product >= --min-frac
+#   (production default 0.4); severely cropped/hidden mines are not useful
+#   supervision when an overlapping tile supplies a better view.
 #   tiles a visible mine crosses without keeping a label are skipped
 #   (unlabeled mine pixels teach suppression); empty tiles subsampled;
 #   a seeded frame slice ships whole for the untiled inference mode with

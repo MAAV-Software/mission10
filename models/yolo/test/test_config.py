@@ -27,6 +27,7 @@ class TestRandomizationConfig(unittest.TestCase):
         self.assertEqual((CFG.mines_min, CFG.mines_max), (4, 20))
         self.assertEqual(CFG.station_interval_m, 2.0)
         self.assertEqual(CFG.negative_frame_keep, 0.05)
+        self.assertEqual(CFG.alt_range_m, (1.0, 7.0))
 
     def test_manifest_config_roundtrip(self):
         raw = json.loads(json.dumps(asdict(CFG)))

@@ -35,8 +35,10 @@ class TestFlightpath(unittest.TestCase):
             self.assertGreaterEqual(a, CFG.alt_range_m[0])
             self.assertLessEqual(a, CFG.alt_range_m[1])
         # The production path's uniform draws should span most of the envelope.
-        self.assertLess(min(alts), 2.0)
-        self.assertGreater(max(alts), 7.0)
+        lo, hi = CFG.alt_range_m
+        margin = 0.2 * (hi - lo)
+        self.assertLess(min(alts), lo + margin)
+        self.assertGreater(max(alts), hi - margin)
 
     def test_headings_alternate_with_jitter(self):
         jit = math.radians(CFG.yaw_jitter_deg) + 1e-9

@@ -8,7 +8,13 @@ from datagen.config import GenConfig
 from datagen.dump import write_scene
 from datagen.labels import raw_extents, yolo_box
 from datagen.manifest import OCCLUSION_SCHEMA
-from datagen.materialize import TileParams, materialize_scene, tile_scene
+from datagen.materialize import (
+    DEFAULT_MIN_FRAC,
+    POISON_MIN_FRAC,
+    TileParams,
+    materialize_scene,
+    tile_scene,
+)
 from datagen.scene import (
     build_scene,
     image_stem,
@@ -59,6 +65,9 @@ def _sidecar(overrides):
 
 
 class TestMaterialize(unittest.TestCase):
+    def test_production_visibility_threshold_is_forty_percent(self):
+        self.assertEqual(DEFAULT_MIN_FRAC, 0.40)
+
     def setUp(self):
         self.out = Path(tempfile.mkdtemp())
         write_scene(CFG, 0, self.out)
@@ -75,7 +84,7 @@ class TestMaterialize(unittest.TestCase):
         return (self.out / sub / f"{stem}.txt").read_text()
 
     def test_all_visible_reproduces_analytic_labels(self):
-        kept, dropped = materialize_scene(self.out, _sidecar({}), 0.15)
+        kept, dropped = materialize_scene(self.out, _sidecar({}), DEFAULT_MIN_FRAC)
         self.assertEqual(dropped, 0)
         self.assertGreater(kept, 0)
         for k in SELECTED:
@@ -86,7 +95,7 @@ class TestMaterialize(unittest.TestCase):
 
     def test_buried_mine_dropped_others_untouched(self):
         occ = _sidecar({(self.target_k, self.target_i): 0.02})
-        kept, dropped = materialize_scene(self.out, occ, 0.15)
+        kept, dropped = materialize_scene(self.out, occ, DEFAULT_MIN_FRAC)
         self.assertEqual(dropped, 1)
         for k in SELECTED:
             stem = image_stem(CFG, SCENE, k)
@@ -99,8 +108,8 @@ class TestMaterialize(unittest.TestCase):
                 self.assertEqual(filtered, analytic)
 
     def test_frac_at_threshold_kept(self):
-        occ = _sidecar({(self.target_k, self.target_i): 0.15})
-        _, dropped = materialize_scene(self.out, occ, 0.15)
+        occ = _sidecar({(self.target_k, self.target_i): DEFAULT_MIN_FRAC})
+        _, dropped = materialize_scene(self.out, occ, DEFAULT_MIN_FRAC)
         self.assertEqual(dropped, 0)
 
     def test_product_rule_combines_edge_and_occlusion(self):
@@ -118,10 +127,12 @@ class TestMaterialize(unittest.TestCase):
         if clipped is None:
             self.skipTest("scene 0 has no strongly edge-clipped box")
         k, i, box = clipped
-        occ_f = 0.3  # passes alone; product with the clip does not
-        self.assertGreater(occ_f, 0.15)
-        self.assertLess(occ_f * box.visible_frac, 0.15)
-        _, dropped = materialize_scene(self.out, _sidecar({(k, i): occ_f}), 0.15)
+        occ_f = 0.65  # passes alone; product with the clip does not
+        self.assertGreater(occ_f, DEFAULT_MIN_FRAC)
+        self.assertLess(occ_f * box.visible_frac, DEFAULT_MIN_FRAC)
+        _, dropped = materialize_scene(
+            self.out, _sidecar({(k, i): occ_f}), DEFAULT_MIN_FRAC
+        )
         self.assertEqual(dropped, 1)
 
     def test_manifest_config_is_authoritative(self):
@@ -150,10 +161,19 @@ class TestMaterialize(unittest.TestCase):
                 for k in selected
             },
         }
-        kept, dropped = materialize_scene(out, occ, 0.15)
-        self.assertEqual(dropped, 0)
+        kept, dropped = materialize_scene(out, occ, DEFAULT_MIN_FRAC)
+        expected_boxes = [
+            box
+            for boxes in labels.values()
+            for box in boxes
+        ]
+        expected_kept = sum(
+            box.visible_frac >= DEFAULT_MIN_FRAC for box in expected_boxes
+        )
+        self.assertEqual(kept, expected_kept)
+        self.assertEqual(dropped, len(expected_boxes) - expected_kept)
         self.assertEqual(
-            kept,
+            kept + dropped,
             sum(len(labels[image_stem(cfg, scene, k)]) for k in selected),
         )
 
@@ -161,7 +181,7 @@ class TestMaterialize(unittest.TestCase):
         occ = _sidecar({})
         occ["station_indices"] = occ["station_indices"][:-1]
         with self.assertRaisesRegex(ValueError, "selections differ"):
-            materialize_scene(self.out, occ, 0.15)
+            materialize_scene(self.out, occ, DEFAULT_MIN_FRAC)
 
 
 class TestTileScene(unittest.TestCase):
@@ -171,7 +191,7 @@ class TestTileScene(unittest.TestCase):
         self.out = Path(tempfile.mkdtemp())
         write_scene(CFG, 0, self.out)
         self.n_tiles, self.n_poisoned, self.n_boxes = tile_scene(
-            self.out, _sidecar({}), 0.15, self.TP
+            self.out, _sidecar({}), DEFAULT_MIN_FRAC, self.TP
         )
         self.index = json.loads((self.out / "train" / "tiles.json").read_text())[
             f"{CFG.seed}_s0000"
@@ -237,6 +257,7 @@ class TestTileScene(unittest.TestCase):
         self.assertGreater(checked, 0)
 
     def test_no_emitted_tile_is_poisoned(self):
+        self.assertGreater(self.n_poisoned, 0)
         for entry in self.index["tiles"]:
             if entry.get("full"):
                 continue
@@ -259,7 +280,7 @@ class TestTileScene(unittest.TestCase):
                     0.0, min(v1, y0 + t) - max(v0, y0)
                 )
                 raw = (u1 - u0) * (v1 - v0)
-                if raw > 0.0 and inter / raw >= 0.15:
+                if raw > 0.0 and inter / raw >= POISON_MIN_FRAC:
                     learnable += 1
             self.assertGreaterEqual(
                 n_lines,
@@ -284,7 +305,7 @@ class TestTileScene(unittest.TestCase):
     def test_deterministic(self):
         out2 = Path(tempfile.mkdtemp())
         write_scene(CFG, 0, out2)
-        tile_scene(out2, _sidecar({}), 0.15, self.TP)
+        tile_scene(out2, _sidecar({}), DEFAULT_MIN_FRAC, self.TP)
         index2 = json.loads((out2 / "train" / "tiles.json").read_text())
         self.assertEqual(self.index, index2[f"{CFG.seed}_s0000"])
 

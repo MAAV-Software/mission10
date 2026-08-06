@@ -36,7 +36,7 @@ class GenConfig:
     negative_frame_keep: float = 0.05
     # sampled per scene; the survey cruises anywhere from near-ground dips to
     # max mapping altitude, so train across the full envelope
-    alt_range_m: Tuple[float, float] = (1.0, 8.0)
+    alt_range_m: Tuple[float, float] = (1.0, 7.0)
     yaw_jitter_deg: float = 3.0
     # camera tilt from nadir, sampled per scene: the physical CM2 mount is
     # nadir; the range covers in-flight body pitch plus viewpoint diversity

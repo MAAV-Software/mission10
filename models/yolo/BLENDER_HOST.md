@@ -108,7 +108,10 @@
 
 - The renderer ray-casts per-mine visible fractions into
   `out/occlusion/*.json` sidecars. `datagen.materialize` drops boxes whose
-  occlusion × edge-clip product falls under `--min-frac` (default 0.15).
+  occlusion × edge-clip product falls under `--min-frac` (default 0.40).
+  This rejects mines that are mostly hidden by grass or cut by a tile edge;
+  crops retaining 15% or more are skipped as poisoned, and the 192 px overlap
+  ordinarily supplies another tile with a better view.
   The threshold retunes without re-rendering.
   `assets/_visfrac_probe.py --tall --render` demos a buried mine.
 - `--tiles` cuts 640 px training tiles on the shared

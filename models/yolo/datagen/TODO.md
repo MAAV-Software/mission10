@@ -42,7 +42,7 @@ snapped/flushed off non-grass strips. Grass-primary scenes record a pure
 10% dense cover (density 1800–2500, blade maximum 50–55 cm). Fully buried
 mines no longer stay labeled: the renderer writes per-mine visible fractions
 to `out/occlusion/` sidecars and `datagen.materialize` drops boxes whose
-occlusion x edge-clip product falls under `--min-frac`.
+occlusion x edge-clip product falls under `--min-frac` (default 0.40).
 
 **Problem:** datagen currently renders mines on grass only. The Mission 10 arena
 (rules v3.1.2 §184) explicitly contains non-grass surfaces — **pavement, gravel,

@@ -33,18 +33,20 @@ python3 -m datagen.dump --out /tmp/dump --scenes 0:5
 ```
 
 The production corpus contains 300 independently randomized scenes, 4–20 mines
-per scene, and camera stations every 2 m. The adapter analytically projects
-every candidate station before Blender starts, renders every positive station
-plus a deterministic 5% sample of negatives as one compact animation, and
-then computes exact geometry-based occlusion for only those frames. Original
-`k####` station identities survive the compact animation mapping.
+per scene, camera stations every 2 m, and station altitudes from 1–7 m AGL.
+The 7 m ceiling covers the planned 6 m nominal survey with margin without
+spending training capacity on smaller 8 m views. The adapter analytically
+projects every candidate station before Blender starts, renders every positive
+station plus a deterministic 5% sample of negatives as one compact animation,
+and then computes exact geometry-based occlusion for only those frames.
+Original `k####` station identities survive the compact animation mapping.
 
 Production rendering uses Cycles. On an RTX 3090, `auto` prefers OPTIX and
 falls back to CUDA, then CPU:
 
 ```sh
 blender -b assets/m10-base.blend -P datagen/generate.py -- \
-    --out dataset/raw --scenes 0:300 --cycles-device auto
+    --out dataset/raw --scenes 0:300 --cycles-backend auto
 ```
 
 Use EEVEE for local smoke tests and performance checks. It exercises the same
@@ -71,10 +73,15 @@ python3 -m datagen.materialize --out dataset/raw --tiles
 
 The production defaults keep 3% of empty tiles and emit no full-frame samples,
 because onboard inference always tiles. Empty YOLO label files are intentional.
+Mines remain labeled only when measured geometric visibility multiplied by the
+fraction inside the crop is at least 40%. Tiles containing a rejected mine are
+skipped when at least 15% remains, rather than emitted as false negatives;
+192 px overlap ordinarily provides another crop with a substantially better
+view.
 Ultralytics recommends roughly
 [0–10% background images](https://github.com/ultralytics/yolov5/issues/9908)
 to reduce false positives; the pure 300-scene projection currently yields
-19,761 tiles, including 1,330 empty tiles (6.7%), 20,577 boxes, and 390
+16,047 tiles, including 1,247 empty tiles (7.8%), 15,992 boxes, and 909
 poisoned boundary tiles skipped before measured grass occlusion. Frames that
 become empty after the exact occlusion pass remain useful hard negatives.
 
@@ -154,7 +161,7 @@ YOLOv11x on real RGB imagery of an inert PFM-1 + 3D-printed replicas,
    worked in narrow early-morning diurnal windows.
 8. **Geolocation benchmark:** yaw+AGL+FOV projection (no SfM) achieved
    **1.75 m mean error at 10 m AGL**. Our full-attitude backprojection at
-   4–8 m plus clustering must beat this comfortably.
+   4–7 m plus clustering must beat this comfortably.
 
 Caveats: tiny OOS set (11–15 positives), internal metric inconsistencies,
 one campus, leaf-off winter, hand-placed (no scatter-pose statistics),
@@ -177,7 +184,7 @@ simplify identification. Consequences:
   mines with IDs 0/12; eventually render tagged non-mine objects
   (landmarks/"other items") with other IDs as negatives.
 - **At survey altitude the tag is a *tagged-object* cue, not a mine cue.**
-  At 25.4 mm it spans ~4–9 px at 4–8 m AGL — a high-contrast blob, but
+  At 25.4 mm it spans ~5–9 px at 4–7 m AGL — a high-contrast blob, but
   decoys wear identical-looking blobs, so **shape must carry
   classification**. Render the tag faithfully (the blob is real signal the
   detector will see) but don't expect it to discriminate.
@@ -212,9 +219,11 @@ Surveyed four 2025–2026 *Scientific Reports* "improved YOLO + VisDrone"
 papers. Quality ranged from mediocre to fabricated; none touch mines, grass,
 or synthetic training. The single robust, convergent, Hailo-compilable
 takeaway: **a stride-4 P2 detection head dominates small-object gains**
-(+2.4–3.2 mAP50 standalone in every honest ablation; `yolo11-p2.yaml` in
-Ultralytics), while bolt-on attention modules contribute marginally and often
-don't compile. Relevant because PFM-1 at 8 m AGL letterboxed to a 640 input
-is ~8 px: pick input resolution / altitude band / P2 head as one combined
-budget decision, and measure the px-size vs recall curve on synthetic data
-before spending flight time.
+(+2.4–3.2 mAP50 standalone in every honest ablation), while bolt-on attention
+modules contribute marginally and often don't compile. Upstream YOLO11 ships
+with P3/8 as its smallest detection head, so P2 would be a custom architecture
+that must pass Hailo compilation. Relevant because a PFM-1 at 7 m AGL would be
+~9 px if the full frame were letterboxed to 640; native-resolution tiling keeps
+it ~23 px. Pick input resolution, altitude band, and detection head as one
+combined budget decision, and measure the px-size-vs-recall curve before
+spending flight time.
