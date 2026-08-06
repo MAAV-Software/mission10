@@ -80,8 +80,26 @@ def training_args(
 
 def _command_output(argv: list[str]) -> str:
     return subprocess.run(
-        argv, check=True, text=True, stdout=subprocess.PIPE
+        argv,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     ).stdout.strip()
+
+
+def source_commit(repo: Path) -> str:
+    """Read the revision from git or a deployment archive marker."""
+    try:
+        commit = _command_output(["git", "-C", str(repo), "rev-parse", "HEAD"])
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        marker = repo / ".source-commit"
+        if not marker.is_file():
+            raise ValueError(f"no git checkout or source marker under {repo}")
+        commit = marker.read_text().strip()
+    if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        raise ValueError(f"invalid source commit {commit!r}")
+    return commit
 
 
 def _json_metrics(metrics) -> dict:
@@ -123,7 +141,7 @@ def run(
         "schema": RUN_SCHEMA,
         "status": "started",
         "started_unix": time.time(),
-        "git_commit": _command_output(["git", "-C", str(repo), "rev-parse", "HEAD"]),
+        "git_commit": source_commit(repo),
         "dataset_lock_sha256": sha256(dataset_lock),
         "dataset_sha256": json.loads(dataset_lock.read_text())["dataset_sha256"],
         "source_weights": str(model_path.resolve()),

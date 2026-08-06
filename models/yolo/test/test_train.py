@@ -1,7 +1,8 @@
+import tempfile
 import unittest
 from pathlib import Path
 
-from train.run import training_args
+from train.run import source_commit, training_args
 
 
 class TestTrainingConfig(unittest.TestCase):
@@ -30,6 +31,12 @@ class TestTrainingConfig(unittest.TestCase):
         self.assertEqual(args["patience"], 0)
         self.assertEqual(args["warmup_epochs"], 0.0)
         self.assertEqual(args["close_mosaic"], 0)
+
+    def test_archive_source_marker_supplies_commit(self):
+        root = Path(tempfile.mkdtemp())
+        commit = "a" * 40
+        (root / ".source-commit").write_text(commit + "\n")
+        self.assertEqual(source_commit(root), commit)
 
 
 if __name__ == "__main__":
