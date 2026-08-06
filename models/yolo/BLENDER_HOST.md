@@ -116,10 +116,10 @@
   `assets/_visfrac_probe.py --tall --render` demos a buried mine.
 - `--tiles` cuts 640 px training tiles on the shared
   `mission_engine.core.tiles` grid: 192 px overlap (whole-mine guarantee),
-  train-only jitter, poisoned-sliver tiles skipped, empty tiles
-  subsampled, and a seeded whole-frame slice for untiled inference. Tile
-  image crops need Pillow, so cut them on RunPod; use `--no-images`
-  locally.
+  train-only jitter with clamp-created near-duplicates coalesced,
+  poisoned-sliver tiles skipped, empty tiles subsampled, and a seeded
+  whole-frame slice for untiled inference. Tile image crops need Pillow, so
+  cut them on RunPod; use `--no-images` locally.
 - `tools/smoke_station.py` is a repeatable one-station render with a
   label-overlay tripwire.
 

@@ -12,6 +12,7 @@ from datagen.materialize import (
     DEFAULT_MIN_FRAC,
     POISON_MIN_FRAC,
     TileParams,
+    _jittered,
     materialize_scene,
     tile_scene,
 )
@@ -21,6 +22,7 @@ from datagen.scene import (
     scene_labels,
     selected_station_indices,
 )
+from mission_engine.core.tiles import tile_grid
 
 CFG = GenConfig()
 SCENE = build_scene(CFG, 0)
@@ -308,6 +310,28 @@ class TestTileScene(unittest.TestCase):
         tile_scene(out2, _sidecar({}), DEFAULT_MIN_FRAC, self.TP)
         index2 = json.loads((out2 / "train" / "tiles.json").read_text())
         self.assertEqual(self.index, index2[f"{CFG.seed}_s0000"])
+
+    def test_jitter_coalesces_near_duplicate_edge_origins(self):
+        class FixedRng:
+            values = iter((319, 295))
+
+            @classmethod
+            def randrange(cls, stop):
+                value = next(cls.values)
+                if not 0 <= value < stop:
+                    raise AssertionError(f"fixed draw {value} outside {stop}")
+                return value
+
+        origins = _jittered(
+            tile_grid(1640, 1232, 640, 192),
+            1640,
+            1232,
+            640,
+            FixedRng(),
+        )
+        self.assertEqual(sorted({x for x, _ in origins}), [319, 652, 1000])
+        self.assertEqual(sorted({y for _, y in origins}), [295, 592])
+        self.assertEqual(len(origins), 6)
 
     def test_tile_parameter_validation(self):
         for changes in (

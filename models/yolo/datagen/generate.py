@@ -934,7 +934,8 @@ def main() -> None:
 #   tiles a visible mine crosses without keeping a label are skipped
 #   (unlabeled mine pixels teach suppression); empty tiles subsampled;
 #   a seeded frame slice ships whole for the untiled inference mode with
-#   min_box_px scaled to the 640 letterbox. Grid jitter is train-only.
+#   min_box_px scaled to the 640 letterbox. Grid jitter is train-only and
+#   coalesces clamp-created near-duplicate rows/columns.
 #   Tile image cropping needs Pillow (RunPod; --no-images for local runs).
 # - Occlusion validation: final dense scene 2 measured min 0.085 / median
 #   0.65, with 2/64 labelable mine views below 0.15 and 15/64 below 0.5.

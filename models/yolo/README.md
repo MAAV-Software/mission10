@@ -77,11 +77,12 @@ Mines remain labeled only when measured geometric visibility multiplied by the
 fraction inside the crop is at least 40%. Tiles containing a rejected mine are
 skipped when at least 15% remains, rather than emitted as false negatives;
 192 px overlap ordinarily provides another crop with a substantially better
-view.
+view. Per-frame training jitter coalesces near-duplicate rows or columns made
+by edge clamping, so one-pixel-shifted copies are not emitted.
 Ultralytics recommends roughly
 [0–10% background images](https://github.com/ultralytics/yolov5/issues/9908)
 to reduce false positives; the pure 300-scene projection currently yields
-16,047 tiles, including 1,247 empty tiles (7.8%), 15,992 boxes, and 909
+12,075 tiles, including 912 empty tiles (7.6%), 12,092 boxes, and 694
 poisoned boundary tiles skipped before measured grass occlusion. Frames that
 become empty after the exact occlusion pass remain useful hard negatives.
 

@@ -160,17 +160,31 @@ def _jittered(
     grid: List[Tuple[int, int]], w: int, h: int, tile: int, rng: random.Random
 ) -> List[Tuple[int, int]]:
     """Shift the shared grid by a per-frame offset, clamped in-bounds.
-    Training tiles need correct labels, not frame coverage — the sliver of
-    frame a shifted grid misses is fine; inference uses the unshifted grid."""
+
+    Clamping can push the penultimate origin almost onto the edge anchor
+    (for example y=591 and y=592). Coalesce adjacent origins closer than half
+    the unshifted axis spacing; the edge anchor wins. Training tiles need
+    correct labels, not complete frame coverage, and inference uses the
+    unshifted grid.
+    """
     jx, jy = rng.randrange(tile // 2), rng.randrange(tile // 2)
-    seen = set()
-    out = []
-    for x, y in grid:
-        p = (min(x + jx, w - tile), min(y + jy, h - tile))
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
+
+    def axis(values: List[int], offset: int, limit: int) -> List[int]:
+        if len(values) < 2:
+            return [min(values[0] + offset, limit)]
+        spacing = min(b - a for a, b in zip(values, values[1:]))
+        shifted: List[int] = []
+        for value in values:
+            candidate = min(value + offset, limit)
+            if shifted and 2 * (candidate - shifted[-1]) < spacing:
+                shifted[-1] = candidate
+            elif not shifted or candidate != shifted[-1]:
+                shifted.append(candidate)
+        return shifted
+
+    xs = axis(sorted({x for x, _ in grid}), jx, w - tile)
+    ys = axis(sorted({y for _, y in grid}), jy, h - tile)
+    return [(x, y) for y in ys for x in xs]
 
 
 def _station_tiles(
