@@ -90,6 +90,23 @@ become empty after the exact occlusion pass remain useful hard negatives.
 training and validation data by whole scene, never by individual tile, so
 nearby views of one mine layout cannot leak across splits.
 
+The first weight-training pilot uses scenes 0–39 and a committed, stratified
+30/5/5 scene split. Prepare its Ultralytics tree only after all 40 scenes have
+rendered and materialized:
+
+```sh
+python3 train/prepare.py \
+    --raw /workspace/dataset/pilot40-v1/raw \
+    --out /workspace/dataset/pilot40-v1/prepared \
+    --split train/pilot40-split.json
+```
+
+`split.lock.json` hashes every indexed image and label. The preparer hard-links
+files, rejects leakage and stale/unindexed products, and writes `dataset.yaml`.
+`train/run.py` owns the explicit YOLO11m/640 training settings and records the
+source-weight, dataset, package, CUDA, GPU, and git identities in
+`run.lock.json`. Ultralytics is pinned in `train/requirements.txt`.
+
 Mine color is bounded material-domain randomization, not arbitrary RGB. Each
 scene draws one filament batch from a lime / green / muddy-olive palette
 (weighted 10 / 45 / 45), and individual mines get mild hue, saturation, and

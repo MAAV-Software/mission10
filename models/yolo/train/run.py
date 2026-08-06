@@ -1,0 +1,223 @@
+"""Run the pinned YOLO11m pilot and record a reproducibility lock.
+
+Ultralytics is imported only inside ``run`` so local config tests do not need
+the GPU environment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import platform
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+RUN_SCHEMA = "mission10-yolo-run/1"
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def training_args(
+    data: Path,
+    project: Path,
+    name: str,
+    epochs: int = 50,
+    batch: int = 16,
+) -> dict:
+    """Explicit pilot settings; no behavior-changing Ultralytics defaults."""
+    return {
+        "data": str(data.resolve()),
+        "project": str(project.resolve()),
+        "name": name,
+        "exist_ok": True,
+        "epochs": epochs,
+        "patience": 15 if epochs > 1 else 0,
+        "imgsz": 640,
+        "batch": batch,
+        "device": 0,
+        "workers": 8,
+        "cache": "ram",
+        "amp": True,
+        "optimizer": "AdamW",
+        "lr0": 0.001,
+        "lrf": 0.01,
+        "cos_lr": True,
+        "weight_decay": 0.0005,
+        "warmup_epochs": 3.0 if epochs > 1 else 0.0,
+        "seed": 10,
+        "deterministic": True,
+        "save": True,
+        "save_period": 5 if epochs > 1 else -1,
+        "plots": True,
+        "val": True,
+        "hsv_h": 0.01,
+        "hsv_s": 0.25,
+        "hsv_v": 0.25,
+        "degrees": 0.0,
+        "translate": 0.1,
+        "scale": 0.25,
+        "shear": 0.0,
+        "perspective": 0.0,
+        "flipud": 0.5,
+        "fliplr": 0.5,
+        "mosaic": 1.0,
+        "mixup": 0.0,
+        "copy_paste": 0.0,
+        "close_mosaic": min(10, max(0, epochs - 1)),
+    }
+
+
+def _command_output(argv: list[str]) -> str:
+    return subprocess.run(
+        argv, check=True, text=True, stdout=subprocess.PIPE
+    ).stdout.strip()
+
+
+def _json_metrics(metrics) -> dict:
+    return {
+        key: float(value)
+        for key, value in metrics.results_dict.items()
+    }
+
+
+def run(
+    data: Path,
+    model_path: Path,
+    project: Path,
+    name: str,
+    epochs: int,
+    batch: int,
+    qualitative: Path | None,
+) -> Path:
+    if not data.is_file():
+        raise ValueError(f"missing dataset YAML: {data}")
+    if not model_path.is_file():
+        raise ValueError(f"missing source weights: {model_path}")
+    dataset_lock = data.parent / "split.lock.json"
+    if not dataset_lock.is_file():
+        raise ValueError(f"missing dataset lock: {dataset_lock}")
+
+    run_dir = project.resolve() / name
+    if run_dir.exists():
+        raise ValueError(f"run directory already exists: {run_dir}")
+    run_dir.mkdir(parents=True)
+
+    import torch
+    import ultralytics
+    from ultralytics import YOLO
+
+    repo = Path(__file__).resolve().parents[3]
+    args = training_args(data, project, name, epochs, batch)
+    lock = {
+        "schema": RUN_SCHEMA,
+        "status": "started",
+        "started_unix": time.time(),
+        "git_commit": _command_output(["git", "-C", str(repo), "rev-parse", "HEAD"]),
+        "dataset_lock_sha256": sha256(dataset_lock),
+        "dataset_sha256": json.loads(dataset_lock.read_text())["dataset_sha256"],
+        "source_weights": str(model_path.resolve()),
+        "source_weights_sha256": sha256(model_path),
+        "training_args": args,
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "ultralytics": ultralytics.__version__,
+            "torch": torch.__version__,
+            "torch_cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name(0),
+            "packages": sorted(
+                f"{distribution.metadata['Name']}=={distribution.version}"
+                for distribution in importlib.metadata.distributions()
+                if distribution.metadata["Name"]
+            ),
+        },
+    }
+    lock_path = run_dir / "run.lock.json"
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n")
+
+    model = YOLO(str(model_path))
+    model.train(**args)
+    best = run_dir / "weights" / "best.pt"
+    last = run_dir / "weights" / "last.pt"
+    if not best.is_file() or not last.is_file():
+        raise RuntimeError("training finished without best.pt and last.pt")
+
+    lock["best_weights_sha256"] = sha256(best)
+    lock["last_weights_sha256"] = sha256(last)
+    if epochs > 1:
+        trained = YOLO(str(best))
+        test_metrics = trained.val(
+            data=str(data.resolve()),
+            split="test",
+            imgsz=640,
+            batch=batch,
+            device=0,
+            workers=8,
+            plots=True,
+            project=str(project.resolve()),
+            name=f"{name}-test",
+            exist_ok=False,
+        )
+        lock["test_metrics"] = _json_metrics(test_metrics)
+        (run_dir / "test_metrics.json").write_text(
+            json.dumps(lock["test_metrics"], indent=2) + "\n"
+        )
+        if qualitative is not None:
+            if not qualitative.exists():
+                raise ValueError(f"missing qualitative source: {qualitative}")
+            trained.predict(
+                source=str(qualitative.resolve()),
+                imgsz=640,
+                conf=0.10,
+                device=0,
+                save=True,
+                save_txt=True,
+                save_conf=True,
+                project=str(project.resolve()),
+                name=f"{name}-scene49",
+                exist_ok=False,
+            )
+
+    lock["status"] = "complete"
+    lock["completed_unix"] = time.time()
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n")
+    return run_dir
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", required=True, type=Path)
+    parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--project", required=True, type=Path)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--qualitative", type=Path)
+    args = parser.parse_args(argv)
+    if args.epochs < 1 or args.batch < 1:
+        parser.error("epochs and batch must be positive")
+    run_dir = run(
+        args.data,
+        args.model,
+        args.project,
+        args.name,
+        args.epochs,
+        args.batch,
+        args.qualitative,
+    )
+    print(f"completed {run_dir}")
+
+
+if __name__ == "__main__":
+    main()

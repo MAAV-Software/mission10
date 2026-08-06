@@ -116,6 +116,47 @@ Set a teardown reminder the moment the pod is up.
 6. **Compile** `.hef` + write `weights.lock`. Pull keepers to the thin client.
 7. **Teardown:** `prime pods terminate`, then `prime pods list` to confirm.
 
+### Pilot weight run
+
+The checked-in pilot is scenes `0:40` (694 selected camera stations). Its
+explicit split keeps every scene in exactly one partition and gives validation
+and test one scene from each primary surface plus one lime batch each.
+
+```sh
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out /workspace/dataset/pilot40-v1/raw --scenes 0:40 \
+    --cycles-backend optix
+python3 -m datagen.materialize \
+    --out /workspace/dataset/pilot40-v1/raw --tiles
+python3 train/prepare.py \
+    --raw /workspace/dataset/pilot40-v1/raw \
+    --out /workspace/dataset/pilot40-v1/prepared \
+    --split train/pilot40-split.json
+
+uv venv --system-site-packages /workspace/venvs/mission10-yolo
+uv pip install --python /workspace/venvs/mission10-yolo/bin/python \
+    -r train/requirements.txt
+```
+
+Run one epoch under a distinct name before the 50-epoch job. Batch 16 is the
+A4000 default; if and only if the preflight CUDA-OOMs, rerun both jobs at batch
+8. Never resume the full job from the one-epoch preflight weights.
+
+```sh
+/workspace/venvs/mission10-yolo/bin/python train/run.py \
+    --data /workspace/dataset/pilot40-v1/prepared/dataset.yaml \
+    --model /workspace/weights/yolo11m.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name pilot40-preflight --epochs 1 --batch 16
+
+/workspace/venvs/mission10-yolo/bin/python train/run.py \
+    --data /workspace/dataset/pilot40-v1/prepared/dataset.yaml \
+    --model /workspace/weights/yolo11m.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name pilot40-yolo11m-640 --epochs 50 --batch 16 \
+    --qualitative /workspace/dataset/smoke-animation-a4000-7m-jitterfix/train/images
+```
+
 ## Fail-fast gates (no `|| true` anywhere)
 
 - [ ] Labels/geometry validated locally before the node exists.
