@@ -179,6 +179,35 @@ class TestMaterialize(unittest.TestCase):
             sum(len(labels[image_stem(cfg, scene, k)]) for k in selected),
         )
 
+    def test_v6_manifest_remains_materializable(self):
+        manifest_path = self.out / f"{CFG.seed}_s0000.manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema"] = "minefield-datagen/6"
+        # The v6 defaults used one scene-wide family from this older palette.
+        # These fields affect appearance only, so v7's isolated color stream
+        # must still reconstruct identical geometry and station selection.
+        manifest["config"].update(
+            {
+                "mine_color_names": ["lime", "green", "muddy_olive"],
+                "mine_color_palette_srgb": [
+                    [0x76 / 255, 0xA8 / 255, 0x2B / 255],
+                    [0x4F / 255, 0x7D / 255, 0x36 / 255],
+                    [0x55 / 255, 0x57 / 255, 0x37 / 255],
+                ],
+                "mine_color_weights": [0.10, 0.45, 0.45],
+                "mine_color_hue_jitter_deg": 4.0,
+                "mine_color_saturation_scale": [0.90, 1.10],
+                "mine_color_value_scale": [0.85, 1.15],
+            }
+        )
+        manifest_path.write_text(json.dumps(manifest))
+
+        kept, dropped = materialize_scene(
+            self.out, _sidecar({}), DEFAULT_MIN_FRAC
+        )
+        self.assertGreater(kept, 0)
+        self.assertEqual(dropped, 0)
+
     def test_sidecar_station_selection_must_match_manifest(self):
         occ = _sidecar({})
         occ["station_indices"] = occ["station_indices"][:-1]

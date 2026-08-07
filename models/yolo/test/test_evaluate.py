@@ -8,12 +8,25 @@ from train.evaluate import (
     evaluate_records,
     iou,
     match_image,
+    _image_groups,
     _predict_paths,
     threshold_sweep,
 )
 
 
 class TestOperationalEvaluation(unittest.TestCase):
+    def test_mixed_color_scene_has_explicit_evaluation_group(self):
+        manifest = {
+            "surface": {"primary": "grass"},
+            "grass": {"profile": "sparse"},
+            "mines": [
+                {"appearance": {"color_family": "green"}},
+                {"appearance": {"color_family": "official_sage_gray"}},
+            ],
+        }
+        groups = dict(_image_groups(manifest, {"pos": [0.0, 0.0, -3.0]}))
+        self.assertEqual(groups["color"], "mixed")
+
     def test_prediction_paths_are_submitted_in_bounded_chunks(self):
         class FakeModel:
             def __init__(self):

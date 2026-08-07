@@ -28,17 +28,17 @@ class TestScene(unittest.TestCase):
     def test_surface_draw_is_deterministic(self):
         self.assertEqual(build_scene(CFG, 4).surface, build_scene(CFG, 4).surface)
 
-    def test_mine_colors_are_one_jittered_batch_per_scene(self):
+    def test_mine_colors_are_independently_jittered_per_mine(self):
         scene = build_scene(CFG, 4)
         families = {appearance.color_family for appearance in scene.mine_appearances}
         colors = {appearance.color_srgb for appearance in scene.mine_appearances}
-        self.assertEqual(len(families), 1)
+        self.assertGreater(len(families), 1)
         self.assertGreater(len(colors), 1)
-        palette_index = CFG.mine_color_names.index(next(iter(families)))
-        base_h, base_s, base_v = colorsys.rgb_to_hsv(
-            *CFG.mine_color_palette_srgb[palette_index]
-        )
         for appearance in scene.mine_appearances:
+            palette_index = CFG.mine_color_names.index(appearance.color_family)
+            base_h, base_s, base_v = colorsys.rgb_to_hsv(
+                *CFG.mine_color_palette_srgb[palette_index]
+            )
             self.assertTrue(
                 all(0.0 <= channel <= 1.0 for channel in appearance.color_srgb)
             )

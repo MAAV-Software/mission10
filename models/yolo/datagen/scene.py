@@ -80,17 +80,17 @@ def _sample_surface(cfg: GenConfig, rng: random.Random) -> SurfaceChoice:
 def _sample_mine_appearances(
     cfg: GenConfig, count: int, rng: random.Random
 ) -> List[MineAppearance]:
-    """Choose one filament batch per scene, then add mild per-mine variation."""
-    palette_index = rng.choices(
-        range(len(cfg.mine_color_names)), weights=cfg.mine_color_weights
-    )[0]
-    family = cfg.mine_color_names[palette_index]
-    anchor = cfg.mine_color_palette_srgb[palette_index]
-    base_h, base_s, base_v = colorsys.rgb_to_hsv(*anchor)
+    """Choose and jitter a bounded filament anchor independently per mine."""
     hue_jitter = cfg.mine_color_hue_jitter_deg / 360.0
 
     appearances = []
     for _ in range(count):
+        palette_index = rng.choices(
+            range(len(cfg.mine_color_names)), weights=cfg.mine_color_weights
+        )[0]
+        family = cfg.mine_color_names[palette_index]
+        anchor = cfg.mine_color_palette_srgb[palette_index]
+        base_h, base_s, base_v = colorsys.rgb_to_hsv(*anchor)
         h = (base_h + rng.uniform(-hue_jitter, hue_jitter)) % 1.0
         s = min(
             1.0,

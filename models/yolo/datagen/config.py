@@ -65,19 +65,28 @@ class GenConfig:
     p_tag_none: float = 0.01
     tag_up_prob: float = 0.5  # guess: real resting orientation may be biased
 
-    # Mine-filament domain randomization. Pick one dominant batch color per
-    # scene, then vary each mine slightly around it. The lime tail covers our
-    # brighter replica without making it the synthetic dataset's main prior.
-    mine_color_names: Tuple[str, ...] = ("lime", "green", "muddy_olive")
+    # Mine-filament domain randomization. Each mine independently picks a
+    # bounded filament anchor, then varies around it. Co-locating different
+    # colors under identical scene conditions discourages scene-level color
+    # shortcuts while spanning the observed competition and replica range.
+    mine_color_names: Tuple[str, ...] = (
+        "official_sage_gray",
+        "legacy_pale_green",
+        "team_lime",
+        "green",
+        "muddy_olive",
+    )
     mine_color_palette_srgb: Tuple[Tuple[float, float, float], ...] = (
-        (0x76 / 255, 0xA8 / 255, 0x2B / 255),  # #76A82B
+        (0x8A / 255, 0xA0 / 255, 0x98 / 255),  # #8AA098
+        (0xC8 / 255, 0xCC / 255, 0xB5 / 255),  # #C8CCB5
+        (0x44 / 255, 0xBE / 255, 0x66 / 255),  # #44BE66
         (0x4F / 255, 0x7D / 255, 0x36 / 255),  # #4F7D36
         (0x55 / 255, 0x57 / 255, 0x37 / 255),  # #555737
     )
-    mine_color_weights: Tuple[float, ...] = (0.10, 0.45, 0.45)
-    mine_color_hue_jitter_deg: float = 4.0
-    mine_color_saturation_scale: Tuple[float, float] = (0.90, 1.10)
-    mine_color_value_scale: Tuple[float, float] = (0.85, 1.15)
+    mine_color_weights: Tuple[float, ...] = (0.30, 0.10, 0.10, 0.25, 0.25)
+    mine_color_hue_jitter_deg: float = 6.0
+    mine_color_saturation_scale: Tuple[float, float] = (0.50, 1.20)
+    mine_color_value_scale: Tuple[float, float] = (0.80, 1.20)
 
     # Grass-primary scenes are usually sparse, with rare deliberately hard
     # dense/tall scenes. A balanced deterministic schedule realizes this
@@ -193,6 +202,16 @@ class GenConfig:
         )
         if min(palette_lengths) == 0 or len(set(palette_lengths)) != 1:
             raise ValueError(f"bad mine color palette lengths {palette_lengths}")
+        if any(
+            not isinstance(name, str) or not name.strip()
+            for name in self.mine_color_names
+        ) or len({name.casefold() for name in self.mine_color_names}) != len(
+            self.mine_color_names
+        ):
+            raise ValueError(
+                f"mine color family names must be non-empty and unique: "
+                f"{self.mine_color_names}"
+            )
         if (
             min(self.mine_color_weights) < 0.0
             or sum(self.mine_color_weights) <= 0.0

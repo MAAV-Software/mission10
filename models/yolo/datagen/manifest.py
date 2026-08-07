@@ -9,7 +9,8 @@ from .config import GenConfig
 from .labels import YoloBox
 from .scene import Scene, image_stem
 
-SCHEMA = "minefield-datagen/6"
+SCHEMA = "minefield-datagen/7"
+READABLE_SCHEMAS = frozenset(("minefield-datagen/6", SCHEMA))
 OCCLUSION_SCHEMA = "minefield-occlusion/2"
 
 

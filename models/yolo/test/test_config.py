@@ -18,8 +18,30 @@ class TestRandomizationConfig(unittest.TestCase):
             set(CFG.surface_materials),
             {"grass", "dirt", "gravel", "pavement", "concrete"},
         )
-        self.assertEqual(CFG.mine_color_names, ("lime", "green", "muddy_olive"))
-        self.assertEqual(CFG.mine_color_weights, (0.10, 0.45, 0.45))
+        self.assertEqual(
+            CFG.mine_color_names,
+            (
+                "official_sage_gray",
+                "legacy_pale_green",
+                "team_lime",
+                "green",
+                "muddy_olive",
+            ),
+        )
+        self.assertEqual(
+            CFG.mine_color_palette_srgb,
+            (
+                (0x8A / 255, 0xA0 / 255, 0x98 / 255),
+                (0xC8 / 255, 0xCC / 255, 0xB5 / 255),
+                (0x44 / 255, 0xBE / 255, 0x66 / 255),
+                (0x4F / 255, 0x7D / 255, 0x36 / 255),
+                (0x55 / 255, 0x57 / 255, 0x37 / 255),
+            ),
+        )
+        self.assertEqual(CFG.mine_color_weights, (0.30, 0.10, 0.10, 0.25, 0.25))
+        self.assertEqual(CFG.mine_color_hue_jitter_deg, 6.0)
+        self.assertEqual(CFG.mine_color_saturation_scale, (0.50, 1.20))
+        self.assertEqual(CFG.mine_color_value_scale, (0.80, 1.20))
         self.assertEqual(CFG.grass_dense_prob, 0.10)
         self.assertEqual(CFG.eevee_render_samples, 8)
         self.assertEqual(CFG.png_compression, 15)
@@ -57,6 +79,15 @@ class TestRandomizationConfig(unittest.TestCase):
             {"png_compression": 101},
             {"mine_color_names": ()},
             {"mine_color_names": ("green",)},
+            {
+                "mine_color_names": (
+                    "duplicate",
+                    "duplicate",
+                    "third",
+                    "fourth",
+                    "fifth",
+                )
+            },
             {"mine_color_weights": (-1.0, 1.0, 1.0)},
             {"mine_color_weights": (0.0, 0.0, 0.0)},
             {

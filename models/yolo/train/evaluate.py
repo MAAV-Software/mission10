@@ -243,14 +243,13 @@ def _image_groups(manifest: dict, station: dict) -> tuple[tuple[str, str], ...]:
     colors = sorted(
         {mine["appearance"]["color_family"] for mine in manifest["mines"]}
     )
-    if len(colors) != 1:
-        raise ValueError("expected one filament color family per scene")
+    color_group = colors[0] if len(colors) == 1 else "mixed"
     altitude = abs(float(station["pos"][2]))
     return (
         ("altitude", _altitude_band(altitude)),
         ("surface", manifest["surface"]["primary"]),
         ("grass", grass),
-        ("color", colors[0]),
+        ("color", color_group),
     )
 
 

@@ -44,7 +44,7 @@ from mission_engine.core.tiles import tile_grid
 
 from .config import GenConfig
 from .labels import box_from_extents, raw_extents, yolo_box
-from .manifest import OCCLUSION_SCHEMA, SCHEMA
+from .manifest import OCCLUSION_SCHEMA, READABLE_SCHEMAS
 from .scene import build_scene, image_stem
 
 FULLFRAME_MODEL_PX = 640  # untiled inference letterboxes the frame to this
@@ -83,8 +83,11 @@ def _scene_context(out: Path, occ: dict):
     if not manifest_path.is_file():
         raise ValueError(f"missing scene manifest {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema") != SCHEMA:
-        raise ValueError(f"expected {SCHEMA}, got {manifest.get('schema')!r}")
+    if manifest.get("schema") not in READABLE_SCHEMAS:
+        raise ValueError(
+            f"expected one of {sorted(READABLE_SCHEMAS)}, "
+            f"got {manifest.get('schema')!r}"
+        )
     if manifest.get("seed") != seed or manifest.get("scene") != scene_index:
         raise ValueError("occlusion sidecar and manifest identify different scenes")
     cfg = GenConfig.from_dict(manifest["config"])
