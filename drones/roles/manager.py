@@ -139,7 +139,7 @@ class ManagerDrone:
                 self.mine_data_cv.wait()
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
-        cam = Picamera2()
+        cam = Picamera2(1)
         config = cam.create_still_configuration()
         cam.configure(config)
         cam.start()
@@ -159,8 +159,8 @@ class ManagerDrone:
                 image_timestamp = self.mission_node.latest_timestamp
                 self.TMP_timestamp_queue.put(image_timestamp)
                 num_pictures_taken += 1
-                if num_pictures_taken > 10:
-                    self.shutdown_flag = True
+                # if num_pictures_taken > 10:
+                #     self.shutdown_flag = True
 
             print(f"Image taken at timestamp {image_timestamp}!")
 
@@ -219,7 +219,6 @@ class ManagerDrone:
                 # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
                 while (self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0):
                     print("Waiting for mission to start")
-                    print(self.mission_node)
                     print(self.TMP_timestamp_queue.qsize())
                     self.mine_data_cv.wait()
                 print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
@@ -517,6 +516,9 @@ class ManagerDrone:
 
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
+
+        # time.sleep(3)
+        # self.shutdown_flag = True
 
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)

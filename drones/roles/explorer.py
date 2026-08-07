@@ -141,7 +141,7 @@ class ExploreDrone:
                 self.coords_cv.wait()
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
-        cam = Picamera2()
+        cam = Picamera2(1)
         config = cam.create_still_configuration()
         cam.configure(config)
         cam.start()
