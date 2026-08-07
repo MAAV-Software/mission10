@@ -7,6 +7,7 @@ the GPU environment.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import importlib.metadata
 import json
@@ -153,6 +154,169 @@ def _json_metrics(metrics) -> dict:
     }
 
 
+def _runtime_environment(torch, ultralytics) -> dict:
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "ultralytics": ultralytics.__version__,
+        "torch": torch.__version__,
+        "torch_cuda": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(0),
+        "packages": sorted(
+            f"{distribution.metadata['Name']}=={distribution.version}"
+            for distribution in importlib.metadata.distributions()
+            if distribution.metadata["Name"]
+        ),
+    }
+
+
+def resume_inputs(run_dir: Path) -> dict:
+    """Validate one interrupted run without importing the GPU framework."""
+    run_dir = Path(run_dir).resolve()
+    lock_path = run_dir / "run.lock.json"
+    if not lock_path.is_file():
+        raise ValueError(f"missing run lock: {lock_path}")
+    lock = json.loads(lock_path.read_text())
+    if lock.get("schema") != RUN_SCHEMA:
+        raise ValueError(f"invalid run-lock schema: {lock.get('schema')!r}")
+    if lock.get("status") not in {"started", "resuming"}:
+        raise ValueError(f"run is not interrupted: status={lock.get('status')!r}")
+    args = lock.get("training_args")
+    if not isinstance(args, dict):
+        raise ValueError("run lock has no training arguments")
+    if training_config_sha256(args) != lock.get("training_config_sha256"):
+        raise ValueError("training arguments changed after the run started")
+
+    data = Path(args.get("data", ""))
+    if not data.is_file():
+        raise ValueError(f"missing resume dataset YAML: {data}")
+    dataset_lock = data.parent / "split.lock.json"
+    if not dataset_lock.is_file():
+        raise ValueError(f"missing resume dataset lock: {dataset_lock}")
+    if sha256(dataset_lock) != lock.get("dataset_lock_sha256"):
+        raise ValueError("resume dataset lock changed after the run started")
+    dataset = json.loads(dataset_lock.read_text())
+    if dataset.get("dataset_sha256") != lock.get("dataset_sha256"):
+        raise ValueError("resume dataset identity changed after the run started")
+
+    source_weights = Path(lock.get("source_weights", ""))
+    if not source_weights.is_file():
+        raise ValueError(f"missing original source weights: {source_weights}")
+    if sha256(source_weights) != lock.get("source_weights_sha256"):
+        raise ValueError("original source weights changed after the run started")
+
+    last = run_dir / "weights" / "last.pt"
+    if not last.is_file():
+        raise ValueError(f"missing resume checkpoint: {last}")
+    results = run_dir / "results.csv"
+    if not results.is_file():
+        raise ValueError(f"missing completed-epoch history: {results}")
+    with results.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        raise ValueError("cannot resume before one epoch has completed")
+    try:
+        completed_epochs = int(rows[-1]["epoch"])
+        target_epochs = int(args["epochs"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("invalid epoch history in results.csv") from error
+    if completed_epochs != len(rows):
+        raise ValueError(
+            f"epoch history is not contiguous: last={completed_epochs}, rows={len(rows)}"
+        )
+    if completed_epochs >= target_epochs:
+        raise ValueError(
+            f"training already reached {completed_epochs}/{target_epochs} epochs"
+        )
+    return {
+        "run_dir": run_dir,
+        "lock_path": lock_path,
+        "lock": lock,
+        "args": args,
+        "data": data,
+        "last": last,
+        "completed_epochs": completed_epochs,
+        "target_epochs": target_epochs,
+    }
+
+
+def _record_weights(run_dir: Path, lock: dict) -> Path:
+    best = run_dir / "weights" / "best.pt"
+    last = run_dir / "weights" / "last.pt"
+    if not best.is_file() or not last.is_file():
+        raise RuntimeError("training finished without best.pt and last.pt")
+    lock["best_weights_sha256"] = sha256(best)
+    lock["last_weights_sha256"] = sha256(last)
+    return best
+
+
+def _finish_run(run_dir: Path, lock: dict, data: Path, args: dict, YOLO) -> None:
+    best = _record_weights(run_dir, lock)
+    trained = YOLO(str(best))
+    test_metrics = trained.val(
+        data=str(data.resolve()),
+        split="test",
+        imgsz=640,
+        batch=args["batch"],
+        device=0,
+        workers=8,
+        plots=True,
+        project=str(Path(args["project"]).resolve()),
+        name=f"{args['name']}-test",
+        exist_ok=False,
+    )
+    lock["test_metrics"] = _json_metrics(test_metrics)
+    (run_dir / "test_metrics.json").write_text(
+        json.dumps(lock["test_metrics"], indent=2) + "\n"
+    )
+
+
+def resume_run(run_dir: Path) -> Path:
+    """Resume an interrupted checkpoint with its saved optimizer and schedule."""
+    state = resume_inputs(run_dir)
+    import torch
+    import ultralytics
+    from ultralytics import YOLO
+
+    lock = state["lock"]
+    expected = lock.get("environment", {})
+    if ultralytics.__version__ != expected.get("ultralytics"):
+        raise ValueError(
+            "resume Ultralytics version differs: "
+            f"{ultralytics.__version__} != {expected.get('ultralytics')}"
+        )
+    if torch.__version__ != expected.get("torch"):
+        raise ValueError(
+            f"resume Torch version differs: {torch.__version__} != {expected.get('torch')}"
+        )
+    if not torch.cuda.is_available():
+        raise ValueError("resume requires a CUDA GPU")
+
+    repo = Path(__file__).resolve().parents[3]
+    attempts = lock.setdefault("resume_attempts", [])
+    attempts.append(
+        {
+            "started_unix": time.time(),
+            "source_commit": source_commit(repo),
+            "checkpoint": str(state["last"]),
+            "checkpoint_sha256": sha256(state["last"]),
+            "completed_epochs_before": state["completed_epochs"],
+            "environment": _runtime_environment(torch, ultralytics),
+        }
+    )
+    lock["status"] = "resuming"
+    state["lock_path"].write_text(json.dumps(lock, indent=2) + "\n")
+
+    model = YOLO(str(state["last"]))
+    model.train(resume=True)
+    _finish_run(state["run_dir"], lock, state["data"], state["args"], YOLO)
+    attempts[-1]["completed_unix"] = time.time()
+    lock["status"] = "complete"
+    lock["completed_unix"] = time.time()
+    state["lock_path"].write_text(json.dumps(lock, indent=2) + "\n")
+    return state["run_dir"]
+
+
 def run(
     data: Path,
     model_path: Path,
@@ -205,50 +369,15 @@ def run(
         "training_preset": preset,
         "training_config_sha256": training_config_sha256(args),
         "training_args": args,
-        "environment": {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "ultralytics": ultralytics.__version__,
-            "torch": torch.__version__,
-            "torch_cuda": torch.version.cuda,
-            "gpu": torch.cuda.get_device_name(0),
-            "packages": sorted(
-                f"{distribution.metadata['Name']}=={distribution.version}"
-                for distribution in importlib.metadata.distributions()
-                if distribution.metadata["Name"]
-            ),
-        },
+        "environment": _runtime_environment(torch, ultralytics),
     }
     lock_path = run_dir / "run.lock.json"
     lock_path.write_text(json.dumps(lock, indent=2) + "\n")
 
     model = YOLO(str(model_path))
     model.train(**args)
-    best = run_dir / "weights" / "best.pt"
-    last = run_dir / "weights" / "last.pt"
-    if not best.is_file() or not last.is_file():
-        raise RuntimeError("training finished without best.pt and last.pt")
-
-    lock["best_weights_sha256"] = sha256(best)
-    lock["last_weights_sha256"] = sha256(last)
     if args["epochs"] > 1:
-        trained = YOLO(str(best))
-        test_metrics = trained.val(
-            data=str(data.resolve()),
-            split="test",
-            imgsz=640,
-            batch=args["batch"],
-            device=0,
-            workers=8,
-            plots=True,
-            project=str(project.resolve()),
-            name=f"{name}-test",
-            exist_ok=False,
-        )
-        lock["test_metrics"] = _json_metrics(test_metrics)
-        (run_dir / "test_metrics.json").write_text(
-            json.dumps(lock["test_metrics"], indent=2) + "\n"
-        )
+        _finish_run(run_dir, lock, data, args, YOLO)
         if qualitative is not None:
             if not qualitative.exists():
                 raise ValueError(f"missing qualitative source: {qualitative}")
@@ -264,6 +393,8 @@ def run(
                 name=f"{name}-scene49",
                 exist_ok=False,
             )
+    else:
+        _record_weights(run_dir, lock)
 
     lock["status"] = "complete"
     lock["completed_unix"] = time.time()
@@ -273,10 +404,15 @@ def run(
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", required=True, type=Path)
-    parser.add_argument("--model", required=True, type=Path)
-    parser.add_argument("--project", required=True, type=Path)
-    parser.add_argument("--name", required=True)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        help="resume an interrupted run directory from its last.pt checkpoint",
+    )
+    parser.add_argument("--data", type=Path)
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--name")
     parser.add_argument("--preset", choices=TRAINING_PRESETS, default="pilot")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch", type=int)
@@ -288,6 +424,26 @@ def main(argv=None) -> None:
     )
     parser.add_argument("--qualitative", type=Path)
     args = parser.parse_args(argv)
+    if args.resume is not None:
+        conflicts = [
+            name
+            for name in ("data", "model", "project", "name", "epochs", "batch", "cache", "qualitative")
+            if getattr(args, name) is not None
+        ]
+        if conflicts or args.preset != "pilot":
+            parser.error("--resume does not accept training overrides")
+        try:
+            run_dir = resume_run(args.resume)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            parser.error(str(error))
+        print(f"completed {run_dir}")
+        return
+    missing = [
+        name for name in ("data", "model", "project", "name")
+        if getattr(args, name) is None
+    ]
+    if missing:
+        parser.error(f"missing required arguments: {', '.join('--' + name for name in missing)}")
     if (args.epochs is not None and args.epochs < 1) or (
         args.batch is not None and args.batch < 1
     ):

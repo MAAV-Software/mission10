@@ -199,6 +199,14 @@ for this step: its resolver does not count system-site packages as satisfying
 dependencies and can replace the working CUDA framework with a different torch
 build.
 
+Keep this venv under `/workspace`, not `/opt`: `/opt` is container-local and is
+lost when a replacement pod mounts the same network volume. Before `pip
+install`, check that `pyvenv.cfg` says `include-system-site-packages = true` and
+that the venv imports the pod's CUDA-enabled Torch. Some minimal pod images can
+silently create an isolated venv even when that option was requested. Fix or
+recreate the venv before dependency installation; never let pip replace the
+known-working CUDA Torch build.
+
 Run one epoch under a distinct name before the 50-epoch job. Batch 16 is the
 A4000 default; if and only if the preflight CUDA-OOMs, rerun both jobs at batch
 8. Never resume the full job from the one-epoch preflight weights.
@@ -228,12 +236,12 @@ scenes, and nearly equal tile/box/empty counts:
 
 ```sh
 cd /workspace/src/mission10/models/yolo
-/opt/venvs/mission10-yolo/bin/python train/prepare.py \
+/workspace/venvs/mission10-yolo/bin/python train/prepare.py \
     --raw /workspace/dataset/production300-v1/raw \
     --out /workspace/dataset/production300-v1/prepared \
     --split train/production300-split.json
 
-PYTHONPATH=. /opt/venvs/mission10-yolo/bin/python export/calibrate.py \
+PYTHONPATH=. /workspace/venvs/mission10-yolo/bin/python export/calibrate.py \
     --prepared /workspace/dataset/production300-v1/prepared \
     --raw /workspace/dataset/production300-v1/raw \
     --out /workspace/dataset/production300-v1/calibration-1024 \
@@ -244,13 +252,13 @@ Run the preflight and full job from the same pilot checkpoint. Never seed the
 full job from preflight output:
 
 ```sh
-/opt/venvs/mission10-yolo/bin/python train/run.py \
+/workspace/venvs/mission10-yolo/bin/python train/run.py \
     --data /workspace/dataset/production300-v1/prepared/dataset.yaml \
     --model /workspace/inputs/pilot40/best.pt \
     --project /workspace/runs/mission10-yolo \
     --name production300-preflight --epochs 1 --batch 16
 
-/opt/venvs/mission10-yolo/bin/python train/run.py \
+/workspace/venvs/mission10-yolo/bin/python train/run.py \
     --data /workspace/dataset/production300-v1/prepared/dataset.yaml \
     --model /workspace/inputs/pilot40/best.pt \
     --project /workspace/runs/mission10-yolo \
@@ -269,7 +277,7 @@ After `best.pt` is frozen, select the confidence threshold on validation with
 F2 and a 90% precision floor, then apply it unchanged to test:
 
 ```sh
-/opt/venvs/mission10-yolo/bin/python train/evaluate.py \
+/workspace/venvs/mission10-yolo/bin/python train/evaluate.py \
     --weights /workspace/runs/mission10-yolo/production300-yolo11m-640-pilotwarm/weights/best.pt \
     --prepared /workspace/dataset/production300-v1/prepared \
     --raw /workspace/dataset/production300-v1/raw \
@@ -317,7 +325,7 @@ blender -b assets/m10-base.blend \
     -P tools/render_color_scale_matrix.py -- \
     --out /workspace/dataset/mine-color-scale-v1 \
     --cycles-backend optix --samples 64
-/opt/venvs/mission10-yolo/bin/python \
+/workspace/venvs/mission10-yolo/bin/python \
     tools/evaluate_color_scale_matrix.py \
     --weights /workspace/inputs/production300/best.pt \
     --matrix /workspace/dataset/mine-color-scale-v1 \
@@ -327,27 +335,41 @@ blender -b assets/m10-base.blend \
 blender -b assets/m10-base.blend -P datagen/generate.py -- \
     --out /workspace/dataset/appearance60-v1/raw --scenes 0:60 \
     --seed m10-appearance-v1 --cycles-backend optix
-/opt/venvs/mission10-yolo/bin/python -m datagen.materialize \
+/workspace/venvs/mission10-yolo/bin/python -m datagen.materialize \
     --out /workspace/dataset/appearance60-v1/raw --tiles
-/opt/venvs/mission10-yolo/bin/python train/prepare.py \
+/workspace/venvs/mission10-yolo/bin/python train/prepare.py \
     --raw /workspace/dataset/appearance60-v1/raw \
     --out /workspace/dataset/appearance60-v1/prepared \
     --split train/appearance60-split.json
 
-/opt/venvs/mission10-yolo/bin/python train/compose.py \
+/workspace/venvs/mission10-yolo/bin/python train/compose.py \
     --preset combined \
     --out /workspace/dataset/domain-gap-combined-v1 \
     --component production=/workspace/dataset/production300-v1/prepared \
     --component appearance=/workspace/dataset/appearance60-v1/prepared \
     --component hardneg=/workspace/dataset/hard-negative-component
 
-/opt/venvs/mission10-yolo/bin/python train/run.py \
+/workspace/venvs/mission10-yolo/bin/python train/run.py \
     --preset combined \
     --data /workspace/dataset/domain-gap-combined-v1/dataset.yaml \
     --model /workspace/inputs/production300/best.pt \
     --project /workspace/runs/mission10-yolo \
     --name domain-gap-combined-v1
 ```
+
+If a spot eviction or deliberate stop interrupts a locked run after at least
+one complete epoch, resume the run directory itself:
+
+```sh
+/workspace/venvs/mission10-yolo/bin/python train/run.py \
+    --resume /workspace/runs/mission10-yolo/domain-gap-hardneg-v1
+```
+
+Do not start a new fine-tune from `last.pt`. The resume path validates the
+dataset lock, source weights, completed epoch history, framework versions, and
+checkpoint hash before it restores Ultralytics' saved optimizer and scheduler.
+It records the replacement source commit and GPU in `run.lock.json`, then runs
+the original test phase and completes the same lock after epoch 20.
 
 The composer validates `split.lock.json` for full synthetic datasets and
 `component.lock.json` for certified train-only supplements. Do not rename or

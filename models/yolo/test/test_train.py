@@ -1,8 +1,15 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from train.run import source_commit, training_args, training_config_sha256
+from train.run import (
+    resume_inputs,
+    sha256,
+    source_commit,
+    training_args,
+    training_config_sha256,
+)
 
 
 class TestTrainingConfig(unittest.TestCase):
@@ -84,6 +91,57 @@ class TestTrainingConfig(unittest.TestCase):
         commit = "a" * 40
         (root / ".source-commit").write_text(commit + "\n")
         self.assertEqual(source_commit(root), commit)
+
+    def _interrupted_run(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        data_dir = root / "dataset"
+        data_dir.mkdir()
+        data = data_dir / "dataset.yaml"
+        data.write_text("names:\n  0: mine\n")
+        dataset_lock = data_dir / "split.lock.json"
+        dataset_identity = "d" * 64
+        dataset_lock.write_text(
+            json.dumps({"dataset_sha256": dataset_identity}) + "\n"
+        )
+        source = root / "source.pt"
+        source.write_bytes(b"source")
+        run_dir = root / "runs" / "hardneg"
+        weights = run_dir / "weights"
+        weights.mkdir(parents=True)
+        (weights / "last.pt").write_bytes(b"last")
+        args = training_args(
+            data,
+            root / "runs",
+            "hardneg",
+            preset="hardneg",
+        )
+        lock = {
+            "schema": "mission10-yolo-run/1",
+            "status": "started",
+            "dataset_lock_sha256": sha256(dataset_lock),
+            "dataset_sha256": dataset_identity,
+            "source_weights": str(source),
+            "source_weights_sha256": sha256(source),
+            "training_config_sha256": training_config_sha256(args),
+            "training_args": args,
+        }
+        (run_dir / "run.lock.json").write_text(json.dumps(lock) + "\n")
+        (run_dir / "results.csv").write_text("epoch,time\n1,100\n")
+        return run_dir
+
+    def test_resume_inputs_preserve_locked_dataset_and_epoch(self):
+        state = resume_inputs(self._interrupted_run())
+        self.assertEqual(state["completed_epochs"], 1)
+        self.assertEqual(state["target_epochs"], 20)
+        self.assertEqual(state["last"].name, "last.pt")
+
+    def test_resume_inputs_reject_changed_dataset_lock(self):
+        run_dir = self._interrupted_run()
+        lock = json.loads((run_dir / "run.lock.json").read_text())
+        data = Path(lock["training_args"]["data"])
+        (data.parent / "split.lock.json").write_text("{}\n")
+        with self.assertRaisesRegex(ValueError, "dataset lock changed"):
+            resume_inputs(run_dir)
 
 
 if __name__ == "__main__":
