@@ -222,8 +222,11 @@ def _prepare_output(out: Path) -> tuple[Path, Path]:
 def _arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True)
+    # Do not name this --cycles-device. Blender 5 intercepts that built-in
+    # option even after ``--`` and rejects lowercase values before this script
+    # can parse them.
     parser.add_argument(
-        "--cycles-device",
+        "--cycles-backend",
         choices=("auto", "cpu", "cuda", "optix"),
         default="auto",
     )
@@ -339,7 +342,7 @@ def render(ns: argparse.Namespace) -> dict:
 
     _configure_camera(bpy, cfg)
     device = _configure_render(
-        bpy, cfg, engine="cycles", cycles_device=ns.cycles_device
+        bpy, cfg, engine="cycles", cycles_device=ns.cycles_backend
     )
     if bpy.context.scene.render.engine != "CYCLES":
         raise RuntimeError("diagnostic acceptance requires the Cycles engine")

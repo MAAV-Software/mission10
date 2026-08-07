@@ -209,7 +209,7 @@ make the test machine-readable. This set is a diagnostic, not training data:
 blender -b assets/m10-base.blend \
     -P tools/render_color_scale_matrix.py -- \
     --out /workspace/dataset/mine-color-scale-v1 \
-    --cycles-device optix --samples 64
+    --cycles-backend optix --samples 64
 
 uv run --with pillow --with ultralytics==8.4.115 \
     python tools/evaluate_color_scale_matrix.py \

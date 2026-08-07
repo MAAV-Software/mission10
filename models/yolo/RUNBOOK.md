@@ -305,7 +305,7 @@ cd /workspace/src/mission10/models/yolo
 blender -b assets/m10-base.blend \
     -P tools/render_color_scale_matrix.py -- \
     --out /workspace/dataset/mine-color-scale-v1 \
-    --cycles-device optix --samples 64
+    --cycles-backend optix --samples 64
 /opt/venvs/mission10-yolo/bin/python \
     tools/evaluate_color_scale_matrix.py \
     --weights /workspace/inputs/production300/best.pt \
@@ -342,6 +342,11 @@ The composer validates `split.lock.json` for full synthetic datasets and
 `component.lock.json` for certified train-only supplements. Do not rename or
 edit either lock. Fine-tune presets reject epoch, batch, and cache overrides;
 this keeps the arms matched.
+
+Use the script option `--cycles-backend`, not `--cycles-device`. Blender 5
+intercepts its built-in `--cycles-device` option even after the `--` script
+separator. A lowercase `optix` value then fails before the Python adapter can
+normalize it.
 
 When inference sources are passed as an explicit Python list, Ultralytics
 8.4.115 can combine the entire list into one tensor even when `batch` is set.

@@ -9,6 +9,7 @@ from tools.render_color_scale_matrix import (
     POSITIVE_BACKGROUND,
     SCHEMA,
     TARGET_WIDTHS_PX,
+    _arguments,
     _prepare_output,
     altitude_for_projected_width,
     centered_ground_truth,
@@ -101,6 +102,12 @@ class TestColorScaleMatrix(unittest.TestCase):
             self.assertTrue(labels.is_dir())
             with self.assertRaisesRegex(ValueError, "not empty"):
                 _prepare_output(out)
+
+    def test_script_backend_option_does_not_collide_with_blender(self):
+        args = _arguments(
+            ["--out", "/tmp/matrix", "--cycles-backend", "optix"]
+        )
+        self.assertEqual(args.cycles_backend, "optix")
 
     def test_invalid_pure_inputs_are_rejected(self):
         cfg = GenConfig()
