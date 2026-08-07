@@ -18,6 +18,16 @@ from pathlib import Path
 
 
 RUN_SCHEMA = "mission10-yolo-run/1"
+COMPOSITION_SCHEMA = "mission10-yolo-composition/1"
+FINE_TUNE_PRESETS = (
+    "control",
+    "appearance",
+    "hardneg",
+    "combined",
+    "real_positive",
+)
+TRAINING_PRESETS = ("pilot", *FINE_TUNE_PRESETS)
+_CONFIG_RUNTIME_KEYS = {"data", "project", "name", "exist_ok"}
 
 
 def sha256(path: Path) -> str:
@@ -32,18 +42,42 @@ def training_args(
     data: Path,
     project: Path,
     name: str,
-    epochs: int = 50,
-    batch: int = 16,
-    cache: str | bool = "ram",
+    epochs: int | None = None,
+    batch: int | None = None,
+    cache: str | bool | None = None,
+    preset: str = "pilot",
 ) -> dict:
-    """Explicit pilot settings; no behavior-changing Ultralytics defaults."""
+    """Return one allow-listed, fully explicit Ultralytics configuration."""
+    if preset not in TRAINING_PRESETS:
+        raise ValueError(f"unknown training preset: {preset!r}")
+    if preset == "pilot":
+        epochs = 50 if epochs is None else epochs
+        batch = 16 if batch is None else batch
+        cache = "ram" if cache is None else cache
+        patience = 15 if epochs > 1 else 0
+        lr0 = 0.001
+    else:
+        required = {"epochs": 20, "batch": 16, "cache": False}
+        supplied = {"epochs": epochs, "batch": batch, "cache": cache}
+        conflicts = {
+            key: value
+            for key, value in supplied.items()
+            if value is not None and value != required[key]
+        }
+        if conflicts:
+            raise ValueError(f"{preset} preset does not permit overrides: {conflicts}")
+        epochs = 20
+        batch = 16
+        cache = False
+        patience = 8
+        lr0 = 0.0001
     return {
         "data": str(data.resolve()),
         "project": str(project.resolve()),
         "name": name,
         "exist_ok": True,
         "epochs": epochs,
-        "patience": 15 if epochs > 1 else 0,
+        "patience": patience,
         "imgsz": 640,
         "batch": batch,
         "device": 0,
@@ -51,7 +85,7 @@ def training_args(
         "cache": cache,
         "amp": True,
         "optimizer": "AdamW",
-        "lr0": 0.001,
+        "lr0": lr0,
         "lrf": 0.01,
         "cos_lr": True,
         "weight_decay": 0.0005,
@@ -77,6 +111,15 @@ def training_args(
         "copy_paste": 0.0,
         "close_mosaic": min(10, max(0, epochs - 1)),
     }
+
+
+def training_config_sha256(args: dict) -> str:
+    """Hash behavior-changing settings independently of run locations."""
+    config = {
+        key: value for key, value in args.items() if key not in _CONFIG_RUNTIME_KEYS
+    }
+    payload = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _command_output(argv: list[str]) -> str:
@@ -115,10 +158,11 @@ def run(
     model_path: Path,
     project: Path,
     name: str,
-    epochs: int,
-    batch: int,
-    cache: str | bool,
+    epochs: int | None,
+    batch: int | None,
+    cache: str | bool | None,
     qualitative: Path | None,
+    preset: str = "pilot",
 ) -> Path:
     if not data.is_file():
         raise ValueError(f"missing dataset YAML: {data}")
@@ -127,6 +171,17 @@ def run(
     dataset_lock = data.parent / "split.lock.json"
     if not dataset_lock.is_file():
         raise ValueError(f"missing dataset lock: {dataset_lock}")
+    dataset = json.loads(dataset_lock.read_text())
+    if "dataset_sha256" not in dataset:
+        raise ValueError(f"dataset lock has no dataset_sha256: {dataset_lock}")
+    if preset in FINE_TUNE_PRESETS and (
+        dataset.get("schema") != COMPOSITION_SCHEMA
+        or dataset.get("preset") != preset
+    ):
+        raise ValueError(
+            f"{preset} training requires a matching locked composition dataset"
+        )
+    args = training_args(data, project, name, epochs, batch, cache, preset)
 
     run_dir = project.resolve() / name
     if run_dir.exists():
@@ -138,16 +193,17 @@ def run(
     from ultralytics import YOLO
 
     repo = Path(__file__).resolve().parents[3]
-    args = training_args(data, project, name, epochs, batch, cache)
     lock = {
         "schema": RUN_SCHEMA,
         "status": "started",
         "started_unix": time.time(),
         "git_commit": source_commit(repo),
         "dataset_lock_sha256": sha256(dataset_lock),
-        "dataset_sha256": json.loads(dataset_lock.read_text())["dataset_sha256"],
+        "dataset_sha256": dataset["dataset_sha256"],
         "source_weights": str(model_path.resolve()),
         "source_weights_sha256": sha256(model_path),
+        "training_preset": preset,
+        "training_config_sha256": training_config_sha256(args),
         "training_args": args,
         "environment": {
             "python": sys.version,
@@ -175,13 +231,13 @@ def run(
 
     lock["best_weights_sha256"] = sha256(best)
     lock["last_weights_sha256"] = sha256(last)
-    if epochs > 1:
+    if args["epochs"] > 1:
         trained = YOLO(str(best))
         test_metrics = trained.val(
             data=str(data.resolve()),
             split="test",
             imgsz=640,
-            batch=batch,
+            batch=args["batch"],
             device=0,
             workers=8,
             plots=True,
@@ -221,17 +277,20 @@ def main(argv=None) -> None:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--name", required=True)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--preset", choices=TRAINING_PRESETS, default="pilot")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch", type=int)
     parser.add_argument(
         "--cache",
         choices=("ram", "disk", "none"),
-        default="ram",
+        default=None,
         help="image cache policy; 'none' streams from the prepared dataset",
     )
     parser.add_argument("--qualitative", type=Path)
     args = parser.parse_args(argv)
-    if args.epochs < 1 or args.batch < 1:
+    if (args.epochs is not None and args.epochs < 1) or (
+        args.batch is not None and args.batch < 1
+    ):
         parser.error("epochs and batch must be positive")
     run_dir = run(
         args.data,
@@ -242,6 +301,7 @@ def main(argv=None) -> None:
         args.batch,
         False if args.cache == "none" else args.cache,
         args.qualitative,
+        args.preset,
     )
     print(f"completed {run_dir}")
 
