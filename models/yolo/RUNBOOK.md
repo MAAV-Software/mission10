@@ -303,6 +303,14 @@ Run these phases in order:
 Use the network-volume paths below as a convention so every artifact survives
 pod replacement:
 
+Transfer a materialized component as one uncompressed tar archive instead of
+using recursive SCP. PNG data gains little from another compression pass, and
+recursive SCP pays a large round-trip cost for every zero-byte YOLO label.
+Verify the archive hash before extraction and still let the composer validate
+every entry against `component.lock.json`. On the RunPod network volume, the
+composer's full SHA-256 pass over production300 can take about 11 minutes before
+it creates any hardlinks; zero output during that pass is expected.
+
 ```sh
 cd /workspace/src/mission10/models/yolo
 blender -b assets/m10-base.blend \
