@@ -288,7 +288,10 @@ Run these phases in order:
    `train/appearance60-split.json`.
 3. Certify all private source annotations locally. Re-run the frozen baseline
    audit at its 0.001 candidate floor.
-4. Confirm hard-negative proposals and materialize their train-only component.
+4. Spot-check the representative hard-negative QA sample. Materialize the
+   train-only component with the explicit certification-backed mode; never use
+   that mode with incomplete or uncertified labels, and always exclude human
+   rejections.
 5. Compose `control`, `appearance`, `hardneg`, and `combined` datasets. Every
    composition keeps production300 validation and test unchanged.
 6. Run each locked 20-epoch preset from the same frozen production300
@@ -347,6 +350,62 @@ Use the script option `--cycles-backend`, not `--cycles-device`. Blender 5
 intercepts its built-in `--cycles-device` option even after the `--` script
 separator. A lowercase `optix` value then fails before the Python adapter can
 normalize it.
+
+### Real-phone scale diagnostic
+
+Do not interpret the 71 close-up phone training candidates as a deployment
+recall test. Their 34 certified mine boxes have 240–2434 px maximum sides,
+whereas deployment mines occupy roughly tens of pixels in a 640 px tile. The
+production300 checkpoint scored 0/34 at the original phone scale, but the
+deterministic object-centered probe at the frozen 0.37 threshold scored 21/34
+at 30 px and 32/34 at both 60 px and 120 px. This isolates object scale as a
+major cause of the apparent phone-image recall failure. The same probes still
+produce false positives around the mine, and empty phone tiles fire heavily,
+so real-background hard negatives remain necessary.
+
+The controlled render matrix scored 15/15 across the current mine palette.
+That means renderer color alone does not reproduce the real domain gap; do not
+spend another full render/training run on color-only changes before testing the
+background and real-negative arms. Preserve the scale-probe report and its
+input hashes with the private audit artifacts.
+
+### Hosted VLM review calibration
+
+Use the Roboflow Qwen 3.8 Max Workflow as a batch review assistant, not as the
+authority for certification or evaluation. Keep `ROBOFLOW_API_KEY` and
+`OPENROUTER_API_KEY` in the ignored `models/yolo/.env.local`; do not put either
+key in a Workflow definition, report, or log.
+
+The `qwen38-max-calibration-v1` private audit contains 30 certified positive
+probes (five clear and five partial mine instances at each of 30, 60, and
+120 px) and 20 certification-backed empty crops. At a 0.60 screening threshold,
+the published Workflow localized 30/30 positives and accepted 0/20 negatives.
+Every positive prediction overlapped its certified full-object box. Positive
+confidence was 0.78--0.95; negative confidence was at most 0.55. A 0.50
+threshold still fired on 6/20 negatives. Use 0.60 for the next review batch,
+but do not treat this small, object-centered calibration as a deployment metric
+or as permission to change human-locked labels. Preserve the manifest, raw
+responses, summary, and contact sheets under the private audit directory.
+
+Roboflow Workflow deployment has several non-obvious details:
+
+- The default final output can contain only the large `label_visualization`
+  JPEG. Expose `vlm_as_detector_1.predictions` as a JSON output named
+  `predictions`, and exclude `label_visualization` in batch requests.
+- An AI assistant edit changes the draft only. Save or publish the Workflow
+  before the hosted endpoint changes.
+- Roboflow can cache a Workflow definition for 15 minutes. Set `use_cache` to
+  false while checking a newly published edit; enable it again for a stable
+  batch.
+- The hosted call passes `model_api_key` to OpenRouter. The images therefore
+  leave MAAV infrastructure even though the Workflow belongs to our Roboflow
+  workspace.
+- Hosted latency in the 50-image calibration was 7--115 seconds per image
+  (26.6-second median). Use bounded concurrency and checkpoint every response;
+  do not put this VLM in the flight inference path.
+- A standalone `uv` Python on Nix might not discover the system CA bundle.
+  Point its verified TLS context to `/etc/ssl/certs/ca-certificates.crt` or use
+  a client with its own current CA bundle. Never disable TLS verification.
 
 When inference sources are passed as an explicit Python list, Ultralytics
 8.4.115 can combine the entire list into one tensor even when `batch` is set.

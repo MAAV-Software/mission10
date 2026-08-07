@@ -126,6 +126,58 @@ class TestHardNegativeMaterializer(unittest.TestCase):
         label_path = self.root / "out" / "labels" / "train" / f"{entry['tile']}.txt"
         self.assertTrue(image_path.is_file())
         self.assertTrue(label_path.is_file())
+        self.assertEqual(
+            lock["selection_basis_counts"],
+            {
+                "human_confirmed": 1,
+                "certified_annotation_absence": 0,
+                "human_rejected": len(review["entries"]) - 1,
+            },
+        )
+
+    def test_certification_backed_output_includes_pending_but_not_rejected(self):
+        review = propose(self.labels, self.baseline)
+        baseline_entry = next(
+            entry for entry in review["entries"]
+            if entry["kind"] == "baseline_candidate"
+        )
+        clean_entries = [
+            entry for entry in review["entries"]
+            if entry["kind"] == "deterministic_clean"
+        ]
+        baseline_entry["confirmation"] = "rejected"
+        review_path = self.root / "review.json"
+        review_path.write_text(json.dumps(review))
+
+        lock = materialize(
+            review_path,
+            self.labels,
+            self.baseline,
+            self.root / "out",
+            certification_backed=True,
+        )
+
+        self.assertEqual(lock["component"], "certification-backed-real-hard-negatives")
+        self.assertEqual(lock["counts"]["train"]["tiles"], len(clean_entries))
+        self.assertEqual(
+            {
+                entry["provenance"]["review_entry_id"]
+                for entry in lock["entries"]["train"]
+            },
+            {entry["id"] for entry in clean_entries},
+        )
+        self.assertEqual(
+            lock["entries"]["train"][0]["provenance"]["selection_basis"],
+            "certified_annotation_absence",
+        )
+        self.assertEqual(
+            lock["selection_basis_counts"],
+            {
+                "human_confirmed": 0,
+                "certified_annotation_absence": len(clean_entries),
+                "human_rejected": 1,
+            },
+        )
 
     def test_review_can_change_confirmation_but_not_provenance(self):
         review = propose(self.labels, self.baseline)

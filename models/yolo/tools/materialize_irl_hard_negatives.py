@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Propose or materialize human-confirmed real-image hard negatives."""
+"""Propose or materialize certified real-image hard negatives."""
 
 from __future__ import annotations
 
@@ -27,6 +27,14 @@ def main(argv=None) -> None:
     build.add_argument("--baseline", required=True, type=Path)
     build.add_argument("--review", required=True, type=Path)
     build.add_argument("--out", required=True, type=Path)
+    build.add_argument(
+        "--certification-backed",
+        action="store_true",
+        help=(
+            "include pending proposals using frozen human-certified annotations; "
+            "human-rejected proposals remain excluded"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.command == "propose":
@@ -40,8 +48,14 @@ def main(argv=None) -> None:
             "set each confirmation to confirmed or rejected after visual review."
         )
     else:
-        lock = materialize(args.review, args.labels, args.baseline, args.out)
-        print(f"Materialized {lock['counts']['train']['tiles']} confirmed train tiles")
+        lock = materialize(
+            args.review,
+            args.labels,
+            args.baseline,
+            args.out,
+            certification_backed=args.certification_backed,
+        )
+        print(f"Materialized {lock['counts']['train']['tiles']} certified train tiles")
 
 
 if __name__ == "__main__":

@@ -166,6 +166,27 @@ uv run --with pillow --with ultralytics==8.4.115 python tools/evaluate_irl.py \
     --out /private/path/development-evaluation.json
 ```
 
+Re-score a retained tiled audit after label certification without rerunning
+inference, or isolate real-object scale with the standalone 640 px probe:
+
+```sh
+python tools/evaluate_irl_audit.py \
+    --audit /private/path/all-phone-audit.json \
+    --labels /private/path/training-labels.json \
+    --role training_candidate \
+    --out /private/path/offline-training-diagnostic.json
+
+uv run --with pillow --with ultralytics==8.4.115 \
+    python tools/probe_certified_scale.py \
+    --weights /path/to/best.pt \
+    --labels /private/path/training-labels.json \
+    --role training_candidate \
+    --out /private/path/scale-probe.json --device 0
+```
+
+Reports over `training_candidate` are diagnostic-only and cannot promote a
+model. Preserve the audit, labels, weights, and hashes named in each report.
+
 At 1640×1232, the fixed 640 px / 192 px-overlap deployment grid has exactly
 12 tiles (four columns by three rows). A 4284×5712 oriented phone photo has 130
 tiles. Do not compare raw false-positive counts between those sensors without
@@ -173,10 +194,21 @@ normalizing by the exact empty-tile count.
 
 Hard-negative proposals use baseline detections at confidence 0.10 or higher,
 at most eight candidate tiles per certified photo, plus two deterministic clean
-tiles. A proposed tile must not intersect a mine or ignore region. Inspect each
-proposal and set its `confirmation` to `confirmed` or `rejected`; the
-materializer refuses pending entries and rechecks every source hash and label
-intersection before it writes an empty YOLO label:
+tiles. A proposed tile must not intersect a mine or ignore region. The
+token-protected, loopback-only reviewer defaults to a 32-crop QA sample spread
+across source photos, confidence, and clean controls; it is not a demand to
+inspect the full candidate pool. It preserves earlier decisions and shows the
+exact lossless 640 px EXIF-oriented crop. Press `Y` to confirm a negative, `N`
+to reject it, and the arrow keys to navigate. Only confirmation decisions are
+atomically autosaved; the UI cannot modify proposal provenance or certified
+labels.
+
+The strict materializer still refuses pending entries. After exhaustive labels
+have been human-certified and hash-locked, the explicit
+`--certification-backed` mode may include unreviewed proposals based on the
+certified absence of a mine; human rejections always win. Both modes recheck
+the label and source hashes and every mine/ignore intersection before writing
+an empty YOLO label:
 
 ```sh
 uv run --with pillow python tools/materialize_irl_hard_negatives.py propose \
@@ -184,11 +216,18 @@ uv run --with pillow python tools/materialize_irl_hard_negatives.py propose \
     --baseline /private/path/all-phone-audit/audit.json \
     --review /private/path/hard-negative-review.json
 
+uv run --with pillow python tools/review_irl_hard_negatives.py \
+    --labels /private/path/training-labels.json \
+    --baseline /private/path/all-phone-audit/audit.json \
+    --review /private/path/hard-negative-review.json \
+    --qa-size 32
+
 uv run --with pillow python tools/materialize_irl_hard_negatives.py materialize \
     --labels /private/path/training-labels.json \
     --baseline /private/path/all-phone-audit/audit.json \
     --review /private/path/hard-negative-review.json \
-    --out /private/path/hard-negative-component
+    --out /private/path/hard-negative-component \
+    --certification-backed
 ```
 
 The production warm start assigns scenes 0–39 to training because the pilot

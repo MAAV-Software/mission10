@@ -1,4 +1,4 @@
-"""Conservative, human-confirmed hard-negative proposal and materialization."""
+"""Conservative, certification-backed hard-negative materialization."""
 
 from __future__ import annotations
 
@@ -283,22 +283,31 @@ def validate_review(review: object, *, require_decided: bool = False) -> dict:
     return review
 
 
-def _review_against_sources(review: dict, labels_path: Path, baseline_path: Path) -> dict:
+def revalidate_review(
+    review: dict, labels_path: Path, baseline_path: Path
+) -> dict:
+    """Revalidate review provenance and return its certified label document.
+
+    A human review is authorized to change only entry ``confirmation`` values.
+    Everything else is reproduced from the certified labels and frozen baseline
+    so callers cannot accidentally turn the review file into a provenance edit
+    or a certification bypass.
+    """
+    validate_review(review)
     if sha256(labels_path) != review.get("labels_sha256"):
         raise ValueError("labels changed after hard-negative proposal")
     if sha256(baseline_path) != review.get("baseline_sha256"):
         raise ValueError("baseline changed after hard-negative proposal")
     expected = propose(labels_path, baseline_path)
 
-    def immutable(entry: dict) -> dict:
-        return {key: value for key, value in entry.items() if key != "confirmation"}
-
-    if [immutable(entry) for entry in review["entries"]] != [
-        immutable(entry) for entry in expected["entries"]
-    ]:
+    actual_provenance = deepcopy(review)
+    expected_provenance = deepcopy(expected)
+    for entry in actual_provenance["entries"]:
+        entry.pop("confirmation")
+    for entry in expected_provenance["entries"]:
+        entry.pop("confirmation")
+    if actual_provenance != expected_provenance:
         raise ValueError("hard-negative proposal provenance was modified")
-    if review.get("policy") != expected["policy"]:
-        raise ValueError("hard-negative proposal policy was modified")
     document = load_labels(
         labels_path, require_frozen=True, require_certified=True
     )
@@ -318,14 +327,31 @@ def _review_against_sources(review: dict, labels_path: Path, baseline_path: Path
     return document
 
 
+def _review_against_sources(review: dict, labels_path: Path, baseline_path: Path) -> dict:
+    """Backward-compatible private alias for the public provenance validator."""
+    return revalidate_review(review, labels_path, baseline_path)
+
+
 def materialize(
     review_path: Path,
     labels_path: Path,
     baseline_path: Path,
     out: Path,
+    *,
+    certification_backed: bool = False,
 ) -> dict:
-    """Materialize only confirmed, revalidated, unique negative train tiles."""
-    review = validate_review(json.loads(review_path.read_text()), require_decided=True)
+    """Materialize revalidated, unique negative train tiles.
+
+    By default every proposal still requires an explicit human decision.  With
+    ``certification_backed=True``, a pending proposal may also be included
+    because the source is exhaustively annotated, human-certified, hash-locked,
+    and the tile is rechecked to intersect neither a mine nor an ignore region.
+    A human rejection always excludes a tile.
+    """
+    review = validate_review(
+        json.loads(review_path.read_text()),
+        require_decided=not certification_backed,
+    )
     document = _review_against_sources(review, labels_path, baseline_path)
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output directory is not empty: {out}")
@@ -340,8 +366,20 @@ def materialize(
     lock_entries = []
     duplicates = []
     image_owner: dict[str, str] = {}
+    selection_basis_counts = {
+        "human_confirmed": 0,
+        "certified_annotation_absence": 0,
+        "human_rejected": 0,
+    }
     for entry in review["entries"]:
-        if entry["confirmation"] != "confirmed":
+        if entry["confirmation"] == "rejected":
+            selection_basis_counts["human_rejected"] += 1
+            continue
+        if entry["confirmation"] == "confirmed":
+            selection_basis = "human_confirmed"
+        elif certification_backed:
+            selection_basis = "certified_annotation_absence"
+        else:  # require_decided above makes this unreachable.
             continue
         record = records[entry["source_sha256"]]
         source_path = resolve_source(labels_path, record["source"])
@@ -362,6 +400,7 @@ def materialize(
             duplicates.append({"entry_id": entry["id"], "duplicate_of": owner})
             continue
         image_owner[image_hash] = entry["id"]
+        selection_basis_counts[selection_basis] += 1
         label_path = label_out / f"{tile_name}.txt"
         label_path.write_text("")
         lock_entries.append(
@@ -372,7 +411,8 @@ def materialize(
                 "label_sha256": sha256(label_path),
                 "provenance": {
                     "review_entry_id": entry["id"],
-                    "confirmation": "confirmed",
+                    "review_confirmation": entry["confirmation"],
+                    "selection_basis": selection_basis,
                     "kind": entry["kind"],
                     "baseline_confidence": entry["baseline_confidence"],
                     "source": entry["source"],
@@ -388,7 +428,11 @@ def materialize(
     content = {"entries": {"train": lock_entries}}
     lock = {
         "schema": COMPONENT_SCHEMA,
-        "component": "human-confirmed-real-hard-negatives",
+        "component": (
+            "certification-backed-real-hard-negatives"
+            if certification_backed
+            else "human-confirmed-real-hard-negatives"
+        ),
         "scope": "train_only",
         "labels_sha256": sha256(labels_path),
         "baseline_sha256": sha256(baseline_path),
@@ -396,6 +440,7 @@ def materialize(
         "policy": deepcopy(review["policy"]),
         **content,
         "duplicates": duplicates,
+        "selection_basis_counts": selection_basis_counts,
         "counts": {"train": {"tiles": len(lock_entries), "boxes": 0}},
         "dataset_sha256": canonical_sha256(content),
     }
