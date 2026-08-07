@@ -277,6 +277,72 @@ F2 and a 90% precision floor, then apply it unchanged to test:
     --beta 2 --precision-floor 0.90 --batch 16
 ```
 
+### Appearance and hard-negative ablation
+
+Do not change the 1–7 m altitude envelope for this experiment. The first real
+audit isolated mine appearance and leaf/twig clutter as the primary failures.
+Run these phases in order:
+
+1. Render the 15-positive/3-empty controlled matrix with Cycles and inspect it.
+2. Render and prepare the 60-scene `m10-appearance-v1` supplement with
+   `train/appearance60-split.json`.
+3. Certify all private source annotations locally. Re-run the frozen baseline
+   audit at its 0.001 candidate floor.
+4. Confirm hard-negative proposals and materialize their train-only component.
+5. Compose `control`, `appearance`, `hardneg`, and `combined` datasets. Every
+   composition keeps production300 validation and test unchanged.
+6. Run each locked 20-epoch preset from the same frozen production300
+   checkpoint. Do not seed one arm from another arm.
+7. Apply the synthetic, controlled-matrix, phone-development, and CM2 gates in
+   the README. Add the `real_positive` arm only when false positives improve
+   but clear-mine recall does not.
+
+Use the network-volume paths below as a convention so every artifact survives
+pod replacement:
+
+```sh
+cd /workspace/src/mission10/models/yolo
+blender -b assets/m10-base.blend \
+    -P tools/render_color_scale_matrix.py -- \
+    --out /workspace/dataset/mine-color-scale-v1 \
+    --cycles-device optix --samples 64
+/opt/venvs/mission10-yolo/bin/python \
+    tools/evaluate_color_scale_matrix.py \
+    --weights /workspace/inputs/production300/best.pt \
+    --matrix /workspace/dataset/mine-color-scale-v1 \
+    --out /workspace/dataset/mine-color-scale-v1-baseline-evaluation.json \
+    --device 0
+
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out /workspace/dataset/appearance60-v1/raw --scenes 0:60 \
+    --seed m10-appearance-v1 --cycles-backend optix
+/opt/venvs/mission10-yolo/bin/python -m datagen.materialize \
+    --out /workspace/dataset/appearance60-v1/raw --tiles
+/opt/venvs/mission10-yolo/bin/python train/prepare.py \
+    --raw /workspace/dataset/appearance60-v1/raw \
+    --out /workspace/dataset/appearance60-v1/prepared \
+    --split train/appearance60-split.json
+
+/opt/venvs/mission10-yolo/bin/python train/compose.py \
+    --preset combined \
+    --out /workspace/dataset/domain-gap-combined-v1 \
+    --component production=/workspace/dataset/production300-v1/prepared \
+    --component appearance=/workspace/dataset/appearance60-v1/prepared \
+    --component hardneg=/workspace/dataset/hard-negative-component
+
+/opt/venvs/mission10-yolo/bin/python train/run.py \
+    --preset combined \
+    --data /workspace/dataset/domain-gap-combined-v1/dataset.yaml \
+    --model /workspace/inputs/production300/best.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name domain-gap-combined-v1
+```
+
+The composer validates `split.lock.json` for full synthetic datasets and
+`component.lock.json` for certified train-only supplements. Do not rename or
+edit either lock. Fine-tune presets reject epoch, batch, and cache overrides;
+this keeps the arms matched.
+
 When inference sources are passed as an explicit Python list, Ultralytics
 8.4.115 can combine the entire list into one tensor even when `batch` is set.
 Production300's 1,196-image validation list then requested 29.2 GiB on a 20 GB
