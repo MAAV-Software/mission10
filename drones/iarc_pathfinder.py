@@ -1,9 +1,9 @@
 """
 IARC Mission 10 - Minefield Pathfinder & Simulator
 ===================================================
-Finds the WIDEST safe path through a minefield using max-clearance pathfinding.
-Maximizes minimum distance from mines along the entire path, then uses that
-clearance as the green zone width for maximum score.
+Finds the best safe path through a minefield by optimizing width and length
+jointly. For each safe corridor width, it finds the global shortest path and
+then selects the candidate with the highest official score.
 
 Score = 150000 * W / ( (1+B) * L * (1 + 7*A + 100*N) )
 
@@ -18,14 +18,12 @@ USAGE:
   python iarc_pathfinder.py --no-plot        # Skip visualization window
 """
 
-import numpy as np
-import heapq
-import time
 import argparse
-import matplotlib
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+from collections import deque
 from pathlib import Path
+import random
+import statistics
+import time
 
 instructions_output = "iarc_steps.txt"
 
@@ -39,49 +37,37 @@ FIELD_W = COLS * CELL_FT   # 80 ft
 FIELD_H = ROWS * CELL_FT   # 300 ft
 
 constants_path = Path(__file__).parent.parent / "constants/bounding_boxes.txt"
-mines_path = "all_results.csv"
-
-MIN_LON = None
-MIN_LAT = None
-MAX_LON = None
-MAX_LAT = None
-
-lats = []
-lons = []
-
 
 # ====================================================================
 # Minefield generation
 # ====================================================================
 
+def grid_index(value, lower_bound, cell_size, cell_count):
+    """Map a coordinate to a grid index, clamped to the arena boundary."""
+    raw_index = int((value - lower_bound) / cell_size)
+    return min(max(raw_index, 0), cell_count - 1)
+
+
 def generate_minefield(mine_locations):
     with open(constants_path, "r") as f:
-        for line in f:
-            line_contents = line.strip().split()
-            lats.append(float(line_contents[0]))
-            lons.append(float(line_contents[1]))
-    
-    MIN_LON = min(lons)
-    MAX_LON = max(lons)
-    MIN_LAT = min(lats)
-    MAX_LAT = max(lats)
+        bounds = [tuple(map(float, line.split())) for line in f]
 
-    LAT_DIST = MAX_LAT - MIN_LAT
-    LON_DIST = MAX_LON - MIN_LON
-
-    delta_lat = LAT_DIST / COLS 
-    delta_lon = LON_DIST / ROWS
+    lats = [lat for lat, _ in bounds]
+    lons = [lon for _, lon in bounds]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    delta_lat = (max_lat - min_lat) / COLS
+    delta_lon = (max_lon - min_lon) / ROWS
 
     mine_locs = []
 
     for lat, lon in mine_locations:
         mine_lat = float(lat)
         mine_lon = float(lon)
-
-        idx = int((mine_lat - MIN_LAT) / max(delta_lat, 1))
-        idy = int((mine_lon - MIN_LON) / max(delta_lon, 1))
+        idx = grid_index(mine_lat, min_lat, delta_lat, COLS)
+        idy = grid_index(mine_lon, min_lon, delta_lon, ROWS)
         mine_locs.append((idx, idy))
-    
+
     return set(mine_locs)
 
 
@@ -119,75 +105,49 @@ def fetch_fexl_mines(seed=0.1934, num_mines=135, scale=5):
 
 
 def compute_clearance_map(mines):
-    """Compute Chebyshev distance to nearest mine for every cell."""
-    clearance = {}
-    for x in range(COLS):
-        for y in range(ROWS):
-            if (x, y) in mines:
-                clearance[(x, y)] = 0
-            else:
-                min_d = min(max(abs(x - mx), abs(y - my)) for mx, my in mines)
-                clearance[(x, y)] = min_d
+    """Compute Chebyshev distance to the nearest mine for every cell.
+
+    Mines must already be grid cells. An empty field has no finite mine
+    distance, so every cell receives a value larger than the grid dimensions.
+    """
+    out_of_bounds = sorted(
+        (x, y)
+        for x, y in mines
+        if not (0 <= x < COLS and 0 <= y < ROWS)
+    )
+    if out_of_bounds:
+        raise ValueError(f"mine cells outside the grid: {out_of_bounds}")
+
+    if not mines:
+        no_mine_distance = max(COLS, ROWS) + 1
+        return {
+            (x, y): no_mine_distance
+            for x in range(COLS)
+            for y in range(ROWS)
+        }
+
+    clearance = {mine: 0 for mine in mines}
+    queue = deque(mines)
+
+    while queue:
+        cx, cy = queue.popleft()
+        next_distance = clearance[(cx, cy)] + 1
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor = (cx + dx, cy + dy)
+                if not (0 <= neighbor[0] < COLS and 0 <= neighbor[1] < ROWS):
+                    continue
+                if neighbor in clearance:
+                    continue
+                clearance[neighbor] = next_distance
+                queue.append(neighbor)
+
+    if len(clearance) != COLS * ROWS:
+        raise AssertionError("clearance map does not cover the complete grid")
+
     return clearance
-
-
-# ====================================================================
-# Max-clearance pathfinder
-# ====================================================================
-
-def max_clearance_path(mines, start, end, clearance_map):
-    """
-    Find the path that maximizes the MINIMUM clearance from any mine.
-    Among paths with equal clearance, picks the shortest.
-    This gives the widest possible safe corridor through the minefield.
-    """
-    if clearance_map[start] == 0 or clearance_map[end] == 0:
-        return None, 0
-
-    # Priority: (-min_clearance_along_path, path_length, counter, cell)
-    # Negative because heapq is a min-heap but we want max clearance
-    open_set = [(-clearance_map[start], 0, 0, start)]
-    best = {}  # cell -> (min_clearance, path_length)
-    came_from = {}
-    counter = 1
-
-    while open_set:
-        neg_mc, plen, _, current = heapq.heappop(open_set)
-        mc = -neg_mc
-
-        if current in best:
-            bmc, blen = best[current]
-            if mc < bmc or (mc == bmc and plen >= blen):
-                continue
-        best[current] = (mc, plen)
-
-        if current == end:
-            path = [current]
-            while current in came_from:
-                current = came_from[current]
-                path.append(current)
-            path.reverse()
-            return path, mc
-
-        cx, cy = current
-        for dx, dy in [(0, 1), (0, -1), (-1, 0), (1, 0)]:
-            nx, ny = cx + dx, cy + dy
-            nb = (nx, ny)
-            if not (0 <= nx < COLS and 0 <= ny < ROWS):
-                continue
-            if clearance_map[nb] == 0:
-                continue
-
-            new_mc = min(mc, clearance_map[nb])
-            new_len = plen + 1
-
-            if nb not in best or new_mc > best[nb][0] or \
-               (new_mc == best[nb][0] and new_len < best[nb][1]):
-                came_from[nb] = current
-                heapq.heappush(open_set, (-new_mc, new_len, counter, nb))
-                counter += 1
-
-    return None, 0
 
 
 # ====================================================================
@@ -195,37 +155,43 @@ def max_clearance_path(mines, start, end, clearance_map):
 # ====================================================================
 
 def grid_path_to_commands(grid_path, G=0):
-    """Convert grid cell list to S,U,D,L,R command string.
-    Fexl requires: first move must be U, last move must cross finish line (U to y=150)."""
+    """Encode a contiguous path as Fexl S,U,D,L,R commands.
+
+    Fexl requires the first and last path moves to be upward. Invalid paths are
+    rejected instead of being silently changed after scoring.
+    """
     if not grid_path:
         return ""
-    sx, sy = grid_path[0]
-    commands = [f"S,{sx},{G}"]
+    if len(grid_path) == 1:
+        raise ValueError("path must contain at least one move")
 
-    # Build direction commands
-    i = 1
-    while i < len(grid_path):
-        cx, cy = grid_path[i - 1]
-        nx, ny = grid_path[i]
-        dx, dy = nx - cx, ny - cy
-        direction = {(0, 1): 'U', (0, -1): 'D', (1, 0): 'R', (-1, 0): 'L'}.get((dx, dy))
-        if not direction:
-            i += 1
-            continue
-        count = 1
-        while i + count < len(grid_path):
-            px, py = grid_path[i + count - 1]
-            qx, qy = grid_path[i + count]
-            if (qx - px, qy - py) == (dx, dy):
-                count += 1
-            else:
-                break
-        commands.append(f"{direction},{count}")
-        i += count
+    direction_for_delta = {
+        (0, 1): "U",
+        (0, -1): "D",
+        (1, 0): "R",
+        (-1, 0): "L",
+    }
+    moves = []
+    for current, following in zip(grid_path, grid_path[1:]):
+        delta = (following[0] - current[0], following[1] - current[1])
+        direction = direction_for_delta.get(delta)
+        if direction is None:
+            raise ValueError(f"path contains a non-adjacent move: {current} -> {following}")
+        moves.append(direction)
 
-    # Fexl requires: first move after S must be U (enter from south edge)
-    if len(commands) > 1 and not commands[1].startswith('U,'):
-        commands.insert(1, "U,1")
+    if moves and (moves[0] != "U" or moves[-1] != "U"):
+        raise ValueError("path must begin and end with an upward move")
+
+    runs = []
+    for direction in moves:
+        if runs and runs[-1][0] == direction:
+            runs[-1][1] += 1
+        else:
+            runs.append([direction, 1])
+
+    start_x, _ = grid_path[0]
+    commands = [f"S,{start_x},{G}"]
+    commands.extend(f"{direction},{count}" for direction, count in runs)
 
     return '\n'.join(commands)
 
@@ -245,8 +211,18 @@ def compute_green_zone(path_cells, G):
     return green
 
 
+def official_score(width_ft, length_ft, missed_mines=0, scan_time=7, overweight=0):
+    """Calculate the official IARC score for a surviving path."""
+    denominator = (
+        (1 + missed_mines)
+        * length_ft
+        * (1 + 7 * scan_time + 100 * overweight)
+    )
+    return 150000 * width_ft / denominator if denominator > 0 else 0.0
+
+
 def score_path(path_cells, G, mines, scan_time_A=7, overweight_N=0):
-    """Score using official IARC formula."""
+    """Describe and score a path using the official IARC formula."""
     blue = set(path_cells)
     green = compute_green_zone(path_cells, G)
     on_path = blue & mines
@@ -256,11 +232,16 @@ def score_path(path_cells, G, mines, scan_time_A=7, overweight_N=0):
     L = len(path_cells) * CELL_FT
     W = (1 + 2 * G) * CELL_FT
 
-    if len(on_path) > 0:
+    if on_path:
         score = 0.0
     else:
-        denom = (1 + B) * L * (1 + 7 * scan_time_A + 100 * overweight_N)
-        score = 150000 * W / denom if denom > 0 else 0.0
+        score = official_score(
+            W,
+            L,
+            missed_mines=B,
+            scan_time=scan_time_A,
+            overweight=overweight_N,
+        )
 
     return {
         'score': score, 'path_length_ft': L, 'path_width_ft': W,
@@ -273,21 +254,62 @@ def score_path(path_cells, G, mines, scan_time_A=7, overweight_N=0):
 # Find best path
 # ====================================================================
 
-def path_respects_edge_margin(path, G):
-    """Check that every cell on the path is at least G cells from left/right edges.
-    Fexl allows green zone to extend past top/bottom, only x matters."""
-    for (px, py) in path:
-        if px - G < 0 or px + G >= COLS:
-            return False
-    return True
+def shortest_safe_path(clearance_map, G):
+    """Find the shortest bottom-to-top path for a fixed safe half-width.
+
+    Every path cell must be more than ``G`` cells from a mine, and at least
+    ``G`` cells from either side of the field.  All valid entrance cells are
+    BFS sources, so the first top-row cell reached is a shortest path for this
+    width. The fixed source and neighbor order makes equal-length ties
+    deterministic.
+    """
+    min_x = G
+    max_x = COLS - G - 1
+    if min_x > max_x:
+        return None
+
+    starts = [
+        (x, 0)
+        for x in range(min_x, max_x + 1)
+        if clearance_map[(x, 0)] > G
+    ]
+    if not starts:
+        return None
+
+    queue = deque(starts)
+    came_from = {start: None for start in starts}
+
+    while queue:
+        current = queue.popleft()
+        cx, cy = current
+        if cy == ROWS - 1:
+            path = []
+            while current is not None:
+                path.append(current)
+                current = came_from[current]
+            path.reverse()
+            return path
+
+        for dx, dy in ((0, 1), (-1, 0), (1, 0), (0, -1)):
+            neighbor = (cx + dx, cy + dy)
+            nx, ny = neighbor
+            if not (min_x <= nx <= max_x and 0 <= ny < ROWS):
+                continue
+            if neighbor in came_from or clearance_map[neighbor] <= G:
+                continue
+            came_from[neighbor] = current
+            queue.append(neighbor)
+
+    return None
 
 
 def find_best_path(mines, scan_time=7):
     """
-    Try all start/end column combos with max-clearance pathfinding.
-    For each path, set G = clearance - 1 so green zone has 0 missed mines.
-    Ensures the green zone stays within the grid (path stays G cells from edges).
-    Returns the path with the highest score.
+    Optimize W/L jointly over all zero-miss corridor widths.
+
+    For each possible ``G``, find the global shortest safe path.  Comparing the
+    resulting official scores finds the best width/length tradeoff directly.
+    The grid admits only 20 widths, so the search has a fixed upper bound.
     """
     clearance_map = compute_clearance_map(mines)
 
@@ -296,32 +318,24 @@ def find_best_path(mines, scan_time=7):
     best_G = 0
     best_clearance = 0
 
-    for sc in range(COLS):
-        if (sc, 0) in mines:
+    for G in range((COLS - 1) // 2 + 1):
+        path = shortest_safe_path(clearance_map, G)
+        if path is None:
             continue
-        for ec in range(max(0, sc - 10), min(COLS, sc + 11)):
-            if (ec, ROWS - 1) in mines:
-                continue
 
-            path, mc = max_clearance_path(mines, (sc, 0), (ec, ROWS - 1), clearance_map)
-            if path is None:
-                continue
+        path_length_ft = len(path) * CELL_FT
+        path_width_ft = (1 + 2 * G) * CELL_FT
+        candidate_score = official_score(
+            path_width_ft,
+            path_length_ft,
+            scan_time=scan_time,
+        )
 
-            # Set G to max safe value (clearance - 1 = no mines in green zone)
-            safe_G = max(0, mc - 1)
-
-            # Try G values from largest to smallest
-            for try_G in range(safe_G, -1, -1):
-                # Green zone must not go past left/right edges
-                if not path_respects_edge_margin(path, try_G):
-                    continue
-                r = score_path(path, try_G, mines, scan_time_A=scan_time)
-                if not r['dead'] and r['score'] > best_score:
-                    best_score = r['score']
-                    best_path = path
-                    best_G = try_G
-                    best_clearance = mc
-                break  # Largest valid G is best, no need to try smaller
+        if candidate_score > best_score:
+            best_score = candidate_score
+            best_path = path
+            best_G = G
+            best_clearance = min(clearance_map[cell] for cell in path)
 
     return best_path, best_G, best_clearance
 
@@ -332,6 +346,9 @@ def find_best_path(mines, scan_time=7):
 
 def visualize(mines, path_cells, G, result, title="IARC Pathfinder", save_path='iarc_result.png'):
     """Draw the minefield grid with path overlay."""
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(6, 18))
     blue = set(path_cells)
     green = compute_green_zone(path_cells, G)
@@ -386,7 +403,7 @@ def run_iarc_pathfinder(mine_locations):
     args = parser.parse_args()
 
     if args.seed is None:
-        args.seed = round(np.random.random() * 10000, 4)
+        args.seed = round(random.random() * 10000, 4)
 
     # --- Batch mode ---
     if args.batch:
@@ -396,7 +413,7 @@ def run_iarc_pathfinder(mine_locations):
 
         scores = []
         for i in range(args.batch):
-            seed = round(np.random.random() * 10000, 4)
+            seed = round(random.random() * 10000, 4)
             mines = generate_minefield(mine_locations)
 
             t0 = time.time()
@@ -416,7 +433,7 @@ def run_iarc_pathfinder(mine_locations):
 
         if scores:
             print(f"\n{'=' * 50}")
-            print(f"  Avg score:  {np.mean(scores):.3f}")
+            print(f"  Avg score:  {statistics.fmean(scores):.3f}")
             print(f"  Best:       {max(scores):.3f}")
             print(f"  Worst:      {min(scores):.3f}")
             print(f"  Alive:      {len(scores)}/{args.batch}")
@@ -451,8 +468,13 @@ def run_iarc_pathfinder(mine_locations):
             f.write(f"{commands}")
 
         if not args.no_plot:
-            maav_IARCM10_compweb_dir = Path(__file__).parent.parent.parent
-            # visualize(mines, path, G, result, f"seed={args.seed} | {args.mines} mines", save_path=f"{maav_IARCM10_compweb_dir}/maav-IARCM10-compweb/compweb/static/images/iarc_result.png")
-            visualize(mines, path, G, result, f"seed={args.seed} | {args.mines} mines", save_path=f"iarc_result.png") # temp line for now
+            visualize(
+                mines,
+                path,
+                G,
+                result,
+                f"seed={args.seed} | {args.mines} mines",
+                save_path="iarc_result.png",
+            )
     else:
         print("  No path found!")
