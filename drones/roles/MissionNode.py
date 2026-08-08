@@ -7,11 +7,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 
 class MissionNode(Node):
-    def __init__(self, mission_node_lock, mission_node_cv):
+    def __init__(self, mission_node_lock, mission_node_cv, mission_mode):
         super().__init__("mission_node")
 
         self.mission_node_lock = mission_node_lock
         self.mission_node_cv = mission_node_cv
+        self.mission_mode = mission_mode
         self.timestamp_queue = queue.Queue()
         self.latest_timestamp = 0
 
@@ -20,6 +21,19 @@ class MissionNode(Node):
         #     "/start_mission",
         #     10
         # )
+
+        # if self.mission_mode == "survey":
+        #     self.start_publisher = self.create_publisher(
+        #         Bool,
+        #         "/begin_survey",
+        #         10
+        #     )
+        # elif self.mission_mode == "orbit":
+        #     self.start_publisher = self.create_publisher(
+        #         Bool,
+        #         "/begin_orbit",
+        #         10
+        #     )
 
         qos_profile = QoSProfile(
                 reliability=ReliabilityPolicy.BEST_EFFORT,

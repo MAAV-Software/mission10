@@ -81,8 +81,13 @@ def generate_minefield(mine_locations):
         idx = int((mine_lat - MIN_LAT) / max(delta_lat, 1))
         idy = int((mine_lon - MIN_LON) / max(delta_lon, 1))
         mine_locs.append((idx, idy))
+
+    mines = [
+        (0, 0),
+        (0, 1)
+    ]
     
-    return set(mine_locs)
+    return set(mines)
 
 
 
@@ -427,6 +432,11 @@ def run_iarc_pathfinder(mine_locations):
         mines = fetch_fexl_mines(seed=args.seed, num_mines=args.mines)
     else:
         mines = generate_minefield(mine_locations)
+    
+    if len(mines) == 0:
+        print("No mines were found!")
+        return
+
     print(f"IARC Pathfinder | {len(mines)} mines | seed={args.seed} | A={args.scan_time}"
           + (" | SOURCE: fexl.com" if args.fexl else ""))
 

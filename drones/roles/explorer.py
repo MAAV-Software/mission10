@@ -413,10 +413,10 @@ class ExploreDrone:
     #             self.coords_cv.notify()
     #         time.sleep(0.1)
 
-    def run_mission_node(self):
+    def run_mission_node(self, mission_mode):
         rclpy.init()
 
-        node = MissionNode(self.coords_lock, self.coords_cv)
+        node = MissionNode(self.coords_lock, self.coords_cv, mission_mode)
         self.mission_node = node
 
         # while not self.shutdown_flag:
@@ -437,10 +437,20 @@ class ExploreDrone:
         # subprocess.run("ros2", ...) # Run that ros2 command to publish to the start topic
         # time.sleep(5)
 
-        mission_node_thread = threading.Thread(target=self.run_mission_node)
+        mission_node_thread = threading.Thread(target=self.run_mission_node, args=("survey",))
         mission_node_thread.start()
 
         # self.fake_gps_coords_generation()
+    
+    def handle_orbit(self):
+        
+        mission_node_thread = threading.Thread(target=self.run_mission_node, args=("orbit",))
+        mission_node_thread.start()
+        
+        # self.fake_gps_coords_generation()
+
+    def handle_termination(self):
+        pass
     
     
     def register(self):

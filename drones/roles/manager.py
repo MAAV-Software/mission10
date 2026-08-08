@@ -377,6 +377,10 @@ class ManagerDrone:
             self.handle_heartbeat(message_dict)
         elif message_dict["message_type"] == "run_drones":
             self.handle_run_drones()
+        elif message_dict["message_type"] == "terminate_drones":
+            self.handle_termination()
+        elif message_dict["message_type"] == "orbit_drones":
+            self.handle_orbit()
         elif message_dict["message_type"] == "finished":
             self.handle_finished(message_dict)
         else:
@@ -418,10 +422,10 @@ class ManagerDrone:
     #             self.mine_data_cv.notify()
     #         time.sleep(0.1)
 
-    def run_mission_node(self):
+    def run_mission_node(self, mission_mode):
         rclpy.init()
 
-        node = MissionNode(self.mine_data_lock, self.mine_data_cv)
+        node = MissionNode(self.mine_data_lock, self.mine_data_cv, mission_mode)
         self.mission_node = node
 
         # while not self.shutdown_flag:
@@ -456,12 +460,35 @@ class ManagerDrone:
                         print("Worker drone is not up yet")
                         continue
         
-        mission_node_thread = threading.Thread(target=self.run_mission_node)
+        mission_node_thread = threading.Thread(target=self.run_mission_node, args=("survey",))
+        mission_node_thread.start()
+    
+    def handle_orbit(self):
+        self.mission_status = "in_mission"
+
+        for drone_id, drone_status in self.exp_drones.items():
+            if drone_status["status"] == "working":
+                worker_host, worker_port = drone_id.strip().split("_")
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    try:
+                        print(f"The worker host is {worker_host} and the port is {worker_port}")
+                        sock.connect((worker_host, int(worker_port))) 
+                        message = json.dumps({
+                            "message_type": "orbit_drones"
+                        })
+                        sock.sendall(message.encode('utf-8'))
+                    except ConnectionRefusedError:
+                        print("Worker drone is not up yet")
+                        continue
+        
+        mission_node_thread = threading.Thread(target=self.run_mission_node, args=("orbit",))
         mission_node_thread.start()
         
         # self.fake_gps_coords_generation()
-        
 
+    def handle_termination(self):
+        pass
+        
     # adds one pair of coords
     def handle_coordinates(self, message_dict):
         print("Here in handle coordinates")
@@ -517,9 +544,6 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
-        # time.sleep(3)
-        # self.shutdown_flag = True
-
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
@@ -527,8 +551,14 @@ class ManagerDrone:
         # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         # fake_gps_thread.start()
 
+        # time.sleep(1)
+        # self.shutdown_flag = True
+        # self.self_finished = True
+
         tcp_thread.join()
         udp_thread.join()
+
+        self.detected_mine_data.append((0, 0))
 
         iarc_pathfinder.run_iarc_pathfinder(self.detected_mine_data)
 
