@@ -50,6 +50,7 @@ from camera_tuning import (
     load_ov9281_daylight_tuning,
 )
 from image_formats import YUYV_BYTES_PER_PIXEL, YUYV_ENCODING, pack_yuyv_frame
+from px4_topics import live_px4_topic
 from px4_msgs.msg import (
     DistanceSensor, EstimatorAidSource1d, EstimatorAidSource2d,
     EstimatorAidSource3d, EstimatorGpsStatus, EstimatorStatus,
@@ -494,6 +495,7 @@ def capture_camera_pipe(
     connection, status_connection, process, bag, clock_mapper, stats, *,
     width, height, frame_id, image_topic, info_topic, camera_info,
     max_exposure_us, errors, errors_lock, sink=None, record_raw=True,
+    record_fps=0.0,
     preview_topic="/camera_down/image_preview", preview_fps=1.0,
 ):
     """Record packed CM2 YUYV frames received from its tuning-isolated process."""
@@ -502,6 +504,8 @@ def capture_camera_pipe(
         CM2_FRAME_HEADER.size + width * height * YUYV_BYTES_PER_PIXEL
     )
     last_preview_ns = 0
+    raw_record_period_ns = int(1e9 / record_fps) if record_fps > 0 else 0
+    next_raw_record_ns = None
     try:
         while _running:
             if not connection.poll(0.25):
@@ -538,13 +542,30 @@ def capture_camera_pipe(
             img.is_bigendian = 0
             img.step = width * YUYV_BYTES_PER_PIXEL
             img.data = payload[CM2_FRAME_HEADER.size:]
-            if record_raw:
+            record_this_raw = record_raw and (
+                raw_record_period_ns == 0
+                or next_raw_record_ns is None
+                or ts_ns >= next_raw_record_ns
+            )
+            if record_this_raw:
                 bag.write(image_topic, serialize_message(img), ts_ns)
                 camera_info.header.stamp = st
                 camera_info.header.frame_id = frame_id
                 bag.write(info_topic, serialize_message(camera_info), ts_ns)
+                if raw_record_period_ns:
+                    if next_raw_record_ns is None:
+                        next_raw_record_ns = ts_ns + raw_record_period_ns
+                    else:
+                        periods = max(
+                            1,
+                            (ts_ns - next_raw_record_ns)
+                            // raw_record_period_ns
+                            + 1,
+                        )
+                        next_raw_record_ns += periods * raw_record_period_ns
             elif (
-                preview_fps > 0
+                not record_raw
+                and preview_fps > 0
                 and ts_ns - last_preview_ns >= int(1e9 / preview_fps)
             ):
                 preview = Image()
@@ -598,6 +619,12 @@ def main():
     ap.add_argument("--ov-record-fps", type=float, default=0.0,
                     help="record OV9281 at this rate while capturing at --fps (0=all)")
     ap.add_argument("--down-preview-fps", type=float, default=1.0)
+    ap.add_argument(
+        "--down-record-fps",
+        type=float,
+        default=0.0,
+        help="record raw CM2 at this rate while capturing at --down-fps (0=all)",
+    )
     ap.add_argument("--no-down-raw", action="store_true",
                     help="record processed flow plus a low-rate CM2 preview, not continuous raw CM2")
     ap.add_argument("--flow", action="store_true",
@@ -651,10 +678,19 @@ def main():
                     help="reject capture when recent DDS timesync RTT exceeds this")
     ap.add_argument("--max-clock-step-ms", type=float, default=5.0,
                     help="abort if realtime steps this far relative to boottime")
+    ap.add_argument(
+        "--px4-namespace",
+        default="",
+        help="live PX4 DDS namespace, for example /px4_4; bag topics stay /fmu/...",
+    )
     args = ap.parse_args()
 
     if args.fps <= 0 or args.down_fps <= 0:
         ap.error("camera frame rates must be positive")
+    if args.down_record_fps < 0:
+        ap.error("--down-record-fps cannot be negative")
+    if args.down_record_fps > args.down_fps:
+        ap.error("--down-record-fps cannot exceed --down-fps")
     if args.ov_max_exposure_us <= 0:
         ap.error("--ov-max-exposure-us must be positive")
     if args.down_max_exposure_us <= 0:
@@ -709,12 +745,12 @@ def main():
                      history=HistoryPolicy.KEEP_LAST)
     for name, _type_str, cls in PX4_SUBS:
         node.create_subscription(
-            cls, name,
+            cls, live_px4_topic(name, args.px4_namespace),
             (lambda n: (lambda msg: on_px4_message(bag, sync_monitor, n, msg)))(name),
             qos)
     node.create_subscription(
         VehicleOdometry,
-        "/fmu/in/vehicle_visual_odometry",
+        live_px4_topic("/fmu/in/vehicle_visual_odometry", args.px4_namespace),
         lambda msg: bag.write(
             "/fmu/in/vehicle_visual_odometry",
             serialize_message(msg),
@@ -741,7 +777,8 @@ def main():
         imu_history = ImuHistory()
         range_history = RangeHistory()
     node.create_subscription(
-        SensorCombined, "/fmu/out/sensor_combined",
+        SensorCombined,
+        live_px4_topic("/fmu/out/sensor_combined", args.px4_namespace),
         lambda msg: on_sensor_combined(
             bag, sync_monitor, msg, imu_history
         ), qos)
@@ -755,13 +792,20 @@ def main():
                     int(msg.signal_quality),
                 )
         node.create_subscription(
-            DistanceSensor, "/fmu/out/distance_sensor", note_range, qos
+            DistanceSensor,
+            live_px4_topic("/fmu/out/distance_sensor", args.px4_namespace),
+            note_range,
+            qos,
         )
     # Mission-end auto-stop: a dedicated vehicle_status sub (the PX4_SUBS one only
     # logs). Off by default so standalone/bench captures are unaffected.
     if args.stop_on_disarm:
         node.create_subscription(
-            VehicleStatus, "/fmu/out/vehicle_status_v4", on_vehicle_status, qos)
+            VehicleStatus,
+            live_px4_topic("/fmu/out/vehicle_status_v4", args.px4_namespace),
+            on_vehicle_status,
+            qos,
+        )
         print("recorder: --stop-on-disarm armed (will end one flight after arm)",
               file=sys.stderr, flush=True)
     spin = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
@@ -858,7 +902,9 @@ def main():
                     args.flow_calibration, imu_history
                 )
             flow_publisher = node.create_publisher(
-                SensorOpticalFlow, "/fmu/in/sensor_optical_flow", 10
+                SensorOpticalFlow,
+                live_px4_topic("/fmu/in/sensor_optical_flow", args.px4_namespace),
+                10,
             )
             flow_debug_publisher = node.create_publisher(
                 String, "/localization/cm2_flow/debug", 10
@@ -882,7 +928,10 @@ def main():
                 + (
                     "shadow diagnostics only"
                     if args.flow_shadow
-                    else "-> /fmu/in/sensor_optical_flow"
+                    else "-> "
+                    + live_px4_topic(
+                        "/fmu/in/sensor_optical_flow", args.px4_namespace
+                    )
                 ),
                 file=sys.stderr,
                 flush=True,
@@ -1043,6 +1092,7 @@ def main():
                     "errors_lock": errors_lock,
                     "sink": FanoutSink(flow_sink, detector_sink),
                     "record_raw": not args.no_down_raw,
+                    "record_fps": args.down_record_fps,
                     "preview_fps": args.down_preview_fps,
                 },
                 name="capture-imx219",

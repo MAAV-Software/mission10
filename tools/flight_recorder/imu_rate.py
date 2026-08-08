@@ -17,9 +17,12 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from px4_msgs.msg import SensorCombined
 
+from px4_topics import live_px4_topic
+
 ap = argparse.ArgumentParser()
 ap.add_argument("--secs", type=float, default=3.0)
 ap.add_argument("--min", type=float, default=120.0, help="fail below this Hz")
+ap.add_argument("--px4-namespace", default="", help="live PX4 DDS namespace")
 args = ap.parse_args()
 
 rclpy.init()
@@ -35,7 +38,8 @@ def _cb(_msg):
     n += 1
 
 
-node.create_subscription(SensorCombined, "/fmu/out/sensor_combined", _cb, qos)
+imu_topic = live_px4_topic("/fmu/out/sensor_combined", args.px4_namespace)
+node.create_subscription(SensorCombined, imu_topic, _cb, qos)
 
 t0 = time.monotonic()
 while time.monotonic() - t0 < args.secs:
@@ -45,7 +49,7 @@ node.destroy_node()
 rclpy.shutdown()
 
 hz = n / elapsed if elapsed else 0.0
-print(f"imu_rate: {hz:.1f} Hz ({n} msgs / {elapsed:.1f}s) on /fmu/out/sensor_combined")
+print(f"imu_rate: {hz:.1f} Hz ({n} msgs / {elapsed:.1f}s) on {imu_topic}")
 if hz < args.min:
     print(f"imu_rate: BELOW MIN {args.min:.0f} Hz -- DDS bridge down, or firmware "
           f"without the sensor_combined rate_limit (100 Hz cap)?", file=sys.stderr)

@@ -26,7 +26,8 @@ bounded queues and cannot stop camera capture.
   stores flow, tracks, timing/quality diagnostics, tag corners, a 1 Hz preview,
   and operator-triggered one-second pre/post raw clips instead of the
   approximately 121 MB/s continuous YUYV stream. Set `RECORD_CM2_RAW=1` for a
-  deliberate calibration capture.
+  deliberate calibration capture. `CM2_RECORD_FPS=10` records a time-sampled
+  raw stream while the camera and attached consumers continue at `DOWN_FPS=30`.
 - `/imu`, converted from PX4 `SensorCombined`, plus the original PX4 IMU topic.
 - PX4 time sync, attitude, local/global position, receiver GNSS, dToF range,
   EKF range-height aid state, estimator control flags, full estimator status,
@@ -94,8 +95,12 @@ On the drone:
 
 ```sh
 cd /home/maav/flight_recorder
-./record_flight.sh "" drone4_manual
+PX4_NAMESPACE=/px4_4 ./record_flight.sh "" drone4_manual
 ```
+
+`PX4_NAMESPACE` selects the live vehicle DDS graph. The recorder always stores
+PX4 streams under canonical `/fmu/...` names, so downstream bag tools do not
+need vehicle-specific topic handling. Leave it unset for an unnamespaced graph.
 
 Start the recorder before arming. Press Ctrl-C once after landing. The recorder
 then prints these shutdown phases:
@@ -118,6 +123,7 @@ from RAM to eMMC. Useful overrides:
 ```sh
 FLOW=1 DOWN_FPS=30 FPS=30 ./record_flight.sh "" flow_test
 RECORD_CM2_RAW=1 OV_RECORD_FPS=0 ./record_flight.sh "" calibration
+RECORD_CM2_RAW=1 CM2_RECORD_FPS=10 ./record_flight.sh "" sampled_raw
 COMPRESS=zstd ./record_flight.sh "" deliberate_low_rate_compressed_test
 SPLIT_MB=2048 ./record_flight.sh "" deliberate_split_test
 CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight

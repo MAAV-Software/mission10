@@ -23,9 +23,11 @@
 #      FLOW (1 = run CM2 flow), FLOW_BACKEND (klt | svo),
 #      FLOW_PUBLISH (1 = publish flow to PX4),
 #      RECORD_CM2_RAW (1 = continuous raw),
+#      CM2_RECORD_FPS (raw recording rate; 0 = every captured frame),
 #      OV_RECORD_FPS (default 1; camera capture still runs at FPS),
 #      COMPRESS (default none; zstd is opt-in for low-rate captures),
 #      MINHZ (IMU gate, default 120), DETECT (1 = run the nadir AprilTag detector),
+#      PX4_NAMESPACE (live DDS namespace, e.g. /px4_4; bag names stay canonical),
 #      MISSION_ENGINE (package path the detector comes from),
 #      RAMDIR (/dev/shm/maavrec), EMMCDIR (/home/maav/recordings), USBDIR (/mnt/recordings)
 set -euo pipefail
@@ -42,6 +44,7 @@ FLOW_BACKEND="${FLOW_BACKEND:-klt}"
 FLOW_PUBLISH="${FLOW_PUBLISH:-1}"
 SVO_BUILD="${SVO_BUILD:-/home/maav/rl_vo_cm2_flow/svo-lib/build/svo_env}"
 RECORD_CM2_RAW="${RECORD_CM2_RAW:-0}"
+CM2_RECORD_FPS="${CM2_RECORD_FPS:-0}"
 OV_RECORD_FPS="${OV_RECORD_FPS:-1}"
 MINHZ="${MINHZ:-120}"
 IMU_GATE_SECS="${IMU_GATE_SECS:-5}"
@@ -49,6 +52,7 @@ IMU_GATE_ATTEMPTS="${IMU_GATE_ATTEMPTS:-3}"
 SPLIT_MB="${SPLIT_MB:-}"
 COMPRESS="${COMPRESS:-none}"     # none (default) | zstd (low-rate captures only)
 STOP_ON_DISARM="${STOP_ON_DISARM:-0}"  # 1 = recorder self-stops when PX4 disarms (mission end)
+PX4_NAMESPACE="${PX4_NAMESPACE:-}"
 DETECT="${DETECT:-0}"                  # 1 = run the nadir AprilTag detector on the captured frames
 RECORDER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Default to the sibling package in this checkout, so a clone needs no
@@ -112,7 +116,12 @@ if [ "$DETECT" = 1 ]; then
   export PYTHONPATH="${PYTHONPATH:-}:$MISSION_ENGINE"
   DETECT_ARG="--detect"
 fi
+PX4_NAMESPACE_ARG=()
+if [ -n "$PX4_NAMESPACE" ]; then
+  PX4_NAMESPACE_ARG=(--px4-namespace "$PX4_NAMESPACE")
+fi
 echo ">> storage=$STORAGE_PATH  write=$HOT  final=$DEEP  split=${SPLIT_MB}MB  compress=${COMPRESS}"
+echo ">> PX4 live namespace=${PX4_NAMESPACE:-/}; bag namespace=/fmu"
 if [ "$USE_DRAIN" -eq 1 ]; then
   echo ">>   RAM=$RAMDIR ($(free_gb "$RAMDIR")G)  $FINAL_LABEL=$FINAL_ROOT ($(free_gb "$FINAL_ROOT")G, final)"
 else
@@ -136,7 +145,7 @@ echo ">> [1/4] verify IMU arrival rate over DDS (gate ${MINHZ} Hz)"
 imu_ok=0
 for attempt in $(seq 1 "$IMU_GATE_ATTEMPTS"); do
   echo ">> IMU gate attempt ${attempt}/${IMU_GATE_ATTEMPTS} (${IMU_GATE_SECS}s)"
-  if python3 "$RECORDER_DIR/imu_rate.py" --secs "$IMU_GATE_SECS" --min "$MINHZ"; then
+  if python3 "$RECORDER_DIR/imu_rate.py" --secs "$IMU_GATE_SECS" --min "$MINHZ" "${PX4_NAMESPACE_ARG[@]}"; then
     imu_ok=1
     break
   fi
@@ -164,10 +173,10 @@ fi
 echo ">>        start BEFORE arming; Ctrl-C AFTER landing."
 set +e
 if [ -n "$SECS" ]; then
-  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-record-fps "$OV_RECORD_FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DOWN_RAW_ARG $FLOW_ARG $FLOW_BACKEND_ARG $FLOW_SHADOW_ARG $DISARM $DETECT_ARG; rc=$?
+  timeout -s INT "$SECS" python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-record-fps "$OV_RECORD_FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-record-fps "$CM2_RECORD_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" "${PX4_NAMESPACE_ARG[@]}" $DOWN_CAMERA_ARG $DOWN_RAW_ARG $FLOW_ARG $FLOW_BACKEND_ARG $FLOW_SHADOW_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 124 ] && rc=0; [ "$rc" -eq 130 ] && rc=0
 else
-  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-record-fps "$OV_RECORD_FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" $DOWN_CAMERA_ARG $DOWN_RAW_ARG $FLOW_ARG $FLOW_BACKEND_ARG $FLOW_SHADOW_ARG $DISARM $DETECT_ARG; rc=$?
+  python3 "$RECORDER_DIR/capture.py" --out "$HOT" --fps "$FPS" --ov-record-fps "$OV_RECORD_FPS" --ov-max-exposure-us "$OV_MAX_EXPOSURE_US" --down-fps "$DOWN_FPS" --down-record-fps "$CM2_RECORD_FPS" --down-max-exposure-us "$CM2_MAX_EXPOSURE_US" --split-mb "$SPLIT_MB" --storage-config "$SCFG" "${PX4_NAMESPACE_ARG[@]}" $DOWN_CAMERA_ARG $DOWN_RAW_ARG $FLOW_ARG $FLOW_BACKEND_ARG $FLOW_SHADOW_ARG $DISARM $DETECT_ARG; rc=$?
   [ "$rc" -eq 130 ] && rc=0
 fi
 set -e
@@ -199,10 +208,11 @@ SIZE="$(du -sh "$DEEP" 2>/dev/null | cut -f1)"
     echo "- camera_calibration: drone4 OV9281 uncalibrated; K[0]=0 in CameraInfo"
   else
     echo "- downward_camera: IMX219 cam1 1640x1232 yuyv422 capture @${DOWN_FPS}fps; automatic daylight exposure <=${CM2_MAX_EXPOSURE_US}us; driver-default orientation"
-    echo "- downward_recording: continuous_raw=${RECORD_CM2_RAW}; flow=${FLOW}; flow_backend=${FLOW_BACKEND}; flow_publish=${FLOW_PUBLISH}; 1 Hz mono preview when raw is disabled"
+    echo "- downward_recording: raw=${RECORD_CM2_RAW}; raw_rate=${CM2_RECORD_FPS:-0}Hz (0=all captured frames); flow=${FLOW}; flow_backend=${FLOW_BACKEND}; flow_publish=${FLOW_PUBLISH}; 1 Hz mono preview when raw is disabled"
     echo "- camera_calibration: CM2 uses config/cm2_intrinsics_rs.yaml for flow; CameraInfo remains K[0]=0 for compatibility"
   fi
   echo "- imu: /fmu/out/sensor_combined over uXRCE-DDS (~194 Hz, no USB)"
+  echo "- px4_live_namespace: ${PX4_NAMESPACE:-/}; canonical bag namespace: /fmu"
   echo "- storage: ${STORAGE_PATH}, split=${SPLIT_MB}MB, compress=${COMPRESS}, landed on ${DEEP}"
   echo "- truth: return-to-start loop-closure (no mocap/RTK)"
   echo "- size: ${SIZE}"
