@@ -55,6 +55,7 @@ class MissionConfig:
     rosette_radius_m: float = 1.5
     rosette_outer_hold_s: float = 0.5
     rosette_center_hold_s: float = 0.5
+    rosette_petals: int = len(ROSETTE_HEADINGS_DEG)
     # transit / vertical
     climb_speed: float = 1.5
     descent_speed: float = 0.8
@@ -89,6 +90,10 @@ class MissionConfig:
             raise ValueError("survey_alt_m and lane_speed must be positive")
         if self.rosette_radius_m <= 0.0:
             raise ValueError("rosette radius must be positive")
+        if not 1 <= self.rosette_petals <= len(ROSETTE_HEADINGS_DEG):
+            raise ValueError(
+                f"rosette_petals must be between 1 and {len(ROSETTE_HEADINGS_DEG)}"
+            )
         if self.rosette_outer_hold_s < 0.0 or self.rosette_center_hold_s < 0.0:
             raise ValueError("rosette holds must not be negative")
         if self.reach_tol_m <= 0.0 or self.track_gate_m < self.reach_tol_m:
@@ -204,7 +209,15 @@ class MissionEngine:
         return self.cfg.egress_ne
 
     def _check_aborts(self, t: float, pos: Vec3) -> None:
-        if self.phase in (PREFLIGHT, OFFBOARD_SYNC, ABORT, DUMP, LAND, DONE):
+        if self.phase in (
+            PREFLIGHT,
+            OFFBOARD_SYNC,
+            ABORT,
+            SETTLE,
+            DUMP,
+            LAND,
+            DONE,
+        ):
             return
         if (
             self.phase in (TAKEOFF, LANE, VERIFY_DIP)
@@ -402,7 +415,7 @@ class MissionEngine:
                     self._petal_hold_t0 = t
                 elif t - self._petal_hold_t0 >= self.cfg.rosette_center_hold_s:
                     self._petal_hold_t0 = None
-                    if self._petal_i >= len(ROSETTE_HEADINGS_DEG):
+                    if self._petal_i >= self.cfg.rosette_petals:
                         self.phase = DUMP
                     else:
                         self._petal_stage = "outbound"

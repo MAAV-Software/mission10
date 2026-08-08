@@ -8,7 +8,8 @@ exec "$HERE/run_engine.sh" \
   -p vehicle_namespace:=px4_4 \
   -p mission_pattern:=center_return_rosette \
   -p rosette_radius_m:=1.5 \
+  -p rosette_petals:=1 \
   -p lane_speed_mps:=1.0 \
   -p anchor_corrects:=false \
   -p max_dips:=0 \
-  -p mission_timeout_s:=60.0
+  -p mission_timeout_s:=0.0

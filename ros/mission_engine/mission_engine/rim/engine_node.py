@@ -59,6 +59,7 @@ from mission_engine.core.mission import (
     LAND,
     MissionConfig,
     MissionEngine,
+    ROSETTE_HEADINGS_DEG,
 )
 
 TAG_PREFIX = "tag36h11:"
@@ -80,6 +81,7 @@ class EngineNode(OffboardController):
         self.declare_parameter("rosette_radius_m", 1.5)
         self.declare_parameter("rosette_outer_hold_s", 0.5)
         self.declare_parameter("rosette_center_hold_s", 0.5)
+        self.declare_parameter("rosette_petals", len(ROSETTE_HEADINGS_DEG))
         self.declare_parameter("survey_alt_m", 4.0)
         self.declare_parameter("lane_speed_mps", 1.0)
         self.declare_parameter("reach_tolerance_m", 0.25)
@@ -236,6 +238,7 @@ class EngineNode(OffboardController):
             rosette_radius_m=float(p("rosette_radius_m").value),
             rosette_outer_hold_s=float(p("rosette_outer_hold_s").value),
             rosette_center_hold_s=float(p("rosette_center_hold_s").value),
+            rosette_petals=int(p("rosette_petals").value),
             survey_alt_m=float(p("survey_alt_m").value),
             lane_speed=float(p("lane_speed_mps").value),
             reach_tol_m=float(p("reach_tolerance_m").value),
