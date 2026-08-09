@@ -12,7 +12,7 @@ use smoltcp::wire::{
 use crate::scheduler::ExchangeId;
 use crate::{Destination, EgoState, NodeAddress, TIMESTAMP_MASK};
 
-pub const AIR_PROTOCOL_VERSION: u8 = 4;
+pub const AIR_PROTOCOL_VERSION: u8 = 5;
 pub const PAN_ID: u16 = 0x4d10;
 pub const BROADCAST_ADDRESS: u16 = 0xffff;
 pub const AIR_FRAME_MAX_NO_FCS: usize = 125;
@@ -317,19 +317,19 @@ mod tests {
         if std::env::var_os("UPDATE_AIR_GOLDEN").is_some() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/testdata/air_protocol_v4.frames"
+                "/testdata/air_protocol_v5.frames"
             );
             std::fs::write(path, &rendered).expect("write air fixture");
             return;
         }
-        assert_eq!(rendered, include_str!("../testdata/air_protocol_v4.frames"));
+        assert_eq!(rendered, include_str!("../testdata/air_protocol_v5.frames"));
     }
 
     #[test]
     fn committed_air_golden_bytes_decode_independently() {
         for (sequence, ((expected_name, expected_message), line)) in golden_cases()
             .into_iter()
-            .zip(include_str!("../testdata/air_protocol_v4.frames").lines())
+            .zip(include_str!("../testdata/air_protocol_v5.frames").lines())
             .enumerate()
         {
             let (name, encoded) = line.split_once('=').unwrap();

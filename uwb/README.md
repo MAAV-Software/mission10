@@ -105,8 +105,8 @@ uv run --with pytest pytest -q protocol/python/test_protocol.py
 
 The Rust encoders generate:
 
-- `protocol/testdata/air_protocol_v4.frames`;
-- `protocol/testdata/host_protocol_v7.frames`.
+- `protocol/testdata/air_protocol_v5.frames`;
+- `protocol/testdata/host_protocol_v8.frames`.
 
 The Python tests decode the host fixture independently. Do not hand-edit these
 files. Regenerate an intentional format change with:

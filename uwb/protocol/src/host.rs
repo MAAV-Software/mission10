@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::scheduler::{ExchangeId, FlightRoster};
 use crate::{EgoState, NodeAddress};
 
-pub const HOST_PROTOCOL_VERSION: u8 = 7;
+pub const HOST_PROTOCOL_VERSION: u8 = 8;
 /// The other five radios in the complete development inventory.
 pub const MAX_PEERS: usize = 5;
 
@@ -818,14 +818,14 @@ mod tests {
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/testdata/host_protocol_v7.frames"
+                "/testdata/host_protocol_v8.frames"
             );
             std::fs::write(path, &rendered).expect("write golden fixture");
             return;
         }
         assert_eq!(
             rendered,
-            include_str!("../testdata/host_protocol_v7.frames"),
+            include_str!("../testdata/host_protocol_v8.frames"),
             "golden fixture is stale; regenerate with \
              UPDATE_GOLDEN=1 cargo test --target x86_64-unknown-linux-gnu \
              -p mission10-uwb-protocol committed_fixture",
@@ -844,6 +844,7 @@ mod tests {
         EgoState {
             sample_time_us: 0x0102_0304_0506_0708,
             sequence: 0x1112_1314,
+            frame_epoch: 0x1516,
             phase_mrad: -1,
             phase_rate_mrad_s: 2,
             yaw_mrad: -3,

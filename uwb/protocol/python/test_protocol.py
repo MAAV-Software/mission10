@@ -24,6 +24,7 @@ GOLDEN_CONFIGURATION = RadioConfiguration(2, (0, 3, 0x8000))
 GOLDEN_STATE = EgoState(
     sample_time_us=0x0102030405060708,
     sequence=0x11121314,
+    frame_epoch=0x1516,
     phase_mrad=-1,
     phase_rate_mrad_s=2,
     yaw_mrad=-3,
@@ -33,7 +34,7 @@ GOLDEN_STATE = EgoState(
     validity=0x800D,
 )
 
-GOLDEN_FIXTURE = Path(__file__).resolve().parents[1] / "testdata/host_protocol_v7.frames"
+GOLDEN_FIXTURE = Path(__file__).resolve().parents[1] / "testdata/host_protocol_v8.frames"
 GOLDEN_FRAMES = dict(
     line.split("=", 1)
     for line in GOLDEN_FIXTURE.read_text().splitlines()
@@ -53,14 +54,14 @@ GOLDEN_HOST_FRAMES = {
 
 def test_decodes_every_rust_radio_variant():
     expected = [
-        Envelope(7, 0x10203040, "radio_id", (0xDECA, 3, 0, 2)),
-        Envelope(7, 0x10203041, "otp", (0x61616161, 0x3FF03FF0, 0x00BE0019, 0x00010201)),
-        Envelope(7, 0x10203042, "ready", (0x3FF0, 0x3FF1)),
-        Envelope(7, 0x10203043, "clock_probe", (0x5678,)),
-        Envelope(7, 0x10203044, "clock_status", (7, 125, 12_345, 1)),
-        Envelope(7, 0x10203045, "configured", (GOLDEN_CONFIGURATION,)),
+        Envelope(8, 0x10203040, "radio_id", (0xDECA, 3, 0, 2)),
+        Envelope(8, 0x10203041, "otp", (0x61616161, 0x3FF03FF0, 0x00BE0019, 0x00010201)),
+        Envelope(8, 0x10203042, "ready", (0x3FF0, 0x3FF1)),
+        Envelope(8, 0x10203043, "clock_probe", (0x5678,)),
+        Envelope(8, 0x10203044, "clock_status", (7, 125, 12_345, 1)),
+        Envelope(8, 0x10203045, "configured", (GOLDEN_CONFIGURATION,)),
         Envelope(
-            7,
+            8,
             0x10203046,
             "completed_exchange",
             (
@@ -74,8 +75,8 @@ def test_decodes_every_rust_radio_variant():
                 GOLDEN_STATE,
             ),
         ),
-        Envelope(7, 0x10203047, "error", (Diagnostic(21, "radio_reset"),)),
-        Envelope(7, 0x10203048, "health", (0x89ABCDEF, *range(1, 31))),
+        Envelope(8, 0x10203047, "error", (Diagnostic(21, "radio_reset"),)),
+        Envelope(8, 0x10203048, "health", (0x89ABCDEF, *range(1, 31))),
     ]
     assert [decode_frame(bytes.fromhex(frame)) for frame in GOLDEN_RADIO_FRAMES.values()] == expected
 

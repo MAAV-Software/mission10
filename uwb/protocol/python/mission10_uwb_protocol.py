@@ -13,10 +13,10 @@ import zlib
 from collections.abc import Iterator
 from typing import BinaryIO
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 MAX_PEERS = 5
 MAX_FRAME_SIZE = 192
-EGO_STATE_FORMAT = "<QIhhh3i3hBH"
+EGO_STATE_FORMAT = "<QIHhhh3i3hBH"
 EGO_STATE_SIZE = struct.calcsize(EGO_STATE_FORMAT)
 CONFIGURATION_FORMAT = "<HB5H"
 CONFIGURATION_SIZE = struct.calcsize(CONFIGURATION_FORMAT)
@@ -55,6 +55,7 @@ def is_node_address(address: int) -> bool:
 class EgoState:
     sample_time_us: int = 0
     sequence: int = 0
+    frame_epoch: int = 0
     phase_mrad: int = 0
     phase_rate_mrad_s: int = 0
     yaw_mrad: int = 0
@@ -156,13 +157,14 @@ def _decode_ego_state(payload: bytes) -> EgoState:
     return EgoState(
         sample_time_us=values[0],
         sequence=values[1],
-        phase_mrad=values[2],
-        phase_rate_mrad_s=values[3],
-        yaw_mrad=values[4],
-        position_enu_mm=values[5:8],
-        velocity_enu_mm_s=values[8:11],
-        mode=values[11],
-        validity=values[12],
+        frame_epoch=values[2],
+        phase_mrad=values[3],
+        phase_rate_mrad_s=values[4],
+        yaw_mrad=values[5],
+        position_enu_mm=values[6:9],
+        velocity_enu_mm_s=values[9:12],
+        mode=values[12],
+        validity=values[13],
     )
 
 
@@ -171,6 +173,7 @@ def _encode_ego_state(state: EgoState) -> bytes:
         EGO_STATE_FORMAT,
         state.sample_time_us,
         state.sequence,
+        state.frame_epoch,
         state.phase_mrad,
         state.phase_rate_mrad_s,
         state.yaw_mrad,
