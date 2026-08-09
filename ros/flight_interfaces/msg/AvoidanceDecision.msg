@@ -1,9 +1,16 @@
 # Active horizontal avoidance result and planner diagnostics.
 builtin_interfaces/Time stamp
 uint8 vehicle_id
+uint8 CONTROLLER_NOMINAL=0
+uint8 CONTROLLER_ORCA=1
+uint8 CONTROLLER_PHASE_GUARD=2
+uint8 controller
 float32[2] nominal_velocity_enu_mps
 float32[2] safe_velocity_enu_mps
 bool estimator_usable
+bool solution_feasible
+uint8 active_constraints
+float32 constraint_slack
 bool range_alert
 uint8 limiting_peer_id
 float32 limiting_range_m

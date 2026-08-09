@@ -20,6 +20,14 @@ class OrcaPeer:
     combined_radius: float
 
 
+@dataclass(frozen=True)
+class OrcaSolution:
+    velocity: np.ndarray
+    feasible: bool
+    active_constraints: int
+    max_violation: float
+
+
 def _det(a, b):
     return float(a[0] * b[1] - a[1] * b[0])
 
@@ -72,37 +80,106 @@ def _orca_halfplane(own_velocity, peer, time_horizon, time_step):
     return normal, float(normal @ point)
 
 
-def _project_halfplanes(preferred, constraints, max_speed, iterations=80):
-    """Nearest point in half-planes plus a speed disc via Dykstra projection."""
-    x = np.asarray(preferred, float)[:2].copy()
-    sets = [(np.asarray(normal, float), float(bound)) for normal, bound in constraints]
-    corrections = [np.zeros(2) for _ in range(len(sets) + 1)]
-    for _ in range(iterations):
-        previous = x.copy()
-        for index, (normal, bound) in enumerate(sets):
-            candidate = x + corrections[index]
-            shortfall = bound - float(normal @ candidate)
-            projected = candidate + max(0.0, shortfall) * normal
-            corrections[index] = candidate - projected
-            x = projected
-        candidate = x + corrections[-1]
-        speed = float(np.linalg.norm(candidate))
-        projected = candidate if speed <= max_speed else candidate * (max_speed / speed)
-        corrections[-1] = candidate - projected
-        x = projected
-        if float(np.linalg.norm(x - previous)) < 1e-8:
-            break
-    return x
+def _clip_speed(velocity, max_speed):
+    velocity = np.asarray(velocity, float)[:2].copy()
+    speed = float(np.linalg.norm(velocity))
+    return velocity if speed <= max_speed else velocity * (max_speed / speed)
+
+
+def _line_candidate(preferred, constraint, preceding, max_speed):
+    """Closest point on one constraint boundary that satisfies earlier lines."""
+    normal, bound = constraint
+    normal = np.asarray(normal, float)
+    point = normal * float(bound)
+    radius_sq = max_speed * max_speed - float(point @ point)
+    if radius_sq < -1e-10:
+        return None
+    extent = math.sqrt(max(0.0, radius_sq))
+    direction = np.array([-normal[1], normal[0]])
+    lower, upper = -extent, extent
+    for other_normal, other_bound in preceding:
+        coefficient = float(np.asarray(other_normal, float) @ direction)
+        required = float(other_bound) - float(np.asarray(other_normal, float) @ point)
+        if abs(coefficient) <= 1e-12:
+            if required > 1e-9:
+                return None
+            continue
+        limit = required / coefficient
+        if coefficient > 0.0:
+            lower = max(lower, limit)
+        else:
+            upper = min(upper, limit)
+        if lower > upper + 1e-10:
+            return None
+    target = float(direction @ (np.asarray(preferred, float)[:2] - point))
+    return point + min(upper, max(lower, target)) * direction
+
+
+def _linear_program(preferred, constraints, max_speed):
+    """Canonical incremental 2-D linear program used by ORCA.
+
+    Constraint order is part of the contract.  A failure returns the solution
+    for the largest feasible prefix and reports the violated suffix; callers do
+    not get an invented stop, turn, or braking behavior.
+    """
+    result = _clip_speed(preferred, max_speed)
+    solved = 0
+    for index, constraint in enumerate(constraints):
+        normal, bound = constraint
+        if float(np.asarray(normal, float) @ result) >= float(bound) - 1e-9:
+            solved += 1
+            continue
+        candidate = _line_candidate(preferred, constraint, constraints[:index], max_speed)
+        if candidate is None:
+            violations = [
+                max(0.0, float(b) - float(np.asarray(n, float) @ result))
+                for n, b in constraints
+            ]
+            return OrcaSolution(
+                velocity=result,
+                feasible=False,
+                active_constraints=solved,
+                max_violation=max(violations, default=0.0),
+            )
+        result = candidate
+        solved += 1
+    violations = [
+        max(0.0, float(b) - float(np.asarray(n, float) @ result))
+        for n, b in constraints
+    ]
+    active = sum(
+        abs(float(np.asarray(n, float) @ result) - float(b)) <= 1e-7
+        for n, b in constraints
+    )
+    return OrcaSolution(
+        velocity=result,
+        feasible=True,
+        active_constraints=active,
+        max_violation=max(violations, default=0.0),
+    )
+
+
+def orca_solution(preferred_velocity, own_velocity, peers, *, time_horizon_s=3.0,
+                  time_step_s=0.05, max_speed_mps=2.0):
+    """Return the ORCA velocity together with explicit solver diagnostics."""
+    constraints = [
+        _orca_halfplane(own_velocity, peer, time_horizon_s, time_step_s)
+        for peer in peers
+    ]
+    return _linear_program(preferred_velocity, constraints, float(max_speed_mps))
 
 
 def orca_velocity(preferred_velocity, own_velocity, peers, *, time_horizon_s=3.0,
                   time_step_s=0.05, max_speed_mps=2.0):
     """Return the closest reciprocal collision-avoiding horizontal velocity."""
-    constraints = [
-        _orca_halfplane(own_velocity, peer, time_horizon_s, time_step_s)
-        for peer in peers
-    ]
-    return _project_halfplanes(preferred_velocity, constraints, float(max_speed_mps))
+    return orca_solution(
+        preferred_velocity,
+        own_velocity,
+        peers,
+        time_horizon_s=time_horizon_s,
+        time_step_s=time_step_s,
+        max_speed_mps=max_speed_mps,
+    ).velocity
 
 
 def orca_effective_radius(protected_radius_m, uncertainty_radius_m,

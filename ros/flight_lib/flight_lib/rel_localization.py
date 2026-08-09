@@ -126,6 +126,101 @@ class RelativePositionEKF:
         self.P = (np.eye(2) - K @ H) @ self.P
 
 
+@dataclass(frozen=True)
+class FusedRelativeEstimate:
+    position: np.ndarray
+    covariance: np.ndarray
+    relative_velocity: np.ndarray
+    range_m: float
+    range_rate_mps: float
+    residual_m: float
+    confidence_radius_95_m: float
+    sample_count: int
+    reseeded: bool
+
+
+class FusedRelativeTracker:
+    """Pairwise relative position from shared pose, velocity, and UWB range.
+
+    Shared position supplies the bearing branch.  UWB range is an ordinary EKF
+    measurement that tightens the radial axis; it is not a mode switch.
+    """
+
+    def __init__(self, *, position_noise_std=0.6, range_noise_std=0.1,
+                 velocity_noise_std=0.3):
+        self.position_variance = float(position_noise_std) ** 2
+        self.range_variance = float(range_noise_std) ** 2
+        self.ekf = RelativePositionEKF(velocity_noise_std)
+        self.last_time_s = None
+        self.last_range_time_s = None
+        self.last_range_m = math.nan
+        self.epochs = None
+        self.sample_count = 0
+
+    def update(self, time_s, own_position, peer_position, own_velocity,
+               peer_velocity, *, range_m=math.nan, own_epoch=0, peer_epoch=0):
+        now = float(time_s)
+        own_position = np.asarray(own_position, float)[:2]
+        peer_position = np.asarray(peer_position, float)[:2]
+        own_velocity = np.asarray(own_velocity, float)[:2]
+        peer_velocity = np.asarray(peer_velocity, float)[:2]
+        values = np.concatenate((own_position, peer_position, own_velocity, peer_velocity))
+        if not math.isfinite(now) or not np.all(np.isfinite(values)):
+            raise ValueError("fused relative state requires finite time, pose, and velocity")
+        if self.last_time_s is not None and now < self.last_time_s:
+            raise ValueError("fused relative-state timestamps must not move backwards")
+
+        relative_position = peer_position - own_position
+        relative_velocity = peer_velocity - own_velocity
+        epochs = (int(own_epoch), int(peer_epoch))
+        reseeded = not self.ekf.initialized or self.epochs != epochs
+        if reseeded:
+            self.ekf.init_from_gnss(
+                relative_position, self.position_variance * np.eye(2))
+            self.epochs = epochs
+        else:
+            dt = now - self.last_time_s
+            if dt > 0.0:
+                self.ekf.predict(relative_velocity, dt)
+            self.ekf.update_gnss(
+                relative_position, self.position_variance * np.eye(2))
+        self.last_time_s = now
+
+        if math.isfinite(float(range_m)) and float(range_m) > 0.0:
+            measured_range = float(range_m)
+            self.ekf.update_range(measured_range, self.range_variance)
+            self.last_range_time_s = now
+            self.last_range_m = measured_range
+            self.sample_count += 1
+        else:
+            measured_range = self.last_range_m
+
+        position = self.ekf.mean
+        covariance = self.ekf.cov
+        distance = float(np.linalg.norm(position))
+        range_rate = (
+            float(position @ relative_velocity) / distance
+            if distance > 1e-6 else math.nan
+        )
+        residual = (
+            abs(float(np.linalg.norm(position)) - measured_range)
+            if math.isfinite(measured_range) else math.nan
+        )
+        radius = float(math.sqrt(
+            5.991 * max(0.0, np.linalg.eigvalsh(covariance)[-1])))
+        return FusedRelativeEstimate(
+            position=position,
+            covariance=covariance,
+            relative_velocity=relative_velocity.copy(),
+            range_m=measured_range,
+            range_rate_mps=range_rate,
+            residual_m=residual,
+            confidence_radius_95_m=radius,
+            sample_count=self.sample_count,
+            reseeded=reseeded,
+        )
+
+
 class RangeHistoryRelativeEstimator:
     """Relative bearing from scalar ranges and shared-frame velocity history.
 

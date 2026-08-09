@@ -1,6 +1,6 @@
 import numpy as np
 
-from flight_lib import OrcaPeer, orca_effective_radius, orca_velocity
+from flight_lib import OrcaPeer, orca_effective_radius, orca_solution, orca_velocity
 
 
 def test_head_on_pair_selects_reciprocal_opposite_sides():
@@ -70,3 +70,26 @@ def test_uncertainty_inflation_can_be_expressed_as_larger_peer_radius():
         [OrcaPeer(np.array([5.0, 0.0]), np.array([-1.0, 0.0]), 2.0)],
     )
     assert np.linalg.norm(uncertain - preferred) > np.linalg.norm(exact - preferred)
+
+
+def test_solution_reports_infeasible_speed_disc_without_inventing_a_fallback():
+    peers = [
+        OrcaPeer(np.array([0.1, 0.0]), np.zeros(2), 2.0),
+        OrcaPeer(np.array([-0.1, 0.0]), np.zeros(2), 2.0),
+    ]
+    solution = orca_solution(np.zeros(2), np.zeros(2), peers, max_speed_mps=0.1)
+    assert not solution.feasible
+    assert solution.max_violation > 0.0
+    assert np.linalg.norm(solution.velocity) <= 0.1 + 1e-9
+
+
+def test_peer_order_permutation_is_symmetric_for_feasible_crossing():
+    own = np.array([1.0, 0.0])
+    peers = [
+        OrcaPeer(np.array([4.0, 1.0]), np.array([-0.5, 0.0]), 1.5),
+        OrcaPeer(np.array([4.0, -1.0]), np.array([-0.5, 0.0]), 1.5),
+    ]
+    forward = orca_solution(own, own, peers)
+    reverse = orca_solution(own, own, list(reversed(peers)))
+    assert forward.feasible and reverse.feasible
+    assert np.allclose(forward.velocity, reverse.velocity)
