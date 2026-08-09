@@ -1,0 +1,6 @@
+pyproj
+numpy
+pyYaml
+matplotlib
+onnxruntime
+opencv-python

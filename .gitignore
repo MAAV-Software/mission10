@@ -6,6 +6,7 @@ __pycache__/
 # Local credentials (copy values from the provider's deploy snippet)
 .env.local
 .venv/
+env/
 
 build/
 install/
@@ -17,4 +18,8 @@ models/*/out/
 models/*/dataset/
 
 .DS_Store
+
+test*
+*.jpg
+*.png
 ._*
