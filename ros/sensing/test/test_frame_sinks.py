@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from frame_sinks import DetectorSink
+from sensing.frame_sinks import DetectorSink
 
 
 class FakeMsg:

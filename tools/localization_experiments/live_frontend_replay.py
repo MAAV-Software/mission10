@@ -10,11 +10,11 @@ import time
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-RECORDER = HERE.parent / "flight_recorder"
-sys.path.insert(0, str(RECORDER))
+SENSING = HERE.parents[1] / "ros" / "sensing"
+sys.path.insert(0, str(SENSING))
 
-from cm2_flow import Cm2FlowFrontend, ImuHistory, STATUS_VALID  # noqa: E402
-from cm2_svo_flow import Cm2SvoFlowFrontend  # noqa: E402
+from sensing.cm2_flow import Cm2FlowFrontend, ImuHistory, STATUS_VALID  # noqa: E402
+from sensing.cm2_svo_flow import Cm2SvoFlowFrontend  # noqa: E402
 from common import iter_messages, stamp_ns  # noqa: E402
 
 
@@ -36,7 +36,7 @@ def main():
     parser.add_argument(
         "--calibration",
         type=Path,
-        default=RECORDER / "config" / "cm2_intrinsics_rs.yaml",
+        default=SENSING / "sensing" / "config" / "cm2_intrinsics_rs.yaml",
     )
     args = parser.parse_args()
 
@@ -52,8 +52,8 @@ def main():
             args.calibration,
             imu,
             args.svo_build,
-            RECORDER / "config" / "svo_flow_params.yaml",
-            RECORDER / "config" / "svo_flow_cm2_820.yaml",
+            SENSING / "sensing" / "config" / "svo_flow_params.yaml",
+            SENSING / "sensing" / "config" / "svo_flow_cm2_820.yaml",
         )
     else:
         frontend = Cm2FlowFrontend(args.calibration, imu)

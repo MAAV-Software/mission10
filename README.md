@@ -15,11 +15,12 @@ Software stack for IARC Mission 10. This workspace contains mission nodes, launc
 | `ros/sim_truth_ev` | Sim twin: gz ground truth → PX4 external vision, with fault injection. |
 | `ros/sim_uwb` | Sim twin: pairwise UWB ranges from gz truth + noise/dropout. |
 | `uwb/` | Real-hardware UWB: DWM3001C software, direct DW1000 backend, shared protocol, and bring-up tools. |
+| `ros/sensing` | Mission-owned CM2 capture, bounded frame fanout, optical flow, and detection. |
 | `ros/mission_engine` | Survey execution, tag detection, observation association, and mission result handling. |
 | `ros/jarvis_web` | Operator phone webapp: voice commands in, mission gates out, and result display. |
 | `ros/ros_gz_marker_bridge` | ROS → gz visual marker bridge (visualization only). |
 | `models/yolo` | PFM-1 mine detector pipeline: synthetic datagen → training → Hailo export. |
-| `tools/flight_recorder` | Standalone dual-camera + PX4/IMU MCAP field recorder for CM5 aircraft. |
+| `tools/flight_recorder` | Optional downstream PX4/IMU/camera MCAP recorder for CM5 aircraft. |
 | `scripts/` | `sitl.sh` (bringup wrapper), visualization overlays, px4_msgs sync. |
 | `flake.nix`, `nix/` | Workstation dev environment (ROS 2 Jazzy + gz via nix-ros-overlay). Drones run apt. |
 

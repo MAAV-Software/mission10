@@ -1,3 +1,4 @@
+# Mission sensing calibration for the downward Camera Module 2.
 cam0:
   # Candidate from the patched Kalibr rolling-shutter solve documented at
   # reference/cyclops_offline/calibration/20260724_drone4_intrinsics/README.md.

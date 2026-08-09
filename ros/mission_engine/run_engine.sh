@@ -4,10 +4,10 @@
 # PYTHONPATH. Every path derives from this script, so a clone of the
 # repository on the companion runs without configuration and without a build.
 #
-# The engine reads /detections/down. The flight recorder produces that topic
-# when it runs with DETECT=1, so start the recorder first:
+# The engine reads /detections/down from the separate mission-owned sensing
+# process. Recording is optional and may attach independently:
 #
-#   cd mission10/tools/flight_recorder && DETECT=1 ./record_flight.sh "" tag_anchor
+#   cd mission10/ros/sensing && PX4_NAMESPACE=/px4_4 DETECT=1 ./run_sensing.sh
 #   cd mission10/ros/mission_engine && ./run_engine.sh
 #
 # Then, from another shell on the network:

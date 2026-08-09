@@ -1,4 +1,4 @@
-"""Map canonical bag topic names onto a vehicle's live PX4 namespace."""
+"""Map canonical PX4 topic names onto a vehicle's live namespace."""
 
 
 def live_px4_topic(canonical_topic: str, namespace: str = "") -> str:

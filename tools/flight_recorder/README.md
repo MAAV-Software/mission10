@@ -1,179 +1,139 @@
 # Flight recorder
 
-This CM5 utility records synchronized field evidence into one MCAP bag during
-manual, open-loop, or autonomous flights. Its scope is field-data acquisition.
-This boundary follows the flight/map separation in
-[`rfd-mission-execution`](../../../doc/rfd-mission-execution.md): the recorder
-preserves raw measurements and flight state. Mission decisions and processed
-map records remain within the mission engine.
+This directory contains the optional full-bag recorder. Mission sensing lives
+in [`ros/sensing`](../../ros/sensing/README.md) and must already be running.
+The recorder attaches to its `cm2` shared-memory pool; it never starts, stops,
+or configures sensing.
 
-The recorder owns the cameras, so it is also the frame source for the sensing
-stack. One capture serves every consumer of the nadir view
-([`rfd-single-camera-sensing`](../../../doc/rfd-single-camera-sensing.md) 3.1).
-`--flow` attaches the CM2 angular-flow frontend and `--detect` attaches the
-mission engine's AprilTag detector without a raw-image DDS hop. Both run behind
-bounded queues and cannot stop camera capture.
+The initial migration applies only to the downward Camera Module 2. The
+recorder still owns the forward OV9281 for now. Moving that camera behind the
+same sensing-source contract is a later change.
 
 ## Recorded streams
 
-- Forward OV9281: captured at 30 Hz and recorded at 1 Hz during flow bring-up.
-  Set `OV_RECORD_FPS=0` to retain every frame for VIO. Automatic daylight exposure is
-  capped at 1000 µs by default. The tool requires the installed device-tree
-  rotation to report 180 degrees. It initializes this camera after the CM2
-  manager so libcamera applies native horizontal and vertical sensor flips for
-  the physically inverted mount.
-- Downward IMX219 Camera Module 2: 1640 × 1232 at 30 Hz. By default the bag
-  stores flow, tracks, timing/quality diagnostics, tag corners, a 1 Hz preview,
-  and operator-triggered one-second pre/post raw clips instead of the
-  approximately 121 MB/s continuous YUYV stream. Set `RECORD_CM2_RAW=1` for a
-  deliberate calibration capture. `CM2_RECORD_FPS=10` records a time-sampled
-  raw stream while the camera and attached consumers continue at `DOWN_FPS=30`.
-- `/imu`, converted from PX4 `SensorCombined`, plus the original PX4 IMU topic.
-- PX4 time sync, attitude, local/global position, receiver GNSS, dToF range,
-  EKF range-height aid state, estimator control flags, full estimator status,
-  GNSS check and position/velocity aid state, vehicle status, command
-  acknowledgements, and failsafe requirements.
+The full bag contains:
 
-Both camera `CameraInfo` messages deliberately report `K[0] = 0` until the
-installed cameras are calibrated in their operational modes.
+- CM2 YUYV copied from the `cm2` pool at 10 Hz initially;
+- OV9281 mono at 1 Hz initially;
+- PX4 state, estimator diagnostics, dToF, GNSS, command acknowledgements, and
+  failsafe state;
+- raw and converted IMU;
+- CM2 flow, flow diagnostics, detections, and detection diagnostics whenever
+  sensing publishes them;
+- tag-EV status and vehicle visual odometry.
 
-The CM2 flow publisher advertises the fixed 8 m outdoor-grass flight ceiling.
-It does not invent a tighter angular-rate or minimum-height limit: `NaN`
-delegates those bounds to PX4's
-`SENS_FLOW_MAXR` and `SENS_FLOW_MINHGT` parameters. The frontend's per-frame
-quality still gates invalid tracks.
-
-The optional diagnostic PX4 firmware publishes `EstimatorStatus`,
-`EstimatorGpsStatus`, the GNSS position and velocity aid sources,
-`EstimatorStatusFlags`, and the range-height aid source. These streams keep
-the distinction between a receiver fix and measurements accepted by EKF2
-visible in the bag. Existing firmware can consume `/fmu/in/sensor_optical_flow`
-without rebuilding `px4_msgs`; the extra flow/EV aid-source publications only
-improve live observability.
-
-## Preview the cameras
-
-The preview tool opens both cameras by default and serves independently
-refreshing native-resolution JPEG images:
-
-```sh
-cd /home/maav/flight_recorder
-./focus_stream.py
-# Open http://drone4:8000/
-```
-
-Use `--camera ov9281` or `--camera cm2` to open only one camera. The CM2 uses
-automatic daylight exposure with a hard 1000 µs shutter ceiling. Override the
-ceiling only for a deliberate test with `--cm2-max-exposure-us`.
-
-The preview and recorder each own the cameras. Stop the preview before starting
-a recording.
+Recording is uncompressed by default. Full YUYV bags require the mounted USB
+recording volume. The launcher refuses to fall back to eMMC.
 
 ## Deploy
 
-Copy this directory to any location on the aircraft.
+Update the existing aircraft checkout, then build the two Python packages whose
+entry points or package metadata changed:
 
 ```sh
-rsync -a tools/flight_recorder/ drone4:/home/maav/flight_recorder/
+ssh drone4
+cd ~/m10-main
+git pull
+colcon build --packages-select mission_engine sensing --symlink-install
 ```
 
-The drone image supplies ROS 2 Jazzy, `px4_msgs`, Picamera2, NumPy,
-`rosbag2_py`, the MCAP storage plugin, and `rsync`.
+Both launchers derive `install/setup.bash` from the `m10-main` checkout. The
+recorder does not add the sensing source tree to `PYTHONPATH`. The aircraft
+image supplies ROS 2 Jazzy, `px4_msgs`, `vision_msgs`, Picamera2, NumPy,
+`rosbag2_py`, and the MCAP storage plugin.
 
-`DETECT=1` also needs the mission engine. `MISSION_ENGINE` defaults to the
-sibling package in this checkout, so a copied-out recorder must name where the
-engine landed:
+See [`ros/sensing/README.md`](../../ros/sensing/README.md) for the one-time
+user-level colcon setup. Build only `mission_engine` and `sensing`; the drones
+are not general source-build machines.
+
+## Flight commands
+
+Start sensing as mission infrastructure in one shell:
 
 ```sh
-rsync -a ros/mission_engine/ drone4:/home/maav/maav_survey/src/mission_engine/
-# on the aircraft
-MISSION_ENGINE=/home/maav/maav_survey/src/mission_engine DETECT=1 \
-  ./record_flight.sh "" tag_anchor
+cd ~/m10-main/ros/sensing
+PX4_NAMESPACE=/px4_4 FLOW_BACKEND=svo DETECT=1 ./run_sensing.sh
 ```
 
-`vision_msgs` is not in the base ROS image. Install it from a CI tarball with
-`px4_ros_build/scripts/deploy-ros-pkg.sh`, which also installs the ament index
-markers that `rosbag2` needs to record a readable message definition.
-
-## Record a flight
-
-On the drone:
+Start the optional recorder in another shell before arming:
 
 ```sh
-cd /home/maav/flight_recorder
-PX4_NAMESPACE=/px4_4 ./record_flight.sh "" drone4_manual
+cd ~/m10-main/tools/flight_recorder
+./record_mine_flight.sh survey_01
 ```
 
-`PX4_NAMESPACE` selects the live vehicle DDS graph. The recorder always stores
-PX4 streams under canonical `/fmu/...` names, so downstream bag tools do not
-need vehicle-specific topic handling. Leave it unset for an unnamespaced graph.
+Press Ctrl-C once after landing and keep the CM5 powered until `MCAP finalized`
+and the final bag path print. Stopping or crashing the recorder does not stop
+sensing. Do not start two recorders at once.
 
-Start the recorder before arming. Press Ctrl-C once after landing. The recorder
-then prints these shutdown phases:
-
-1. `stop requested`
-2. `finalizing MCAP cache and metadata`
-3. `MCAP finalized`
-4. the tier-drain summary and final bag path
-
-Keep the CM5 powered until the final bag path is printed. During MCAP
-finalization, another Ctrl-C only reports that finalization is already in
-progress.
-
-By default, the recorder writes one unsplit MCAP directly to
-`/mnt/recordings`, bypassing RAM staging, `rsync`, and eMMC. Drone4's installed
-256 GB USB drive sustained 218 MB/s across a 4 GiB direct-write test on
-2026-07-27. Without that mount, the recorder falls back to split chunks staged
-from RAM to eMMC. Useful overrides:
+Useful recorder-only overrides:
 
 ```sh
-FLOW=1 DOWN_FPS=30 FPS=30 ./record_flight.sh "" flow_test
-RECORD_CM2_RAW=1 OV_RECORD_FPS=0 ./record_flight.sh "" calibration
-RECORD_CM2_RAW=1 CM2_RECORD_FPS=10 ./record_flight.sh "" sampled_raw
-COMPRESS=zstd ./record_flight.sh "" deliberate_low_rate_compressed_test
-SPLIT_MB=2048 ./record_flight.sh "" deliberate_split_test
-CM2_MAX_EXPOSURE_US=1000 ./record_flight.sh "" daylight
-OV_MAX_EXPOSURE_US=1000 ./record_flight.sh "" vio_daylight
-STOP_ON_DISARM=1 ./record_flight.sh "" autonomous
-DETECT=1 ./record_flight.sh "" tag_anchor
-./record_flight.sh 60 timed_test
+CM2_RECORD_FPS=15 ./record_mine_flight.sh qualified_15hz_test
+OV_RECORD_FPS=0 ./record_mine_flight.sh full_ov9281
+STOP_ON_DISARM=0 ./record_mine_flight.sh manual_stop
 ```
 
-Recording is uncompressed by default. Native-resolution, high-rate dual-camera
-capture can outrun live zstd compression and cause rosbag cache loss even when
-the USB device has enough write bandwidth. Use `COMPRESS=zstd` only for a
-deliberate low-rate capture whose resulting topic rates and loss counters are
-checked after finalization.
+## Qualification runbook
 
-## Detect tags during the flight
-
-`DETECT=1` runs the mission engine's AprilTag detector on the nadir frames. It
-publishes `vision_msgs/Detection2DArray` on `/detections/down` for the mission
-engine, and records the same messages in the bag. Each detection keeps its
-source image header, so a detection joins to flight state on the image stamp.
-
-`MISSION_ENGINE` gives the package path. It defaults to the sibling package in
-this checkout. The recorder reports the detector at startup and prints its frame,
-tag, drop, and latency counts in the capture summary. A detector that will not
-load, or that faults during the flight, is reported and the recording
-continues.
-
-Detection costs about 90 ms of one core per 1640 × 1232 frame, against the
-33 ms camera interval at `DOWN_FPS=30`. The detector therefore consumes the
-freshest frames at roughly 10 Hz while the independent flow worker processes
-the full camera rate.
-
-For a short, single-tier capture:
+Run the process-boundary check after changing the pool or lease code:
 
 ```sh
-RECDIR=/home/maav/recordings ./record_session.sh 30 bench
+cd mission10
+nix develop -c env PYTHONPATH=ros/sensing python \
+  ros/sensing/test/integration_shared_frame_pool.py
 ```
 
-## Validate before deployment
+It starts a real attaching process, validates complete frames, stalls six local
+leases, and kills the recorder reader while production continues.
 
-From this directory:
+On 2026-08-09 this check passed on drone4's Python 3.12/ROS Jazzy image. The
+CM5 has a 4 GiB `/dev/shm`; eight 1640 × 1232 YUYV slots consume 32,327,680
+bytes plus a small control map.
+
+A CM2 camera-load test was blocked because the crash-damaged aircraft
+enumerated only the OV9281. The kernel reported IMX219 chip-ID reads failing
+with `-EREMOTEIO`. Reseat the CM2 ribbon at both ends and confirm both entries
+with `rpicam-hello --list-cameras` before rerunning.
+
+The OV9281-only hardware harness validated the camera-to-pool-to-MCAP boundary
+under sustained thermal throttling: 893 frames at 29.7 Hz with a 33.4 ms
+maximum sensor gap. A real AprilTag consumer processed 692 frames (~23 Hz),
+discarded 201 stale pending frames, and had zero faults. The recorder had zero
+sequence skips and wrote 228 frames over 24.63 seconds to a readable 222.8 MiB
+MCAP. Capture continued for five seconds after recorder finalization. Sysfs
+briefly reached 87.0 °C; repeat with airflow for the nominal throughput result.
 
 ```sh
-python3 -m py_compile camera_tuning.py capture.py cm2_flow.py frame_sinks.py focus_stream.py imu_rate.py tier_drain.py
-bash -n record_flight.sh record_session.sh
+PYTHONPATH=../../ros/sensing python3 integration_ov9281_pool.py \
+  --out /mnt/recordings/ov9281_pool_smoke \
+  --seconds 30 --record-seconds 25
+```
+
+Before raising the 10 Hz CM2 recording default:
+
+1. Run sensing without a recorder and confirm flow and detections continue.
+2. Record 10 minutes under full sensing load.
+3. Kill the recorder and confirm camera sequence, flow, and detections continue.
+4. Compare sensing-only with sensing plus recording. Require zero recorder
+   drops and no added camera gaps or flow timing failures.
+5. Test 15, 20, and 30 Hz in that order and promote only a qualified rate.
+
+This qualification also verifies that the OV9281 can open after mission
+sensing already owns and streams the CM2; the old recorder-start gate no longer
+exists by design.
+
+## Static checks
+
+```sh
+cd mission10
+nix develop -c python -m py_compile \
+  ros/sensing/sensing/*.py \
+  ros/sensing/test/integration_shared_frame_pool.py \
+  tools/flight_recorder/integration_ov9281_pool.py \
+  tools/flight_recorder/recording.py \
+  tools/flight_recorder/recorder.py
+bash -n ros/sensing/run_sensing.sh \
+  tools/flight_recorder/record_flight.sh \
+  tools/flight_recorder/record_mine_flight.sh
 ```

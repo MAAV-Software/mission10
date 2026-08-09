@@ -99,11 +99,11 @@ The 2026-07-28 result is in
 - Held-out selected-flow scale: 0.982. The half-second displacement errors
   correspond to 0.0089 m/s median and 0.0231 m/s p95 velocity-error proxies.
 
-The flight recorder can run the same tracker without publishing it to PX4:
+Mission sensing can run the same tracker without publishing it to PX4:
 
 ```bash
-FLOW=1 FLOW_BACKEND=svo FLOW_PUBLISH=0 DOWN_FPS=20 DETECT=1 \
-  tools/flight_recorder/record_flight.sh 60 svo_flow_shadow
+FLOW_BACKEND=svo FLOW_PUBLISH=0 DOWN_FPS=20 DETECT=1 \
+  ros/sensing/run_sensing.sh
 ```
 
 `FLOW_PUBLISH=1` enables `/fmu/in/sensor_optical_flow` after the shadow run

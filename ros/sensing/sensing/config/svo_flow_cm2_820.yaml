@@ -1,3 +1,4 @@
+# Mission sensing configuration for the SVO flow frontend.
 label: "Drone4 CM2 820x616 flow frontend"
 id: maavcm2flow820x6160000000000000
 # Exact 2x scaling of the patched Kalibr rolling-shutter candidate in

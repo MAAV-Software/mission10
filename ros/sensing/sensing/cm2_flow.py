@@ -1,4 +1,4 @@
-"""Live CM2 angular flow using the same KLT model as the July 27 replay.
+"""Mission-owned CM2 angular flow using the July 27 KLT model.
 
 The frontend estimates gyro-compensated translational image motion for its
 quality checks, then adds the center-row gyro integral back to form PX4's raw

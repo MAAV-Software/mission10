@@ -11,7 +11,7 @@ from html import escape
 from http import server
 from urllib.parse import urlsplit
 
-from camera_tuning import load_imx219_daylight_tuning
+from sensing.camera_tuning import load_imx219_daylight_tuning
 
 
 CAMERAS = {

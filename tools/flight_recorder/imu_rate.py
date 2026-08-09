@@ -17,7 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from px4_msgs.msg import SensorCombined
 
-from px4_topics import live_px4_topic
+from sensing.px4_topics import live_px4_topic
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--secs", type=float, default=3.0)

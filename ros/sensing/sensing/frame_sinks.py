@@ -1,15 +1,13 @@
-"""Extra consumers for frames the recorder already holds.
+"""Bounded consumers inside the mission sensing process.
 
-The recorder owns the CM2. One capture feeds every consumer that needs the
-nadir view (rfd-single-camera-sensing 3.1), so a consumer that wants those
-frames takes them here rather than subscribing to 20 MB/s of imagery over
-DDS.
+The sensing process owns the CM2. One capture feeds every consumer that needs
+the nadir view (rfd-single-camera-sensing 3.1), so a local consumer borrows an
+immutable shared-pool lease rather than subscribing to raw imagery over DDS.
 
-The bag comes first and is unchanged: it is written synchronously in the
-capture thread, before any sink runs. A sink is a strictly optional tap. It
-runs on its own thread behind a bounded queue that drops the oldest frame
-when it is full, and it swallows its own faults, so no sink can slow the
-capture thread or stop the recorder.
+Each consumer has at most one in-flight frame and a bounded pending queue. A
+stale pending lease is released immediately. Consumer faults are contained and
+cannot slow camera capture. Compact ROS outputs are recorded by the separate
+full-bag recorder; sinks have no recording dependency in normal operation.
 """
 from __future__ import annotations
 
@@ -19,57 +17,36 @@ import math
 import sys
 import threading
 import time
-from typing import NamedTuple
+from dataclasses import dataclass
+from typing import Callable
 
 
 FLOW_MAX_GROUND_DISTANCE_M = 8.0
 
 
-class Frame(NamedTuple):
-    """One captured image and the bag time it was written under."""
+@dataclass(frozen=True)
+class Frame:
+    """One borrowed image and the callback that releases its pool slot."""
 
-    img: object  # sensor_msgs.msg.Image, already written to the bag
+    img: object  # immutable image view owned by this lease
     ts_ns: int
-
-
-class FanoutSink:
-    """Submit a captured frame to independent non-blocking consumers."""
-
-    def __init__(self, *sinks):
-        self.sinks = tuple(sink for sink in sinks if sink is not None)
-
-    def submit(self, img, ts_ns):
-        for sink in self.sinks:
-            sink.submit(img, ts_ns)
-
-    def close(self):
-        for sink in self.sinks:
-            sink.close()
-
-    def summaries(self):
-        return [sink.summary() for sink in self.sinks]
+    release: Callable[[], None] = lambda: None
 
 
 class DetectorSink:
     """Runs the AprilTag detector on nadir frames and publishes the results.
 
-    Detection costs about 90 ms per frame on the CM5 against a 100 ms frame
-    interval, so the queue is a safety net for the tail, not the rate limiter.
-    A frame that arrives while the previous one is still in the detector waits;
-    a frame that arrives when the queue is full evicts the oldest, because a
-    stale fix is worth less than a fresh one.
+    Detection costs about 90 ms per frame on the CM5, so it cannot consume every
+    30 Hz camera frame. One pending frame is enough: a newer frame evicts the
+    stale pending frame while the current detection completes.
     """
 
     def __init__(
-        self, detector, publish, bag=None, topic=None, depth=2,
-        debug_publish=None, debug_topic=None,
+        self, detector, publish, depth=2, debug_publish=None,
     ):
         self.detector = detector
         self.publish = publish
-        self.bag = bag
-        self.topic = topic
         self.debug_publish = debug_publish
-        self.debug_topic = debug_topic
         self._queue = collections.deque(maxlen=depth)
         self._wake = threading.Condition()
         self._stop = False
@@ -84,13 +61,14 @@ class DetectorSink:
                                         daemon=True)
         self._thread.start()
 
-    def submit(self, img, ts_ns):
+    def submit(self, img, ts_ns, release=lambda: None):
         """Hand over one frame. Never blocks, never raises."""
-        frame = Frame(img, ts_ns)
+        frame = Frame(img, ts_ns, release)
         with self._wake:
             self.submitted += 1
             if len(self._queue) == self._queue.maxlen:
                 self.dropped += 1
+                self._queue[0].release()
             self._queue.append(frame)
             self._wake.notify()
 
@@ -116,8 +94,10 @@ class DetectorSink:
                 self.faults += 1
                 self.last_fault = str(exc)
                 if self.faults in (1, 10, 100):
-                    print(f"recorder: detector sink fault: {exc}",
+                    print(f"sensing: detector sink fault: {exc}",
                           file=sys.stderr, flush=True)
+            finally:
+                frame.release()
 
     def _handle(self, frame):
         t0 = time.perf_counter()
@@ -131,19 +111,9 @@ class DetectorSink:
         self._latency_ms.append((time.perf_counter() - t0) * 1e3)
         if self.publish is not None:
             self.publish(msg)
-        if self.bag is not None and self.topic is not None:
-            from rclpy.serialization import serialize_message
-
-            self.bag.write(self.topic, serialize_message(msg), frame.ts_ns)
         if debug_msg is not None:
             if self.debug_publish is not None:
                 self.debug_publish(debug_msg)
-            if self.bag is not None and self.debug_topic is not None:
-                from rclpy.serialization import serialize_message
-
-                self.bag.write(
-                    self.debug_topic, serialize_message(debug_msg), frame.ts_ns
-                )
 
     def summary(self):
         lat = sorted(self._latency_ms)
@@ -165,10 +135,6 @@ class FlowSink:
         range_history,
         publish,
         debug_publish,
-        bag,
-        flow_topic="/fmu/in/sensor_optical_flow",
-        debug_topic="/localization/cm2_flow/debug",
-        fault_topic="/camera_down/image_fault",
         depth=2,
         publish_enabled=True,
     ):
@@ -176,10 +142,6 @@ class FlowSink:
         self.range_history = range_history
         self.publish = publish
         self.debug_publish = debug_publish
-        self.bag = bag
-        self.flow_topic = flow_topic
-        self.debug_topic = debug_topic
-        self.fault_topic = fault_topic
         self.publish_enabled = publish_enabled
         self._queue = collections.deque(maxlen=depth)
         self._wake = threading.Condition()
@@ -192,9 +154,6 @@ class FlowSink:
         self.error_count = 0
         self.last_fault = None
         self._latency_ms = collections.deque(maxlen=300)
-        self._raw_ring = collections.deque(maxlen=30)
-        self._fault_post = 0
-        self._last_fault_dump_ns = 0
         self._valid_streak = 0
         self._sequence = 0
         self._thread = threading.Thread(
@@ -202,39 +161,21 @@ class FlowSink:
         )
         self._thread.start()
 
-    def submit(self, img, ts_ns):
-        frame = Frame(img, ts_ns)
+    def submit(self, img, ts_ns, release=lambda: None):
+        frame = Frame(img, ts_ns, release)
         with self._wake:
             self.submitted += 1
             if len(self._queue) == self._queue.maxlen:
                 self.dropped += 1
+                self._queue[0].release()
             self._queue.append(frame)
             self._wake.notify()
-
-    def trigger_raw_clip(self):
-        with self._wake:
-            self._dump_preroll_locked()
-            self._fault_post = 30
 
     def close(self, timeout=3.0):
         with self._wake:
             self._stop = True
             self._wake.notify_all()
         self._thread.join(timeout)
-
-    def _dump_preroll_locked(self):
-        for frame in self._raw_ring:
-            self.bag.write(
-                self.fault_topic,
-                self._serialize(frame.img),
-                frame.ts_ns,
-            )
-
-    @staticmethod
-    def _serialize(msg):
-        from rclpy.serialization import serialize_message
-
-        return serialize_message(msg)
 
     def _run(self):
         while True:
@@ -254,10 +195,12 @@ class FlowSink:
                 self.last_fault = str(exc)
                 if self.faults in (1, 10, 100):
                     print(
-                        f"recorder: CM2 flow sink fault: {exc}",
+                        f"sensing: CM2 flow sink fault: {exc}",
                         file=sys.stderr,
                         flush=True,
                     )
+            finally:
+                frame.release()
 
     def _handle(self, frame):
         from px4_msgs.msg import SensorOpticalFlow
@@ -299,7 +242,6 @@ class FlowSink:
         msg.mode = SensorOpticalFlow.MODE_BRIGHT
         if self.publish_enabled:
             self.publish(msg)
-            self.bag.write(self.flow_topic, self._serialize(msg), frame.ts_ns)
 
         range_row = self.range_history.nearest(result.timestamp_sample_ns)
         if range_row is None:
@@ -348,15 +290,6 @@ class FlowSink:
             allow_nan=True,
         )
         self.debug_publish(debug)
-        self.bag.write(self.debug_topic, self._serialize(debug), frame.ts_ns)
-
-        with self._wake:
-            self._raw_ring.append(frame)
-            if self._fault_post > 0:
-                self.bag.write(
-                    self.fault_topic, self._serialize(frame.img), frame.ts_ns
-                )
-                self._fault_post -= 1
 
     def summary(self):
         lat = sorted(self._latency_ms)

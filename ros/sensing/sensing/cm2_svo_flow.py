@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import yaml
 
-from cm2_flow import (
+from .cm2_flow import (
     FlowResult,
     STATUS_BAD_HOMOGRAPHY,
     STATUS_BAD_TIMING,

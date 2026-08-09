@@ -1,4 +1,4 @@
-"""Process-local libcamera tuning helpers for daylight camera capture."""
+"""Libcamera tuning helpers shared by sensing and camera evidence capture."""
 
 def cap_short_exposure(tuning, max_exposure_us, camera_name):
     """Cap camera AGC channel zero's short-mode shutter curve.

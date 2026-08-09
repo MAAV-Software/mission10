@@ -1,4 +1,5 @@
-# The proven orbit replay used rl_vo's euroc.yaml. Keep this configuration
+# Mission sensing parameters. The proven orbit replay used rl_vo's euroc.yaml.
+# Keep this configuration
 # identical except for the downward-camera keyframe criterion and the correctly
 # spelled reinitialization key. SVO remains visual-only.
 T_world_imuinit/qw: 1
