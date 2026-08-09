@@ -26,6 +26,7 @@ FINE_TUNE_PRESETS = (
     "hardneg",
     "combined",
     "real_positive",
+    "real_positive_appearance",
 )
 TRAINING_PRESETS = ("pilot", *FINE_TUNE_PRESETS)
 _CONFIG_RUNTIME_KEYS = {"data", "project", "name", "exist_ok"}
@@ -57,6 +58,7 @@ def training_args(
         cache = "ram" if cache is None else cache
         patience = 15 if epochs > 1 else 0
         lr0 = 0.001
+        save_period = 5 if epochs > 1 else -1
     else:
         required = {"epochs": 20, "batch": 16, "cache": False}
         supplied = {"epochs": epochs, "batch": batch, "cache": cache}
@@ -72,6 +74,7 @@ def training_args(
         cache = False
         patience = 8
         lr0 = 0.0001
+        save_period = 1
     return {
         "data": str(data.resolve()),
         "project": str(project.resolve()),
@@ -94,7 +97,7 @@ def training_args(
         "seed": 10,
         "deterministic": True,
         "save": True,
-        "save_period": 5 if epochs > 1 else -1,
+        "save_period": save_period,
         "plots": True,
         "val": True,
         "hsv_h": 0.01,
@@ -114,13 +117,46 @@ def training_args(
     }
 
 
-def training_config_sha256(args: dict) -> str:
+def training_config_sha256(
+    args: dict, planned_stop_after_epochs: int | None = None
+) -> str:
     """Hash behavior-changing settings independently of run locations."""
     config = {
         key: value for key, value in args.items() if key not in _CONFIG_RUNTIME_KEYS
     }
+    if planned_stop_after_epochs is not None:
+        config["planned_stop_after_epochs"] = planned_stop_after_epochs
     payload = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def validate_planned_stop(
+    planned_stop_after_epochs: int | None, args: dict, preset: str
+) -> int | None:
+    """Validate an intentional stop without changing the scheduled horizon."""
+    if planned_stop_after_epochs is None:
+        return None
+    if preset not in FINE_TUNE_PRESETS:
+        raise ValueError("planned stop is only supported for fine-tune presets")
+    if (
+        isinstance(planned_stop_after_epochs, bool)
+        or planned_stop_after_epochs < 1
+        or planned_stop_after_epochs >= args["epochs"]
+    ):
+        raise ValueError(
+            "planned stop must be between 1 and one less than the scheduled epochs"
+        )
+    return planned_stop_after_epochs
+
+
+def planned_stop_callback(planned_stop_after_epochs: int):
+    """Stop after an exact completed epoch without shortening the LR schedule."""
+
+    def stop_after_epoch(trainer) -> None:
+        if trainer.epoch + 1 >= planned_stop_after_epochs:
+            trainer.stop = True
+
+    return stop_after_epoch
 
 
 def _command_output(argv: list[str]) -> str:
@@ -184,7 +220,13 @@ def resume_inputs(run_dir: Path) -> dict:
     args = lock.get("training_args")
     if not isinstance(args, dict):
         raise ValueError("run lock has no training arguments")
-    if training_config_sha256(args) != lock.get("training_config_sha256"):
+    planned_stop_after_epochs = lock.get("planned_stop_after_epochs")
+    validate_planned_stop(
+        planned_stop_after_epochs, args, lock.get("training_preset", "pilot")
+    )
+    if training_config_sha256(
+        args, planned_stop_after_epochs
+    ) != lock.get("training_config_sha256"):
         raise ValueError("training arguments changed after the run started")
 
     data = Path(args.get("data", ""))
@@ -217,14 +259,19 @@ def resume_inputs(run_dir: Path) -> dict:
         raise ValueError("cannot resume before one epoch has completed")
     try:
         completed_epochs = int(rows[-1]["epoch"])
-        target_epochs = int(args["epochs"])
+        scheduled_epochs = int(args["epochs"])
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("invalid epoch history in results.csv") from error
+    target_epochs = planned_stop_after_epochs or scheduled_epochs
     if completed_epochs != len(rows):
         raise ValueError(
             f"epoch history is not contiguous: last={completed_epochs}, rows={len(rows)}"
         )
-    if completed_epochs >= target_epochs:
+    if completed_epochs > target_epochs:
+        raise ValueError(
+            f"training exceeded its target: {completed_epochs}/{target_epochs} epochs"
+        )
+    if completed_epochs == target_epochs and planned_stop_after_epochs is None:
         raise ValueError(
             f"training already reached {completed_epochs}/{target_epochs} epochs"
         )
@@ -237,22 +284,53 @@ def resume_inputs(run_dir: Path) -> dict:
         "last": last,
         "completed_epochs": completed_epochs,
         "target_epochs": target_epochs,
+        "scheduled_epochs": scheduled_epochs,
+        "training_complete": completed_epochs == target_epochs,
     }
 
 
-def _record_weights(run_dir: Path, lock: dict) -> Path:
+def _record_weights(run_dir: Path, lock: dict) -> tuple[Path, Path]:
     best = run_dir / "weights" / "best.pt"
     last = run_dir / "weights" / "last.pt"
     if not best.is_file() or not last.is_file():
         raise RuntimeError("training finished without best.pt and last.pt")
     lock["best_weights_sha256"] = sha256(best)
     lock["last_weights_sha256"] = sha256(last)
-    return best
+    return best, last
 
 
-def _finish_run(run_dir: Path, lock: dict, data: Path, args: dict, YOLO) -> None:
-    best = _record_weights(run_dir, lock)
-    trained = YOLO(str(best))
+def _completed_epochs(run_dir: Path) -> int:
+    results = run_dir / "results.csv"
+    with results.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        raise RuntimeError("training finished without a completed epoch")
+    completed = int(rows[-1]["epoch"])
+    if completed != len(rows):
+        raise RuntimeError(
+            f"epoch history is not contiguous: last={completed}, rows={len(rows)}"
+        )
+    return completed
+
+
+def _finish_run(run_dir: Path, lock: dict, data: Path, args: dict, YOLO):
+    best, last = _record_weights(run_dir, lock)
+    completed = _completed_epochs(run_dir)
+    planned_stop = lock.get("planned_stop_after_epochs")
+    if planned_stop is not None and completed != planned_stop:
+        raise RuntimeError(
+            f"planned stop completed {completed} epochs instead of {planned_stop}"
+        )
+    evaluation_weights = last if planned_stop is not None else best
+    lock["completed_epochs"] = completed
+    lock["evaluation_weights"] = {
+        "role": (
+            "frozen_planned_stop" if planned_stop is not None else "validation_best"
+        ),
+        "path": str(evaluation_weights.resolve()),
+        "sha256": sha256(evaluation_weights),
+    }
+    trained = YOLO(str(evaluation_weights))
     test_metrics = trained.val(
         data=str(data.resolve()),
         split="test",
@@ -269,6 +347,7 @@ def _finish_run(run_dir: Path, lock: dict, data: Path, args: dict, YOLO) -> None
     (run_dir / "test_metrics.json").write_text(
         json.dumps(lock["test_metrics"], indent=2) + "\n"
     )
+    return trained
 
 
 def resume_run(run_dir: Path) -> Path:
@@ -307,8 +386,14 @@ def resume_run(run_dir: Path) -> Path:
     lock["status"] = "resuming"
     state["lock_path"].write_text(json.dumps(lock, indent=2) + "\n")
 
-    model = YOLO(str(state["last"]))
-    model.train(resume=True)
+    if not state["training_complete"]:
+        model = YOLO(str(state["last"]))
+        planned_stop = lock.get("planned_stop_after_epochs")
+        if planned_stop is not None:
+            model.add_callback(
+                "on_train_epoch_end", planned_stop_callback(planned_stop)
+            )
+        model.train(resume=True)
     _finish_run(state["run_dir"], lock, state["data"], state["args"], YOLO)
     attempts[-1]["completed_unix"] = time.time()
     lock["status"] = "complete"
@@ -327,6 +412,7 @@ def run(
     cache: str | bool | None,
     qualitative: Path | None,
     preset: str = "pilot",
+    planned_stop_after_epochs: int | None = None,
 ) -> Path:
     if not data.is_file():
         raise ValueError(f"missing dataset YAML: {data}")
@@ -346,6 +432,9 @@ def run(
             f"{preset} training requires a matching locked composition dataset"
         )
     args = training_args(data, project, name, epochs, batch, cache, preset)
+    planned_stop_after_epochs = validate_planned_stop(
+        planned_stop_after_epochs, args, preset
+    )
 
     run_dir = project.resolve() / name
     if run_dir.exists():
@@ -357,17 +446,23 @@ def run(
     from ultralytics import YOLO
 
     repo = Path(__file__).resolve().parents[3]
+    runner_path = Path(__file__).resolve()
     lock = {
         "schema": RUN_SCHEMA,
         "status": "started",
         "started_unix": time.time(),
         "git_commit": source_commit(repo),
+        "runner": str(runner_path),
+        "runner_sha256": sha256(runner_path),
         "dataset_lock_sha256": sha256(dataset_lock),
         "dataset_sha256": dataset["dataset_sha256"],
         "source_weights": str(model_path.resolve()),
         "source_weights_sha256": sha256(model_path),
         "training_preset": preset,
-        "training_config_sha256": training_config_sha256(args),
+        "planned_stop_after_epochs": planned_stop_after_epochs,
+        "training_config_sha256": training_config_sha256(
+            args, planned_stop_after_epochs
+        ),
         "training_args": args,
         "environment": _runtime_environment(torch, ultralytics),
     }
@@ -375,9 +470,14 @@ def run(
     lock_path.write_text(json.dumps(lock, indent=2) + "\n")
 
     model = YOLO(str(model_path))
+    if planned_stop_after_epochs is not None:
+        model.add_callback(
+            "on_train_epoch_end",
+            planned_stop_callback(planned_stop_after_epochs),
+        )
     model.train(**args)
     if args["epochs"] > 1:
-        _finish_run(run_dir, lock, data, args, YOLO)
+        trained = _finish_run(run_dir, lock, data, args, YOLO)
         if qualitative is not None:
             if not qualitative.exists():
                 raise ValueError(f"missing qualitative source: {qualitative}")
@@ -395,6 +495,7 @@ def run(
             )
     else:
         _record_weights(run_dir, lock)
+        lock["completed_epochs"] = _completed_epochs(run_dir)
 
     lock["status"] = "complete"
     lock["completed_unix"] = time.time()
@@ -423,11 +524,29 @@ def main(argv=None) -> None:
         help="image cache policy; 'none' streams from the prepared dataset",
     )
     parser.add_argument("--qualitative", type=Path)
+    parser.add_argument(
+        "--stop-after-epochs",
+        type=int,
+        help=(
+            "intentionally stop after this many completed epochs while preserving "
+            "the preset's scheduled horizon"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.resume is not None:
         conflicts = [
             name
-            for name in ("data", "model", "project", "name", "epochs", "batch", "cache", "qualitative")
+            for name in (
+                "data",
+                "model",
+                "project",
+                "name",
+                "epochs",
+                "batch",
+                "cache",
+                "qualitative",
+                "stop_after_epochs",
+            )
             if getattr(args, name) is not None
         ]
         if conflicts or args.preset != "pilot":
@@ -458,6 +577,7 @@ def main(argv=None) -> None:
         False if args.cache == "none" else args.cache,
         args.qualitative,
         args.preset,
+        args.stop_after_epochs,
     )
     print(f"completed {run_dir}")
 
