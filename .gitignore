@@ -17,3 +17,4 @@ models/*/out/
 models/*/dataset/
 
 .DS_Store
+._*
