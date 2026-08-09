@@ -22,6 +22,9 @@ import time
 from typing import NamedTuple
 
 
+FLOW_MAX_GROUND_DISTANCE_M = 8.0
+
+
 class Frame(NamedTuple):
     """One captured image and the bag time it was written under."""
 
@@ -285,9 +288,14 @@ class FlowSink:
         msg.integration_timespan_us = max(0, int(result.integration_timespan_us))
         msg.quality = int(result.quality)
         msg.error_count = self.error_count
-        msg.max_flow_rate = 0.55
-        msg.min_ground_distance = 0.4
-        msg.max_ground_distance = 4.0
+        # The CM2 frontend reports its own tracking quality. We have not
+        # calibrated a tighter angular-rate or near-focus envelope, so leave
+        # those limits to PX4's SENS_FLOW_MAXR/MINHGT configuration instead of
+        # inventing sensor claims here. The fixed 8 m ceiling matches the
+        # selected outdoor grass flight envelope and the dToF operating range.
+        msg.max_flow_rate = math.nan
+        msg.min_ground_distance = math.nan
+        msg.max_ground_distance = FLOW_MAX_GROUND_DISTANCE_M
         msg.mode = SensorOpticalFlow.MODE_BRIGHT
         if self.publish_enabled:
             self.publish(msg)

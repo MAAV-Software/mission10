@@ -37,6 +37,12 @@ bounded queues and cannot stop camera capture.
 Both camera `CameraInfo` messages deliberately report `K[0] = 0` until the
 installed cameras are calibrated in their operational modes.
 
+The CM2 flow publisher advertises the fixed 8 m outdoor-grass flight ceiling.
+It does not invent a tighter angular-rate or minimum-height limit: `NaN`
+delegates those bounds to PX4's
+`SENS_FLOW_MAXR` and `SENS_FLOW_MINHGT` parameters. The frontend's per-frame
+quality still gates invalid tracks.
+
 The optional diagnostic PX4 firmware publishes `EstimatorStatus`,
 `EstimatorGpsStatus`, the GNSS position and velocity aid sources,
 `EstimatorStatusFlags`, and the range-height aid source. These streams keep
