@@ -125,7 +125,7 @@ def main() -> int:
     ap.add_argument("--stop-on-disarm", action="store_true")
     ap.add_argument("--sync-timeout", type=float, default=12.0)
     ap.add_argument("--max-sync-rtt-ms", type=float, default=50.0)
-    ap.add_argument("--max-clock-step-ms", type=float, default=5.0)
+    ap.add_argument("--clock-step-threshold-ms", type=float, default=5.0)
     ap.add_argument("--px4-namespace", default="")
     ap.add_argument("--detect-topic", default="/detections/down")
     args = ap.parse_args()
@@ -141,7 +141,7 @@ def main() -> int:
     spin = None
     cm2_stats: dict[str, int] = {}
     ov_stats = recording.CameraStats(args.fps)
-    ov_clock = recording.ClockMapper(int(args.max_clock_step_ms * 1e6))
+    ov_clock = recording.ClockMapper(int(args.clock_step_threshold_ms * 1e6))
     sync = recording.SyncMonitor(int(args.max_sync_rtt_ms * 1000))
     bag = recording.Bag(
         args.out,
@@ -316,7 +316,6 @@ def main() -> int:
                         stop,
                         width=args.width,
                         height=args.height,
-                        max_exposure_us=args.ov_max_exposure_us,
                         record_fps=args.ov_record_fps,
                     ),
                 ),
@@ -381,7 +380,11 @@ def main() -> int:
         )
         print(
             f"  OV9281 frames={ov_stats.frames} rate={ov_stats.hz():.2f} Hz "
-            f"large_gaps={ov_stats.large_gaps}",
+            f"large_gaps={ov_stats.large_gaps} "
+            f"max_exposure={ov_stats.max_exposure_us} us "
+            f"nonmonotonic_stamp_drops={ov_clock.nonmonotonic_drops} "
+            f"clock_step_events={ov_clock.clock_step_events} "
+            f"max_clock_step={ov_clock.max_clock_step_ns / 1e6:.3f} ms",
             file=sys.stderr,
         )
         for error in errors:

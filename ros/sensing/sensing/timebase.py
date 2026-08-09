@@ -19,12 +19,15 @@ def realtime_ns() -> int:
 class ClockMapper:
     """Map one camera's CLOCK_BOOTTIME stamps into ROS CLOCK_REALTIME."""
 
-    def __init__(self, max_step_ns: int) -> None:
-        self.max_step_ns = max_step_ns
+    def __init__(self, step_threshold_ns: int) -> None:
+        self.step_threshold_ns = step_threshold_ns
         self.initial_offset_ns = self._sample_offset()
         self.last_offset_ns = self.initial_offset_ns
         self.max_offset_delta_ns = 0
         self.last_realtime_ns = 0
+        self.nonmonotonic_drops = 0
+        self.clock_step_events = 0
+        self.max_clock_step_ns = 0
 
     @staticmethod
     def _sample_offset() -> int:
@@ -38,18 +41,21 @@ class ClockMapper:
                 best = sample
         return int(best[1])
 
-    def map(self, sensor_ns: int) -> tuple[int, int]:
+    def map(self, sensor_ns: int) -> tuple[int, int] | None:
         offset = self._sample_offset()
         step = offset - self.last_offset_ns
-        if abs(step) > self.max_step_ns:
-            raise RuntimeError(f"realtime/boottime clock step {step / 1e6:.3f} ms")
+        absolute_step = abs(step)
+        self.max_clock_step_ns = max(self.max_clock_step_ns, absolute_step)
+        if absolute_step > self.step_threshold_ns:
+            self.clock_step_events += 1
         self.last_offset_ns = offset
         self.max_offset_delta_ns = max(
             self.max_offset_delta_ns, abs(offset - self.initial_offset_ns)
         )
         mapped = sensor_ns + offset
         if mapped <= self.last_realtime_ns:
-            raise RuntimeError("non-monotonic mapped camera timestamp")
+            self.nonmonotonic_drops += 1
+            return None
         self.last_realtime_ns = mapped
         return mapped, offset
 

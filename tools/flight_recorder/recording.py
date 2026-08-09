@@ -136,8 +136,9 @@ class CameraStats:
         self.last_sensor_ns = 0
         self.max_gap_ns = 0
         self.large_gaps = 0
+        self.max_exposure_us = 0
 
-    def note(self, sensor_ns: int) -> None:
+    def note(self, sensor_ns: int, exposure_us: int) -> None:
         if not self.first_sensor_ns:
             self.first_sensor_ns = sensor_ns
         if self.last_sensor_ns:
@@ -146,6 +147,7 @@ class CameraStats:
             self.large_gaps += int(gap > 1.5 * self.nominal_period_ns)
         self.last_sensor_ns = sensor_ns
         self.frames += 1
+        self.max_exposure_us = max(self.max_exposure_us, exposure_us)
 
     def hz(self) -> float:
         span = self.last_sensor_ns - self.first_sensor_ns
@@ -168,7 +170,6 @@ def record_ov9281(
     *,
     width: int,
     height: int,
-    max_exposure_us: int,
     record_fps: float,
 ) -> None:
     period_ns = int(1e9 / record_fps) if record_fps > 0 else 0
@@ -182,15 +183,14 @@ def record_ov9281(
             metadata = request.get_metadata()
             sensor_ns = int(metadata.get("SensorTimestamp", boottime_ns()))
             exposure_us = int(metadata.get("ExposureTime", 0))
-            if exposure_us > max_exposure_us:
-                raise RuntimeError(
-                    f"OV9281 exposure ceiling violated: {exposure_us} > {max_exposure_us} us"
-                )
             yuv = request.make_array("main")
         finally:
             request.release()
-        timestamp_ns, offset_ns = clock.map(sensor_ns)
-        stats.note(sensor_ns)
+        mapped = clock.map(sensor_ns)
+        if mapped is None:
+            continue
+        timestamp_ns, offset_ns = mapped
+        stats.note(sensor_ns, exposure_us)
         if period_ns and timestamp_ns - last_record_ns < period_ns:
             continue
         image = Image()

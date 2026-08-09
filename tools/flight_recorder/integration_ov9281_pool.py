@@ -111,7 +111,7 @@ def main() -> int:
     max_gap_ns = 0
     last_sensor_ns = 0
     max_temperature = temperature_c()
-    clock = ClockMapper(max_step_ns=5_000_000)
+    clock = ClockMapper(step_threshold_ns=5_000_000)
     started = 0.0
     try:
         tuning = load_ov9281_daylight_tuning(Picamera2, 1000)
@@ -159,7 +159,10 @@ def main() -> int:
             try:
                 metadata = request.get_metadata()
                 sensor_ns = int(metadata.get("SensorTimestamp", boottime_ns()))
-                realtime_ns, _offset = clock.map(sensor_ns)
+                mapped = clock.map(sensor_ns)
+                if mapped is None:
+                    continue
+                realtime_ns, _offset = mapped
                 writable = pool.begin_write()
                 if writable is None:
                     continue

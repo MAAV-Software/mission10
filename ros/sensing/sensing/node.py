@@ -74,7 +74,7 @@ def main() -> int:
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--slots", type=int, default=DEFAULT_SLOTS)
     ap.add_argument("--max-exposure-us", type=int, default=1000)
-    ap.add_argument("--max-clock-step-ms", type=float, default=5.0)
+    ap.add_argument("--clock-step-threshold-ms", type=float, default=5.0)
     ap.add_argument("--sync-timeout", type=float, default=12.0)
     ap.add_argument("--max-sync-rtt-ms", type=float, default=50.0)
     ap.add_argument("--px4-namespace", default="")
@@ -110,7 +110,7 @@ def main() -> int:
     detector_sink = None
     node = None
     spin = None
-    clock = ClockMapper(int(args.max_clock_step_ms * 1e6))
+    clock = ClockMapper(int(args.clock_step_threshold_ms * 1e6))
 
     def request_stop(*_args) -> None:
         if not stop.is_set():
@@ -292,11 +292,10 @@ def main() -> int:
                 sensor_ns = int(metadata.get("SensorTimestamp", boottime_ns()))
                 exposure_us = int(metadata.get("ExposureTime", 0))
                 gain = float(metadata.get("AnalogueGain", 0.0))
-                if exposure_us > args.max_exposure_us:
-                    raise RuntimeError(
-                        f"exposure ceiling violated: {exposure_us} > {args.max_exposure_us} us"
-                    )
-                mapped_ns, _clock_offset_ns = clock.map(sensor_ns)
+                mapped = clock.map(sensor_ns)
+                if mapped is None:
+                    continue
+                mapped_ns, _clock_offset_ns = mapped
                 writable = pool.begin_write()
                 if writable is None:
                     continue
@@ -371,6 +370,13 @@ def main() -> int:
         print(
             f"  frames={stats.frames} rate={stats.hz():.2f} Hz "
             f"large_gaps={stats.large_gaps} max_gap={stats.max_gap_ns / 1e6:.2f} ms",
+            file=sys.stderr,
+        )
+        print(
+            f"  max_exposure={stats.max_exposure_us} us "
+            f"nonmonotonic_stamp_drops={clock.nonmonotonic_drops} "
+            f"clock_step_events={clock.clock_step_events} "
+            f"max_clock_step={clock.max_clock_step_ns / 1e6:.3f} ms",
             file=sys.stderr,
         )
         if pool is not None:
