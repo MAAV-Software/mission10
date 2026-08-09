@@ -1,11 +1,11 @@
 # models/yolo — PFM-1 detection model pipeline
 
-> **Status: domain-gap remediation.** The first production300 YOLO11m
-> checkpoint is frozen and performs well on its untouched synthetic test set.
-> Historical real and legacy-synthetic images exposed a mine-appearance gap
-> and leaf/twig false positives. The next run uses the controlled appearance
-> and certified hard-negative experiments below; synthetic scores alone do not
-> promote a model.
+> **Status: domain-gap remediation.** The leakage-safe real-positive recipe
+> replicated on an unseen phone-photo fold at 30/60/120 px while retaining the
+> untouched synthetic test floor and rejecting real backgrounds. Appearance
+> replay repaired the controlled sage-gray miss without breaking those gates.
+> Native phone framing still misses all held-out mines, and reserved CM2
+> evaluation has not run, so the checkpoint is not promotion-ready.
 
 Single-class YOLOv11 detector for surface-laid PFM-1 replica mines, trained on
 synthetic imagery and deployed to the Hailo-8 on each drone's CM5. This folder
@@ -149,6 +149,7 @@ uv run --with pillow python tools/annotate_irl.py \
 
 Draw the estimated full object even when grass hides part of it. Use an ignore
 region for an area that cannot be judged; an ignore region is not a negative.
+Treat a mine as `partial` when even one grass blade occludes its outline.
 Mark each image complete, inspect the full sequence again, and use the explicit
 certification control. Model output cannot certify labels. The server binds to
 loopback and refuses non-loopback addresses.
@@ -282,7 +283,12 @@ mixes only the training split; every arm uses the untouched production300
 validation and test splits. Presets are `control` (100% production),
 `appearance` (85/15 production/appearance), `hardneg` (85/15
 production/certified hard negatives), `combined` (70/15/15), and the
-conditional `real_positive` arm (65/15/10/10). The composer repeats smaller
+conditional `real_positive` arm (75/15/10 production/hard-negative/real-positive).
+After that recipe replicates on an unseen fold, `real_positive_appearance`
+replays the appearance supplement at 65/10/15/10
+production/appearance/hard-negative/real-positive. Both real-positive presets
+require the exact-photo fold lock and exclude all held-out photo provenance.
+The composer repeats smaller
 components deterministically to make the requested fractions exact and hashes
 every input before it creates output.
 
@@ -301,8 +307,32 @@ python3 train/run.py \
     --name domain-gap-combined-v1
 ```
 
-The fine-tune presets lock 20 epochs, AdamW, `lr0=0.0001`, patience 8, batch
-16, 640 px input, deterministic seed 10, and streamed images. Do not add the
+For the fold-1 appearance replay, retain the frozen nine-epoch stopping rule:
+
+```sh
+python3 train/compose.py --preset real_positive_appearance \
+    --out /workspace/dataset/real-positive-appearance-fold1-composed-v1 \
+    --component production=/workspace/dataset/production300-v1/prepared \
+    --component appearance=/workspace/dataset/appearance60-v1/prepared \
+    --component hardneg=/workspace/dataset/hard-negative-fold1-v1 \
+    --component real_positive=/workspace/dataset/real-positive-fold1-v1 \
+    --fold-lock /workspace/private/mission10_irl_archive/phone-training-folds-v1.json \
+    --held-out-fold 1
+
+python3 train/run.py --preset real_positive_appearance \
+    --data /workspace/dataset/real-positive-appearance-fold1-composed-v1/dataset.yaml \
+    --model /workspace/inputs/production300/best.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name domain-gap-realpositive-appearance-fold1-v1 \
+    --stop-after-epochs 9
+```
+
+The fine-tune presets lock a 20-epoch schedule, AdamW, `lr0=0.0001`, patience
+8, batch 16, 640 px input, deterministic seed 10, streamed images, and one
+checkpoint per epoch. `train/run.py --stop-after-epochs N` intentionally stops
+after `N` completed epochs without shortening the cosine or mosaic schedule;
+its frozen evaluation checkpoint is `last.pt`, never validation-selected
+`best.pt`. Do not add the
 real-positive arm unless hard negatives repair false positives but clear-mine
 recall still misses. Promote only an arm that keeps synthetic mAP50–95 at least
 0.9223 and synthetic recall at least 0.98, detects all 15 matrix mines with no

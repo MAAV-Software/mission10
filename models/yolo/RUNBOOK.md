@@ -28,6 +28,13 @@ CUDA pin is satisfied. Spot is fine everywhere: rendering is deterministic
 (resume by re-indexing) and training checkpoints (`resume=True`), so an eviction
 costs minutes, not the job.
 
+The 2026-08-07 RunPod RTX 4090 appearance-supplement run used Blender 5.1.2
+with OptiX. A representative 21-frame scene rendered at 0.518 seconds per
+frame, and scenes 3--59 completed in approximately nine minutes. The following
+tile materialization took longer than rendering because it wrote thousands of
+small PNG and label files to the network volume. Do not use materialization
+time to judge GPU performance.
+
 ## Host split
 
 **Thin client (darwin, nix devShell)** — no GPU, no Blender, no CUDA:
@@ -145,6 +152,12 @@ Set a teardown reminder the moment the pod is up.
 - [ ] `nvidia-smi` + a one-frame Blender OptiX render = driver/OptiX actually work.
 - [ ] In the DFC container, confirm the DFC imports and sees CUDA — before
       spending any render hours.
+
+The minimal RunPod PyTorch image does not include Blender or its X11 runtime
+libraries. For the 5.1.2 Linux archive, install `libxrender1`, `libxi6`,
+`libxkbcommon0`, `libsm6`, and `libice6`. Keep Blender under
+`/workspace/tools` so a replacement pod on the same network volume can reuse
+it. Confirm `blender --version` and one OptiX scene before the bulk range.
 
 ## Pipeline run order (single GPU, sequential)
 
@@ -315,9 +328,22 @@ Transfer a materialized component as one uncompressed tar archive instead of
 using recursive SCP. PNG data gains little from another compression pass, and
 recursive SCP pays a large round-trip cost for every zero-byte YOLO label.
 Verify the archive hash before extraction and still let the composer validate
-every entry against `component.lock.json`. On the RunPod network volume, the
-composer's full SHA-256 pass over production300 can take about 11 minutes before
-it creates any hardlinks; zero output during that pass is expected.
+every entry against `component.lock.json`. Extract with `tar --no-same-owner`
+on restricted RunPod containers; they can write the files but fail the command
+while trying to restore the archive's local UID and GID. On the RunPod network
+volume, the composer's full SHA-256 pass over production300 can take about 11
+minutes before it creates any hardlinks; zero output during that pass is
+expected.
+
+For repeated training reads, stage the completed and validated composition on
+the pod's local disk. Keep the authoritative composition, checkpoints, and
+reports on `/workspace`. Copy the composition only after `split.lock.json`
+exists, verify that the local and network lock hashes match, and change only
+the local copy of `dataset.yaml` to its local root. The 2026-08-07 appearance
+replay showed why: the network integrity pass read 13.6 GB in approximately 14
+minutes while using only 16 seconds of CPU, with the process blocked in the
+network filesystem's `request_wait_answer`. The local cache then reported 0 ms
+file latency and approximately 8.5 GB/s reads during Ultralytics startup.
 
 ```sh
 cd /workspace/src/mission10/models/yolo
@@ -399,6 +425,168 @@ spend another full render/training run on color-only changes before testing the
 background and real-negative arms. Preserve the scale-probe report and its
 input hashes with the private audit artifacts.
 
+The negative-only hard-negative arm is rejected across its saved trajectory.
+Its training component and diagnostic probe also used the same 71 source
+photos, so the measured false-positive improvement is optimistic. Future arms
+must split by exact source-photo hash before materializing any real-derived
+training tile; no tile from the held-out photo may enter training.
+At the frozen 0.37 threshold, certified scale-probe recall fell from 85/102 for
+the production300 baseline to 54/102 after the first completed fine-tune epoch;
+epochs 5, 10, 15, and the best checkpoint remained between 36/102 and 48/102.
+The 0.001-floor results also regressed, so this is not only calibration. Epoch
+10 fired on only 4 of 9,038 empty phone tiles, confirming that background
+rejection improved while real-mine sensitivity collapsed. Do not shorten or
+promote this negative-only lineage. The next arm must hold out complete photos
+and add real-positive anchors. The private reports are under
+`reference/mission10_irl_archive/model-audits/domain-gap-hardneg-checkpoint-sweep-v1/`.
+
+For the real-positive pilot, build the five-fold exact-photo lock with
+`tools/build_irl_folds.py` and use fold 0 first. Generate SAM2.1-base box-prompt
+masks only for certified `clear` mines, then confirm or reject all 15 proposals
+with `tools/review_irl_masks.py`. A mine is `partial` if even one grass blade
+occludes its outline; partial mines are whole-context positives and must never
+be cutout sources. `tools/materialize_irl_real_positives.py` excludes the held-
+out photo hashes from hard negatives, emits 30/60/120 px context positives,
+and adds eight confirmed-clear composites per mask. Compose this fold with the
+`real_positive` preset (75% production, 15% filtered hard negatives, 10% real
+positives) and pass the same fold lock to inference, probes, and scoring.
+
+Fold-0 showed why the 20-epoch fine-tune setting is a maximum matched budget,
+not a stopping rule. Training was paused after epochs 9 and 11 to score unseen
+photos. Epoch 9 reached 7/7 held-out mines at each 30/60/120 px scale and 9 of
+1,918 empty tiles with a false positive (0.469%), while retaining synthetic
+mAP50-95 0.9407. It still scored only 14/15 on the controlled appearance
+matrix. Epoch 11 remained 14/15 and worsened empty-tile false positives to
+38/1,918 (1.98%). Do not resume this lineage to epoch 20 without a new reason;
+it is not promotion-ready. The missed matrix case is the 120 px official
+sage-gray mine on grass, which is relevant to the 1 m lower altitude envelope.
+Preserve the paused run and reports under the private
+`realpositive-fold0-pause-v1` audit directory.
+
+Fold 0 is development data because its reports selected epoch 9. Replicate the
+unchanged recipe on fold 1 before changing the mixture. Keep the fine-tune
+schedule at 20 epochs but pass `--stop-after-epochs 9`; the epoch-end callback
+then validates, saves, and freezes `last.pt` after exactly nine completed
+epochs. Fine-tune presets save every epoch, but do not inspect fold-1 metrics
+before the frozen checkpoint is recorded. A fold-1 replication passes when
+0.37-threshold scale recall is at least 6/7 at 30, 60, and 120 px (7/7 at
+60 px), empty-real-tile false positives are below 1%, synthetic mAP50-95 is at
+least 0.9223, and synthetic recall is at least 0.98. Also report the stricter
+0.5% empty-tile target and the 15-case appearance matrix without changing the
+replication rule after observing results. If the frozen checkpoint fails,
+record that result before any diagnostic checkpoint sweep; a checkpoint chosen
+on fold 1 must be replicated on fold 2.
+
+Keep generated full-scene images outside real-photo folds and controlled
+training arms. Preserve their original files and prompts in a private generated
+inbox, then compare the production baseline and frozen fold-1 checkpoint on a
+qualitative contact sheet. Hosted VLM boxes remain review suggestions rather
+than certified evaluation truth. Do not use IARC-figure derivatives or add
+generated scenes to training until a separately named ablation is justified.
+
+The frozen fold-1 replication passed its predeclared recipe gate. The A4500
+run stopped after exactly nine completed epochs while preserving the 20-epoch
+schedule; frozen `last.pt` has SHA-256
+`d443a58918d7ea73125a80f178bc738ae45ee3b0e8e70379e0b0fe2496e0e47a`.
+It reached 7/7 at 30, 60, and 120 px for both clear and partial held-out mines,
+with no extra probe boxes. Only 1 of 1,916 empty real tiles fired (0.0522%),
+passing both the 1% replication rule and stricter 0.5% target. Untouched
+synthetic test recall was 1.0 and mAP50-95 was 0.9394. The appearance matrix
+remained 14/15 with clean background plates; the only miss was again
+`official_sage_gray__120px__grass`. This validates the real-positive anchoring
+direction but does not promote the checkpoint. Run appearance replay next,
+then require reserved CM2 evaluation.
+
+Appearance replay is the named `real_positive_appearance` preset: 65%
+production, 10% appearance supplement, 15% fold-filtered hard negatives, and
+10% fold-filtered real positives. It uses the same production warm start,
+20-epoch schedule, and frozen stop after epoch 9 as the replicated fold-1 arm.
+Keep fold 1 held out and pass its exact-photo fold lock to composition; the
+new mixture is the only intended variable.
+
+The frozen fold-1 appearance replay met its controlled objective. Dataset
+SHA-256 is
+`fa75ea8beef6be2eaf396cbb5cc4bf1600d2b6b7b12dacfde4fd2d2b82dc1960`;
+the epoch contains 21,160 samples because all 2,115 unique appearance-training
+tiles must fit in its 10% share. The RTX 4090 run stopped after exactly nine
+epochs in 1,284.7 seconds while preserving the 20-epoch schedule. Frozen
+`last.pt` has SHA-256
+`9e18b6f7497b721cb99396265f4fbc4e0b5c2a2ba6f91d21717ab37652e7db32`.
+Untouched synthetic test recall was 1.0 and mAP50-95 was 0.9401. At threshold
+0.37, the held-out scale probes remained 7/7 at 30, 60, and 120 px with no
+extra boxes. The appearance matrix improved from 14/15 to 15/15, including
+`official_sage_gray__120px__grass`, and all three background plates stayed
+clean. Only 3 of 1,916 empty real tiles fired (0.157%), passing both background
+targets. Native full-resolution phone inference still matched 0/7 mines and
+emitted 13 unmatched boxes. Preserve this checkpoint as a successful
+appearance-replay candidate, but do not promote it before reserved CM2
+evaluation.
+
+Native tiled inference on the seven positive fold-1 phone photos matched 0/7,
+despite the controlled scale pass. Do not describe these images as close-ups:
+the mines occupy only 7.05--8.79% of one frame dimension. The 4K/5.7K phone
+resolves them as 321--461 px objects inside a 640 px inference tile, outside
+the real-positive arm's 20--130 px training range. A rough same-framing map to
+1640x1232 is 99--142 px, so the object-centered probes remain relevant to CM2,
+but they do not test full-frame context or sensor transfer. Keep native phone
+results as a separate resolution/context diagnostic rather than merging them
+with the scale-replication gate.
+
+The private generated-image stress suite now contains 43 certified ChatGPT
+Image full scenes. At the frozen 0.37 threshold, production300 scored 29/43 TP
+with 266 FP; frozen appearance fold-1 epoch 9 scored 23/43 TP with 34 FP. Fold-1
+therefore reduced FP by 87.2% but lost six net localizations. At the 0.001
+candidate floor, the checkpoints still missed 10 and 12 mines respectively, so
+threshold calibration alone cannot resolve this generated-domain gap. Both
+missed the same 13 images; production alone found 7 and fold-1 alone found 1.
+Preserve reports and paired overlays under
+`reference/mission10_generated_archive/audits/qwen38-max-fullscene-v1/model-evaluations/production-vs-fold1-v1/`.
+
+Do not use this suite as a real CM2 estimate, a promotion gate, or a threshold
+tuning set. ChatGPT Image can add invisible generator fingerprints as well as
+visible invented lettering, repeated composition, and inconsistent mine
+geometry. The apparent scale result is especially confounded: fold-1 scored
+9/9 at 40--79 px, 14/27 at 80--159 px, and 0/7 at 160 px or larger, while the
+large generated mines are also the most visibly malformed. Training on these
+images risks learning the same generator cues and is not part of the default
+real-positive recipe.
+
+`reference/iarc_mine_figure.png` is the only IARC-provided appearance image,
+but it is a low-resolution screenshot of a hand-occluded, oblique mine. Treat
+rescaled probes from it as qualitative only: padding and the hidden left wing
+make both context and ground truth approximate. Never use derivatives of this
+image as both training data and an external check.
+
+### First daylight CM2 positive bag
+
+The 2026-08-08 `20260808_235428_test` bag is the first daylight deployment-
+sensor capture with a known visible mine. Its raw `/camera_down/image_raw`
+messages are 1640x1232 packed `yuyv`, not `mono8`; use
+`tools/extract_cm2_review.py`, whose BT.601 YUYV decoder preserves the color
+signal. Do not infer altitude from apparent object size or a contact sheet.
+Synchronized dToF puts the clean mine views at 2.02--2.11 m AGL.
+
+At the 0.37 operating threshold, production300 and the frozen appearance-fold1
+checkpoint each localized all 8 fully visible sampled mine frames. Production
+confidence was 0.821--0.888 and appearance confidence was 0.803--0.838. Across
+119 sampled frames where the fluorescent mine was not visible, production
+emitted 351 boxes and appearance emitted 65; these are temporally correlated
+frames, so the counts characterize per-frame clutter rather than independent
+false landmarks. The appearance arm is substantially cleaner but still needs
+pass-level spatial association. As an exploratory operating point, 0.60 kept
+all 8 fully visible appearance-model hits and reduced its non-mine-frame output
+to 27 boxes; do not freeze a competition threshold from this one capture.
+
+A diagnostic-only replay shifted real CM2 crops inside the recorded frame and
+reduced the mine to 35--40 px without padding. Both checkpoints produced exactly
+one >=0.37 detection on every one of the six resulting tiles, always on the
+mine; production confidence was 0.847--0.904 and appearance confidence was
+0.844--0.865. The boxes come from deterministic fluorescent-lime segmentation,
+not human certification, and rescaling a 2 m capture does not replace a real
+4--5 m flight. Preserve the source frames, manifests, reports, and comparison
+overlays under `reference/mission10_cm2_archive/`; use this result as evidence
+that CM2 transfer is viable, not as an automatic promotion gate.
+
 ### Hosted VLM review calibration
 
 Use the Roboflow Qwen 3.8 Max Workflow as a batch review assistant, not as the
@@ -416,6 +604,13 @@ threshold still fired on 6/20 negatives. Use 0.60 for the next review batch,
 but do not treat this small, object-centered calibration as a deployment metric
 or as permission to change human-locked labels. Preserve the manifest, raw
 responses, summary, and contact sheets under the private audit directory.
+
+The 43-image ChatGPT full-scene batch demonstrates the calibration boundary.
+At 0.60, Qwen proposed 42 boxes on 41 images; human review accepted only 26
+(61.9% proposal precision). Most rejected boxes were displaced above-left of
+the visible mine, and the hosted label visualization showed the same error.
+Use the VLM to reduce review workload only. Full-scene proposals still require
+human correction, including explicit review for missed targets.
 
 Roboflow Workflow deployment has several non-obvious details:
 
