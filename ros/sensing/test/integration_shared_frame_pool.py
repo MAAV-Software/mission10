@@ -3,7 +3,7 @@
 
 This is intentionally not a unit-test suite. It exercises the deployment
 boundary: a producer, an attaching recorder process, bounded stalled consumer
-leases, and recorder death while production continues.
+leases, recorder death while production continues, and owner crash recovery.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import threading
 import time
 
 from sensing.frame_sinks import DetectorSink
-from sensing.shared_frame_pool import SharedFramePool
+from sensing.shared_frame_pool import SharedFramePool, segment_paths
 
 
 WIDTH = 32
@@ -48,6 +48,14 @@ def recorder_process(name: str, stop, result) -> None:
         pool.close()
 
 
+def owner_process(name: str, ready, result) -> None:
+    pool = SharedFramePool.create(name, WIDTH, HEIGHT, slots=8)
+    metadata = publish(pool)
+    result.put(metadata.sequence)
+    ready.set()
+    time.sleep(60.0)
+
+
 def publish(pool: SharedFramePool):
     slot = pool.begin_write()
     if slot is None:
@@ -71,6 +79,10 @@ def main() -> int:
     stop_is_usable = True
     result = context.Queue()
     recorder = context.Process(target=recorder_process, args=(name, stop, result))
+    crash_name = f"{name}_owner_crash"
+    crashed_owner = None
+    reclaimed = None
+    surviving_reader = None
     sinks = []
     try:
         recorder.start()
@@ -137,7 +149,54 @@ def main() -> int:
         for _ in range(100):
             publish(pool)
         assert pool.pool_full_drops == 0, "dead recorder blocked capture"
-        print("PASS: shared producer, bounded leases, seqlock copy, recorder isolation")
+
+        # A live writer keeps the exclusive control-file lock. SIGKILL releases
+        # only the kernel lock, leaving both files behind for the next owner.
+        owner_ready = context.Event()
+        owner_result = context.Queue()
+        crashed_owner = context.Process(
+            target=owner_process,
+            args=(crash_name, owner_ready, owner_result),
+        )
+        crashed_owner.start()
+        assert owner_ready.wait(2.0), "crash-test owner did not initialize"
+        previous_sequence = owner_result.get(timeout=1.0)
+        surviving_reader = SharedFramePool.attach(crash_name)
+        try:
+            SharedFramePool.create(crash_name, WIDTH, HEIGHT, slots=8)
+        except RuntimeError as exc:
+            assert "live owner" in str(exc)
+        else:
+            raise AssertionError("second live owner acquired the pool")
+
+        crashed_owner.kill()
+        crashed_owner.join(2.0)
+        assert crashed_owner.exitcode is not None
+        try:
+            SharedFramePool.attach(crash_name)
+        except RuntimeError as exc:
+            assert "no live owner" in str(exc)
+        else:
+            raise AssertionError("reader attached to an ownerless pool")
+
+        reclaimed = SharedFramePool.create(crash_name, WIDTH, HEIGHT, slots=8)
+        assert reclaimed.published_sequence == previous_sequence
+        metadata = publish(reclaimed)
+        assert metadata.sequence == previous_sequence + 1
+        resumed = surviving_reader.latest_after(previous_sequence)
+        assert resumed is not None
+        assert resumed.sequence == metadata.sequence
+        copied = surviving_reader.copy(resumed)
+        assert copied is not None
+        reclaimed.close()
+        reclaimed = None
+        surviving_reader.close()
+        surviving_reader = None
+
+        print(
+            "PASS: shared producer, bounded leases, recorder isolation, "
+            "live-owner exclusion, crash reclaim"
+        )
         return 0
     finally:
         if stop_is_usable:
@@ -145,9 +204,19 @@ def main() -> int:
         if recorder.is_alive():
             recorder.terminate()
             recorder.join(2.0)
+        if crashed_owner is not None and crashed_owner.is_alive():
+            crashed_owner.kill()
+            crashed_owner.join(2.0)
+        if reclaimed is not None:
+            reclaimed.close()
+        if surviving_reader is not None:
+            surviving_reader.close()
         for sink in sinks:
             sink.close()
         pool.close()
+        for pool_name in (name, crash_name):
+            for path in segment_paths(pool_name):
+                path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

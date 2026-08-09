@@ -41,6 +41,12 @@ python3 -c "import sensing.shared_frame_pool" || {
   echo "sensing pool '$POOL_NAME' is absent; start ros/sensing/run_sensing.sh first" >&2
   exit 1
 }
+python3 -c \
+  'import sys; from sensing.shared_frame_pool import SharedFramePool; pool = SharedFramePool.attach(sys.argv[1]); pool.close()' \
+  "$POOL_NAME" || {
+  echo "sensing pool '$POOL_NAME' has no live owner" >&2
+  exit 1
+}
 mountpoint -q "$USBDIR" || {
   echo "$USBDIR is not mounted; refusing a full YUYV flight bag" >&2
   exit 1

@@ -85,7 +85,8 @@ nix develop -c env PYTHONPATH=ros/sensing python \
 ```
 
 It starts a real attaching process, validates complete frames, stalls six local
-leases, and kills the recorder reader while production continues.
+leases, kills the recorder reader while production continues, rejects a second
+live owner, and reclaims the pool after killing its owner.
 
 On 2026-08-09 this check passed on drone4's Python 3.12/ROS Jazzy image. The
 CM5 has a 4 GiB `/dev/shm`; eight 1640 × 1232 YUYV slots consume 32,327,680

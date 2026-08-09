@@ -8,9 +8,10 @@ hold a camera buffer, exhaust the pool, or delay sensing.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fcntl
 import mmap
-import struct
 import os
+import struct
 from pathlib import Path
 import threading
 import time
@@ -31,7 +32,7 @@ RECORDER_HEARTBEAT_OFFSET = PUBLISHED_SEQUENCE_OFFSET + 16
 
 
 class Segment:
-    """One explicit mmap file. Only its creator unlinks it."""
+    """One explicit mmap file."""
 
     def __init__(self, path: Path, fd: int, size: int, owner: bool) -> None:
         self.path = path
@@ -42,20 +43,43 @@ class Segment:
         self.buf = memoryview(self.mapping)
 
     @classmethod
-    def create(cls, path: Path, size: int) -> "Segment":
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    def claim_owner(cls, path: Path, size: int) -> "Segment":
+        """Open the control file and hold its writer lock until close()."""
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("shared frame pool already has a live owner") from exc
+            os.ftruncate(fd, size)
+            return cls(path, fd, size, owner=True)
+        except Exception:
+            os.close(fd)
+            raise
+
+    @classmethod
+    def prepare_owned(cls, path: Path, size: int) -> "Segment":
+        """Open one owner-managed data file while the control lock is held."""
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             os.ftruncate(fd, size)
             return cls(path, fd, size, owner=True)
         except Exception:
             os.close(fd)
-            path.unlink(missing_ok=True)
             raise
 
     @classmethod
-    def attach(cls, path: Path) -> "Segment":
+    def attach(cls, path: Path, *, require_live_owner: bool = False) -> "Segment":
         fd = os.open(path, os.O_RDWR)
         try:
+            if require_live_owner:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    raise RuntimeError("shared frame pool has no live owner")
             return cls(path, fd, os.fstat(fd).st_size, owner=False)
         except Exception:
             os.close(fd)
@@ -65,8 +89,6 @@ class Segment:
         self.buf.release()
         self.mapping.close()
         os.close(self.fd)
-        if self.owner:
-            self.path.unlink(missing_ok=True)
 
 
 def segment_paths(name: str) -> tuple[Path, Path]:
@@ -251,9 +273,14 @@ class SharedFramePool:
         stride = width * bytes_per_pixel
         frame_bytes = stride * height
         control_path, frames_path = segment_paths(name)
-        control = Segment.create(control_path, HEADER_BYTES + slots * META_BYTES)
+        control = Segment.claim_owner(control_path, HEADER_BYTES + slots * META_BYTES)
+        previous_sequence = 0
+        if control.size >= HEADER.size:
+            previous_header = HEADER.unpack_from(control.buf)
+            if previous_header[0] == MAGIC and previous_header[1] == VERSION:
+                previous_sequence = int(previous_header[7])
         try:
-            frames = Segment.create(frames_path, slots * frame_bytes)
+            frames = Segment.prepare_owned(frames_path, slots * frame_bytes)
         except Exception:
             control.close()
             raise
@@ -268,7 +295,7 @@ class SharedFramePool:
             height,
             stride,
             frame_bytes,
-            0,
+            previous_sequence,
             0,
             0,
         )
@@ -277,7 +304,7 @@ class SharedFramePool:
     @classmethod
     def attach(cls, name: str) -> "SharedFramePool":
         control_path, frames_path = segment_paths(name)
-        control = Segment.attach(control_path)
+        control = Segment.attach(control_path, require_live_owner=True)
         try:
             frames = Segment.attach(frames_path)
         except Exception:
@@ -435,5 +462,10 @@ class SharedFramePool:
         return heartbeat != 0 and time.monotonic_ns() - heartbeat <= int(stale_after_s * 1e9)
 
     def close(self) -> None:
-        self.control.close()
+        if self.owner:
+            # Remove both names while the control lock is still held. Existing
+            # mappings remain valid; a later owner gets fresh files.
+            self.control.path.unlink(missing_ok=True)
+            self.frames.path.unlink(missing_ok=True)
         self.frames.close()
+        self.control.close()

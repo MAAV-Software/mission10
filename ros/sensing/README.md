@@ -18,8 +18,10 @@ PX4_NAMESPACE=/px4_4 FLOW_BACKEND=svo DETECT=1 ./run_sensing.sh
 ```
 
 Then start `mission_engine` and, if wanted, the recorder in separate shells.
-Only one sensing process may own the `cm2` pool. An orderly shutdown removes
-the pool files; `/dev/shm` also clears on reboot.
+The sensing owner holds an exclusive kernel lock on `cm2_control`. A live
+second owner is rejected. If sensing is killed, the kernel releases the lock
+and the next owner reinitializes the stale pool files. An orderly shutdown
+removes both files.
 
 `run_sensing.sh` sources the workspace `install/setup.bash` and launches the
 installed ROS entry point. Build after adding or changing package metadata:
