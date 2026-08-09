@@ -85,7 +85,6 @@ class OffboardController(Node):
         self.declare_parameter("wait_for_start", False)
         self.declare_parameter("status_stale_timeout_s", 5.0)
         self.declare_parameter("launch_stability_s", 3.0)
-        self.declare_parameter("launch_position_limit_m", 100.0)
 
         self.ns = self.get_parameter("vehicle_namespace").value.strip("/")
         self.rate_hz = float(self.get_parameter("setpoint_rate_hz").value)
@@ -97,8 +96,6 @@ class OffboardController(Node):
         self.wait_for_start = bool(self.get_parameter("wait_for_start").value)
         self.status_stale_timeout_s = float(self.get_parameter("status_stale_timeout_s").value)
         self.launch_stability_s = float(self.get_parameter("launch_stability_s").value)
-        self.launch_position_limit_m = float(
-            self.get_parameter("launch_position_limit_m").value)
 
         # PX4 publishes every uORB topic BEST_EFFORT over uXRCE-DDS. A RELIABLE
         # subscription is silently incompatible with it and receives nothing,
@@ -542,7 +539,6 @@ class OffboardController(Node):
             and self._xy_valid
             and self._z_valid
             and all(math.isfinite(v) for v in (self.x, self.y, self.z))
-            and math.hypot(self.x, self.y) <= self.launch_position_limit_m
             and self._attitude_seen
         ):
             self._launch_xy = (float(self.x), float(self.y))
