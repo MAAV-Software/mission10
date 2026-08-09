@@ -91,6 +91,9 @@ def _setup(context, *args, **kwargs):
     wait_for_start = LaunchConfiguration("wait_for_start").perform(context)
     mission_config = LaunchConfiguration("mission_config").perform(context)
     mission_executable = LaunchConfiguration("mission_executable").perform(context).strip()
+    mission_package = (
+        "mission_engine" if mission_executable == "mission_engine" else "flight_intelligent"
+    )
     world_override = LaunchConfiguration("world").perform(context).strip()
     boot_timeout = float(LaunchConfiguration("boot_timeout_s").perform(context))
     random_spawn = LaunchConfiguration("random_spawn").perform(context).lower() in (
@@ -161,7 +164,10 @@ def _setup(context, *args, **kwargs):
         package="sim_truth_ev", executable="world_truth_to_odom", output="screen",
         parameters=[{"vehicle_namespaces": namespaces,
                      "spawn_e_m": [e for e, _ in spawn_xy],
-                     "spawn_n_m": [n for _, n in spawn_xy]}],
+                     "spawn_n_m": [n for _, n in spawn_xy],
+                     # Keep model-relative x500 links (radius <= 0.246 m) out
+                     # while allowing a whole-airframe-on-pad spawn.
+                     "origin_clear_m": 0.30}],
     ))
     for i in range(num):
         namespace = namespaces[i]
@@ -204,7 +210,7 @@ def _setup(context, *args, **kwargs):
                 "peer_namespaces": peers if peers else [""],
             })
         mission_nodes.append(Node(
-            package="flight_intelligent",
+            package=mission_package,
             executable=mission_executable,
             name=f"{mission_executable}_{i}",
             output="screen",

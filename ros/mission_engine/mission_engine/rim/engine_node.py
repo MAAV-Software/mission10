@@ -87,6 +87,7 @@ class EngineNode(OffboardController):
         self.declare_parameter("rosette_petals", len(ROSETTE_HEADINGS_DEG))
         self.declare_parameter("survey_alt_m", 4.0)
         self.declare_parameter("lane_speed_mps", 1.0)
+        self.declare_parameter("goto_max_heading_rate_deg_s", 30.0)
         self.declare_parameter("reach_tolerance_m", 0.25)
         self.declare_parameter("land_settle_s", 3.0)
         self.declare_parameter("land_speed_tolerance_mps", 0.20)
@@ -427,6 +428,15 @@ class EngineNode(OffboardController):
             initial_yaw=self._launch_yaw,
         )
         self.engine.start()
+        self.enable_goto_setpoints(
+            max_horizontal_speed=self.engine.cfg.lane_speed,
+            max_vertical_speed=max(
+                self.engine.cfg.climb_speed, self.engine.cfg.descent_speed
+            ),
+            max_heading_rate=math.radians(
+                float(self.get_parameter("goto_max_heading_rate_deg_s").value)
+            ),
+        )
         self.get_logger().info(
             f"survey begun: anchor N {self._anchor_ne[0]:.2f} E {self._anchor_ne[1]:.2f}, "
             f"pattern={self.engine.cfg.pattern}"
@@ -449,7 +459,9 @@ class EngineNode(OffboardController):
         # emitted setpoint would leave the engine reading a drifted position
         # and steering against its own correction.
         correction_measurement = None
-        if self.anchor_corrects:
+        # A configured but unlaunched tag detector has no flight authority.
+        anchor_active = self.anchor_corrects and bool(self.anchor.refs)
+        if anchor_active:
             correction_measurement = self.anchor.drift(
                 t,
                 min_tags=2,
@@ -457,7 +469,7 @@ class EngineNode(OffboardController):
                 max_pair_error_m=self.anchor_correction_pair_error_m,
             )
         self.correction.update(t, correction_measurement)
-        anchor_ready = not self.anchor_corrects or (
+        anchor_ready = not anchor_active or (
             correction_measurement is not None
             and not self.correction.saturated
             and self.correction.pending_m <= self.anchor_correction_settle_m
@@ -474,9 +486,7 @@ class EngineNode(OffboardController):
         if sp is None:
             return None
         out_n, out_e = self.correction.to_flight((sp.pos[0], sp.pos[1]))
-        if sp.vel is None:
-            return (out_n, out_e, sp.pos[2], sp.yaw)
-        return (out_n, out_e, sp.pos[2], sp.yaw, sp.vel[0], sp.vel[1], sp.vel[2])
+        return (out_n, out_e, sp.pos[2], sp.yaw)
 
     def _on_phase(self, phase: str) -> None:
         if phase != self._last_phase:

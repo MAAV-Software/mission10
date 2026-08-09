@@ -35,7 +35,6 @@ ROSETTE_HEADINGS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
 @dataclass(frozen=True)
 class Setpoint:
     pos: Vec3  # NED position target
-    vel: Optional[Vec3] = None  # feed-forward (lanes) or command (crawl)
     yaw: Optional[float] = None
 
 
@@ -60,7 +59,6 @@ class MissionConfig:
     climb_speed: float = 1.5
     descent_speed: float = 0.8
     reach_tol_m: float = 0.5
-    track_gate_m: float = 2.0  # lane progress pauses beyond this error
     sync_duration_s: float = 1.2
     egress_ne: Tuple[float, float] = (0.0, 0.0)
     land_settle_s: float = 3.0
@@ -96,8 +94,8 @@ class MissionConfig:
             )
         if self.rosette_outer_hold_s < 0.0 or self.rosette_center_hold_s < 0.0:
             raise ValueError("rosette holds must not be negative")
-        if self.reach_tol_m <= 0.0 or self.track_gate_m < self.reach_tol_m:
-            raise ValueError("need 0 < reach_tol_m <= track_gate_m")
+        if self.reach_tol_m <= 0.0:
+            raise ValueError("reach_tol_m must be positive")
         if self.land_settle_s <= 0.0 or self.land_speed_tol_mps <= 0.0:
             raise ValueError("landing settle time and speed tolerance must be positive")
         if self.fence_radius_m < 0.0 or self.mission_timeout_s < 0.0:
@@ -142,7 +140,6 @@ class MissionEngine:
         self._sync_t0: Optional[float] = None
         self._lane_i = 0
         self._lane_s = 0.0
-        self._last_t: Optional[float] = None
         self._home_ne: Optional[Tuple[float, float]] = None
         self._dip_target: Optional[Cluster] = None
         self._dip_t0: Optional[float] = None
@@ -152,7 +149,7 @@ class MissionEngine:
         self._petal_i = 0
         self._petal_stage = "center"
         self._petal_hold_t0: Optional[float] = None
-        self._position_command: Optional[Vec3] = None
+        self._lane_entered = False
         self._settle_t0: Optional[float] = None
         self._settle_next_phase = DUMP
         self._settle_requires_survey_ready = False
@@ -249,19 +246,9 @@ class MissionEngine:
         r = math.hypot(n - self._home_ne[0], e - self._home_ne[1])
         return r if r > self.cfg.fence_radius_m else None
 
-    def _toward(self, pos: Vec3, target: Vec3, speed: float, dt: float) -> Setpoint:
-        """Position setpoint stepped along the line to `target` — a smooth
-        stream, never one far waypoint (setpoint streaming policy)."""
-        d = (target[0] - pos[0], target[1] - pos[1], target[2] - pos[2])
-        dist = math.sqrt(d[0] ** 2 + d[1] ** 2 + d[2] ** 2)
-        if dist < 1e-9 or dist <= speed * dt:
-            return Setpoint(pos=target, yaw=self._last_yaw)
-        k = speed * dt / dist
-        step = (pos[0] + d[0] * k, pos[1] + d[1] * k, pos[2] + d[2] * k)
-        if math.hypot(d[0], d[1]) > 0.3:
-            self._last_yaw = math.atan2(d[1], d[0])
-        vel = (d[0] / dist * speed, d[1] / dist * speed, d[2] / dist * speed)
-        return Setpoint(pos=step, vel=vel, yaw=self._last_yaw)
+    def _target(self, target: Vec3) -> Setpoint:
+        """Return the end of the current leg; PX4 smooths the trajectory."""
+        return Setpoint(pos=target, yaw=self._last_yaw)
 
     def _reached(self, pos: Vec3, target: Vec3) -> bool:
         return (
@@ -298,8 +285,6 @@ class MissionEngine:
         horizontal_valid: bool,
         survey_ready: bool,
     ) -> Optional[Setpoint]:
-        dt = 0.0 if self._last_t is None else max(t - self._last_t, 0.0)
-        self._last_t = t
         self._check_aborts(t, pos)
 
         if self.phase == PREFLIGHT:
@@ -312,22 +297,23 @@ class MissionEngine:
             if t - self._sync_t0 >= self.cfg.sync_duration_s:
                 self.phase = TAKEOFF
                 self.t_takeoff = t
-            return Setpoint(pos=(self._home_ne[0], self._home_ne[1], pos[2]))
+            return Setpoint(
+                pos=(self._home_ne[0], self._home_ne[1], pos[2]),
+                yaw=self._last_yaw,
+            )
 
         if self.phase == TAKEOFF:
             target = (self._home_ne[0], self._home_ne[1], self._alt_target())
             if self._reached(pos, target):
                 self.phase = LANE
-                return self._tick_survey(t, pos, vel, horizontal_valid, survey_ready, dt)
-            if self.cfg.pattern == "center_return_rosette":
-                return self._toward_position_only(pos, target, self.cfg.climb_speed, dt)
-            return self._toward(pos, target, self.cfg.climb_speed, dt)
+                return self._tick_survey(t, pos, vel, horizontal_valid, survey_ready)
+            return self._target(target)
 
         if self.phase == LANE:
-            return self._tick_survey(t, pos, vel, horizontal_valid, survey_ready, dt)
+            return self._tick_survey(t, pos, vel, horizontal_valid, survey_ready)
 
         if self.phase == VERIFY_DIP:
-            return self._tick_dip(t, pos, dt)
+            return self._tick_dip(t, pos)
 
         if self.phase == EGRESS or self.phase == ABORT:
             egress = self._egress_ne()
@@ -338,9 +324,7 @@ class MissionEngine:
                 else:
                     self._begin_settle(LAND, require_survey_ready=False)
                 return Setpoint(pos=target, yaw=self._last_yaw)
-            if self.cfg.pattern == "center_return_rosette":
-                return self._toward_position_only(pos, target, self.cfg.lane_speed, dt)
-            return self._toward(pos, target, self.cfg.lane_speed, dt)
+            return self._target(target)
 
         if self.phase == SETTLE:
             egress = self._egress_ne()
@@ -365,7 +349,10 @@ class MissionEngine:
             if self.dump_acked:
                 self._begin_settle(LAND, require_survey_ready=True)
             egress = self._egress_ne()
-            return Setpoint(pos=(egress[0], egress[1], self._alt_target()))
+            return Setpoint(
+                pos=(egress[0], egress[1], self._alt_target()),
+                yaw=self._last_yaw,
+            )
 
         if self.phase == LAND:
             egress = self._egress_ne()
@@ -373,7 +360,7 @@ class MissionEngine:
             if self._reached(pos, target):
                 self.phase = DONE
                 return None
-            return self._toward(pos, target, self.cfg.descent_speed, dt)
+            return self._target(target)
 
         return None  # DONE
 
@@ -390,11 +377,10 @@ class MissionEngine:
         vel: Vec3,
         horizontal_valid: bool,
         survey_ready: bool,
-        dt: float,
     ) -> Setpoint:
         if self.cfg.pattern == "center_return_rosette":
-            return self._tick_rosette(t, pos, vel, horizontal_valid, survey_ready, dt)
-        return self.tick_lane(pos, dt)
+            return self._tick_rosette(t, pos, vel, horizontal_valid, survey_ready)
+        return self.tick_lane(pos, vel)
 
     def _tick_rosette(
         self,
@@ -403,7 +389,6 @@ class MissionEngine:
         vel: Vec3,
         horizontal_valid: bool,
         survey_ready: bool,
-        dt: float,
     ) -> Setpoint:
         """Fly one short radial leg at a time and reacquire the tag anchor at
         center before every departure."""
@@ -425,7 +410,6 @@ class MissionEngine:
                         self.phase = DUMP
                     else:
                         self._petal_stage = "outbound"
-                        self._position_command = center
             else:
                 self._petal_hold_t0 = None
             return Setpoint(pos=center, yaw=self._last_yaw)
@@ -441,9 +425,8 @@ class MissionEngine:
             if self._reached(pos, outer):
                 self._petal_stage = "outer_hold"
                 self._petal_hold_t0 = None
-                self._position_command = outer
                 return Setpoint(pos=outer, yaw=self._last_yaw)
-            return self._toward_position_only(pos, outer, self.cfg.lane_speed, dt)
+            return self._target(outer)
 
         if self._petal_stage == "outer_hold":
             stable = (
@@ -456,7 +439,6 @@ class MissionEngine:
                 elif t - self._petal_hold_t0 >= self.cfg.rosette_outer_hold_s:
                     self._petal_hold_t0 = None
                     self._petal_stage = "inbound"
-                    self._position_command = outer
             else:
                 self._petal_hold_t0 = None
             return Setpoint(pos=outer, yaw=self._last_yaw)
@@ -465,44 +447,19 @@ class MissionEngine:
             self._petal_i += 1
             self._petal_stage = "center"
             self._petal_hold_t0 = None
-            self._position_command = center
             return Setpoint(pos=center, yaw=self._last_yaw)
-        return self._toward_position_only(pos, center, self.cfg.lane_speed, dt)
+        return self._target(center)
 
-    def _toward_position_only(
-        self, pos: Vec3, target: Vec3, speed: float, dt: float
-    ) -> Setpoint:
-        """Advance a position-only reference at the flight-card speed.
-
-        The reference pauses when the aircraft falls outside the tracking
-        gate. This keeps the command bounded without adding velocity or
-        acceleration feed-forward."""
-        command = self._position_command or pos
-        track_error = math.sqrt(
-            (pos[0] - command[0]) ** 2
-            + (pos[1] - command[1]) ** 2
-            + (pos[2] - command[2]) ** 2
-        )
-        d = (
-            target[0] - command[0],
-            target[1] - command[1],
-            target[2] - command[2],
-        )
-        remaining = math.sqrt(d[0] ** 2 + d[1] ** 2 + d[2] ** 2)
-        if track_error <= self.cfg.track_gate_m and remaining > 0.0:
-            step = min(speed * dt, remaining)
-            command = (
-                command[0] + d[0] * step / remaining,
-                command[1] + d[1] * step / remaining,
-                command[2] + d[2] * step / remaining,
-            )
-            self._position_command = command
-        return Setpoint(pos=command, yaw=self._last_yaw)
-
-    def tick_lane(self, pos: Vec3, dt: float) -> Setpoint:
+    def tick_lane(self, pos: Vec3, vel: Vec3) -> Setpoint:
         lane = self.lanes[self._lane_i]
-        n, e = lane.point_at(self._lane_s)
-        target = (n, e, self._alt_target())
+        entry_n, entry_e = lane.point_at(self._lane_s)
+        entry = (entry_n, entry_e, self._alt_target())
+        stopped = math.hypot(vel[0], vel[1]) <= self.cfg.land_speed_tol_mps
+
+        if not self._lane_entered:
+            if not self._reached(pos, entry) or not stopped:
+                return self._target(entry)
+            self._lane_entered = True
 
         # dip trigger between progress steps, budget permitting
         if self.dips_done < self.cfg.max_dips:
@@ -511,53 +468,46 @@ class MissionEngine:
                 self._dip_target = c
                 self._dip_t0 = None
                 self.phase = VERIFY_DIP
-                return Setpoint(pos=target, yaw=self._last_yaw)
+                return self._target(entry)
 
-        # off the lane (lane entry, dip re-entry): stream toward it,
-        # progress paused — never a far position step
-        err = math.hypot(target[0] - pos[0], target[1] - pos[1]) + abs(
-            target[2] - pos[2]
+        along = (
+            (pos[0] - lane.start[0]) * math.cos(lane.heading)
+            + (pos[1] - lane.start[1]) * math.sin(lane.heading)
         )
-        if err > self.cfg.track_gate_m:
-            return self._toward(pos, target, self.cfg.lane_speed, dt)
+        measured_s = max(0.0, min(along, lane.length))
+        if measured_s > self._lane_s:
+            self._record_coverage(lane.index, self._lane_s, measured_s)
+            self._lane_s = measured_s
 
-        s0 = self._lane_s
-        self._lane_s = min(self._lane_s + self.cfg.lane_speed * dt, lane.length)
-        self._record_coverage(lane.index, s0, self._lane_s)
-        if self._lane_s >= lane.length and self._reached(pos, target):
+        end_n, end_e = lane.point_at(lane.length)
+        target = (end_n, end_e, self._alt_target())
+        if self._reached(pos, target) and stopped:
+            self._record_coverage(lane.index, self._lane_s, lane.length)
             if self._lane_i + 1 < len(self.lanes):
                 self._lane_i += 1
                 self._lane_s = 0.0
-                lane = self.lanes[self._lane_i]
+                self._lane_entered = False
+                next_lane = self.lanes[self._lane_i]
+                n, e = next_lane.point_at(0.0)
+                return self._target((n, e, self._alt_target()))
             else:
                 self.phase = EGRESS
-        n, e = lane.point_at(self._lane_s)
-        hd = lane.heading
-        self._last_yaw = hd
-        vel = (
-            self.cfg.lane_speed * math.cos(hd),
-            self.cfg.lane_speed * math.sin(hd),
-            0.0,
-        )
-        return Setpoint(
-            pos=(n, e, self._alt_target()),
-            vel=vel,
-            yaw=hd,
-        )
+        return self._target(target)
 
-    def _tick_dip(self, t: float, pos: Vec3, dt: float) -> Setpoint:
+    def _tick_dip(self, t: float, pos: Vec3) -> Setpoint:
         """v0 stub: hover over the cluster centroid at survey altitude,
         mark it dipped, resume the lane at the recorded progress point."""
         c = self._dip_target
         target = (c.centroid[0], c.centroid[1], self._alt_target())
         if not self._reached(pos, target):
-            return self._toward(pos, target, self.cfg.lane_speed, dt)
+            return self._target(target)
         if self._dip_t0 is None:
             self._dip_t0 = t
         if t - self._dip_t0 >= self.cfg.dip_hover_s:
             c.status = DIPPED
             self.dips_done += 1
             self._dip_target = None
+            self._lane_entered = False
             self.phase = LANE
         return Setpoint(pos=target, yaw=self._last_yaw)
 

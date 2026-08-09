@@ -33,6 +33,7 @@ from rclpy.qos import (
 )
 
 from px4_msgs.msg import (
+    GotoSetpoint,
     OffboardControlMode,
     TrajectorySetpoint,
     VehicleAttitude,
@@ -112,6 +113,7 @@ class OffboardController(Node):
         self._cmd_pub = self.create_publisher(VehicleCommand, self._topic("in/vehicle_command"), 10)
         self._offboard_pub = self.create_publisher(OffboardControlMode, self._topic("in/offboard_control_mode"), sensor_qos)
         self._traj_pub = self.create_publisher(TrajectorySetpoint, self._topic("in/trajectory_setpoint"), sensor_qos)
+        self._goto_pub = self.create_publisher(GotoSetpoint, self._topic("in/goto_setpoint"), sensor_qos)
 
         # Keep legacy names for existing images and add the v1.18 message versions.
         self.create_subscription(VehicleStatus, self._topic("out/vehicle_status"), self._status_cb, sensor_qos)
@@ -161,6 +163,10 @@ class OffboardController(Node):
         self._takeoff_started_us = 0
         self._link_acquired_fired = False
         self._heartbeat_velocity = False
+        self._goto_active = False
+        self._goto_max_horizontal_speed = None
+        self._goto_max_vertical_speed = None
+        self._goto_max_heading_rate = None
         self._global_xy_valid = False
         self._global_alt_valid = False
         self._pending_origin = None
@@ -195,6 +201,24 @@ class OffboardController(Node):
     def begin_return(self):
         if self.state not in (RETURNING, LAND_REQUESTED, LANDING, DONE):
             self._begin_return()
+
+    def enable_goto_setpoints(
+        self,
+        *,
+        max_horizontal_speed: float,
+        max_vertical_speed: float | None = None,
+        max_heading_rate: float | None = None,
+    ) -> None:
+        """Use PX4's jerk-limited GotoControl for subsequent position targets."""
+        self._goto_active = True
+        self._heartbeat_velocity = False
+        self._goto_max_horizontal_speed = float(max_horizontal_speed)
+        self._goto_max_vertical_speed = (
+            None if max_vertical_speed is None else float(max_vertical_speed)
+        )
+        self._goto_max_heading_rate = (
+            None if max_heading_rate is None else float(max_heading_rate)
+        )
 
     def command_takeoff(self, altitude_m: float | None = None):
         altitude = self.takeoff_altitude_m if altitude_m is None else float(altitude_m)
@@ -472,11 +496,34 @@ class OffboardController(Node):
         traj.yawspeed = float(yawspeed)
         self._traj_pub.publish(traj)
 
+    def publish_goto_setpoint(self, x, y, z, yaw=None):
+        self._heartbeat_velocity = False
+        goto = GotoSetpoint()
+        goto.timestamp = int(Clock().now().nanoseconds / 1000)
+        goto.position[0], goto.position[1], goto.position[2] = (
+            float(x), float(y), float(z) + self._launch_z
+        )
+        goto.flag_control_heading = yaw is not None
+        goto.heading = wrap_pi(self.yaw if yaw is None else float(yaw))
+        goto.flag_set_max_horizontal_speed = True
+        goto.max_horizontal_speed = self._goto_max_horizontal_speed
+        goto.flag_set_max_vertical_speed = self._goto_max_vertical_speed is not None
+        if self._goto_max_vertical_speed is not None:
+            goto.max_vertical_speed = self._goto_max_vertical_speed
+        goto.flag_set_max_heading_rate = self._goto_max_heading_rate is not None
+        if self._goto_max_heading_rate is not None:
+            goto.max_heading_rate = self._goto_max_heading_rate
+        self._goto_pub.publish(goto)
+
     def _hold_setpoint(self):
-        self.publish_position_setpoint(
+        target = (
             *self._takeoff_hold(),
             self._launch_yaw if self._launch_yaw_latched else self.yaw,
         )
+        if self._goto_active:
+            self.publish_goto_setpoint(*target)
+        else:
+            self.publish_position_setpoint(*target)
 
     def _takeoff_target_z(self):
         return self._launch_z - abs(self.takeoff_altitude_m)
@@ -522,7 +569,10 @@ class OffboardController(Node):
     def _publish_handoff_hold(self):
         if self._handoff_hold is None:
             self._capture_handoff_hold()
-        self.publish_position_setpoint(*self._handoff_hold)
+        if self._goto_active:
+            self.publish_goto_setpoint(*self._handoff_hold)
+        else:
+            self.publish_position_setpoint(*self._handoff_hold)
 
     def _log_throttled(self, msg: str, period_us: int = 1_000_000):
         now = self._now_us()
@@ -641,6 +691,10 @@ class OffboardController(Node):
             sp = self.compute_setpoint()
             if sp is None:
                 self._hold_setpoint()
+            elif self._goto_active:
+                if len(sp) != 4:
+                    raise ValueError("goto setpoint must be (x, y, z, yaw)")
+                self.publish_goto_setpoint(*sp)
             else:
                 if len(sp) == 4:
                     x, y, z, yaw = sp
