@@ -74,10 +74,72 @@ def _randomize_spawns(fleet: dict, seed: int) -> dict:
     return out
 
 
+def _rough_line_spawns(fleet: dict, seed: int) -> dict:
+    """Generate an ordered launch line with deliberately uneven spacing."""
+    out = copy.deepcopy(fleet)
+    cfg = out.get("rough_line_spawn", {})
+    min_gap = float(cfg.get("min_gap_m", 3.4))
+    max_gap = float(cfg.get("max_gap_m", 5.0))
+    if min_gap <= 0.0 or max_gap < min_gap:
+        raise ValueError("rough_line_spawn needs 0 < min_gap_m <= max_gap_m")
+
+    poses = [
+        _pose_values(vehicle.get("staging_pose", vehicle.get("pose", "0,0,0,0,0,0")))
+        for vehicle in out["vehicles"]
+    ]
+    if len(poses) < 2:
+        raise ValueError("rough_line_spawn needs at least two vehicles")
+    axis_e = poses[-1][0] - poses[0][0]
+    axis_n = poses[-1][1] - poses[0][1]
+    norm = math.hypot(axis_e, axis_n)
+    if norm <= 1e-6:
+        raise ValueError("rough_line_spawn needs distinct launch positions")
+    axis_e /= norm
+    axis_n /= norm
+
+    rng = random.Random(int(seed))
+    gaps = [rng.uniform(min_gap, max_gap) for _ in poses[1:]]
+    midpoint_e = 0.5 * (poses[0][0] + poses[-1][0])
+    midpoint_n = 0.5 * (poses[0][1] + poses[-1][1])
+    distance = -0.5 * sum(gaps)
+    launch_positions = []
+    for index in range(len(poses)):
+        launch_positions.append((
+            midpoint_e + distance * axis_e,
+            midpoint_n + distance * axis_n,
+        ))
+        if index < len(gaps):
+            distance += gaps[index]
+
+    for vehicle, fixed, (east, north) in zip(out["vehicles"], poses, launch_positions):
+        pose = fixed.copy()
+        pose[0] = east
+        pose[1] = north
+        vehicle["pose"] = ",".join(f"{value:.6f}" for value in pose)
+
+    anchor = _pose_values(out["vehicles"][0]["pose"])
+    for vehicle, fixed in zip(out["vehicles"], poses):
+        along = (fixed[0] - poses[0][0]) * axis_e + (fixed[1] - poses[0][1]) * axis_n
+        stage = fixed.copy()
+        stage[0] = anchor[0] + along * axis_e
+        stage[1] = anchor[1] + along * axis_n
+        vehicle["staging_pose"] = ",".join(f"{value:.6f}" for value in stage)
+
+    out["_rough_line_spawn"] = {"enabled": True, "seed": int(seed)}
+    return out
+
+
 def load_fleet(config_path: str, *, random_spawn: bool = False,
+               rough_line_spawn: bool = False,
                spawn_seed: int | None = None) -> dict:
     with open(config_path) as f:
         fleet = yaml.safe_load(f)
+    if random_spawn and rough_line_spawn:
+        raise ValueError("random_spawn and rough_line_spawn are mutually exclusive")
+    if rough_line_spawn:
+        cfg = fleet.get("rough_line_spawn", {})
+        seed = int(cfg.get("seed", 0) if spawn_seed is None else spawn_seed)
+        return _rough_line_spawns(fleet, seed)
     if not random_spawn:
         return fleet
     cfg = fleet.get("random_spawn", {})
@@ -104,6 +166,7 @@ def build_sitl_cmd(*, instance_id, px4_dir, model, pose="", autostart=4001,
     env = [
         f"PX4_SYS_AUTOSTART={autostart}",
         f"PX4_UXRCE_DDS_NS={dds_ns}",
+        f"PX4_GZ_WORLD={world}",
     ]
     if home_gps:
         env += [
@@ -118,7 +181,7 @@ def build_sitl_cmd(*, instance_id, px4_dir, model, pose="", autostart=4001,
     # exec the long-running binary so it inherits the shell's PID; that lets a
     # ros2 launch SIGINT reach px4 directly instead of orphaning it behind bash.
     if instance_id == 0:
-        return f"cd {px4_dir} && PX4_GZ_WORLD={world} {env_str} exec make px4_sitl gz_{model}"
+        return f"cd {px4_dir} && {env_str} exec make px4_sitl gz_{model}"
 
     build_dir = px4_build_dir(px4_dir)
     rootfs = os.path.join(build_dir, "rootfs", str(instance_id))

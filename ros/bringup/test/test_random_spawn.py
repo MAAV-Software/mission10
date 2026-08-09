@@ -50,3 +50,33 @@ def test_random_spawn_respects_walls_origin_and_pair_separation():
     for index, point in enumerate(points):
         for peer in points[index + 1:]:
             assert math.dist(point, peer) >= float(cfg["min_separation_m"]) - 1e-6
+
+
+def test_rough_line_spawn_is_seeded_ordered_and_keeps_three_metre_targets():
+    first = load_fleet(str(CONFIG), rough_line_spawn=True, spawn_seed=23)
+    again = load_fleet(str(CONFIG), rough_line_spawn=True, spawn_seed=23)
+    different = load_fleet(str(CONFIG), rough_line_spawn=True, spawn_seed=24)
+
+    assert _xy(first) == _xy(again)
+    assert _xy(first) != _xy(different)
+    assert first["_rough_line_spawn"] == {"enabled": True, "seed": 23}
+    points = _xy(first)
+    assert all(points[index][1] > points[index + 1][1] for index in range(3))
+    gaps = [math.dist(points[index], points[index + 1]) for index in range(3)]
+    assert all(3.4 <= gap <= 5.0 for gap in gaps)
+    assert any(abs(gap - 3.0) > 0.25 for gap in gaps)
+    stages = [tuple(float(value) for value in vehicle["staging_pose"].split(",")[:2])
+              for vehicle in first["vehicles"]]
+    assert all(
+        math.isclose(math.dist(stages[index], stages[index + 1]), 3.0, abs_tol=1e-6)
+        for index in range(3)
+    )
+
+
+def test_spawn_modes_are_mutually_exclusive():
+    try:
+        load_fleet(str(CONFIG), random_spawn=True, rough_line_spawn=True)
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("expected mutually exclusive spawn modes to fail")

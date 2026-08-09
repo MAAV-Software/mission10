@@ -1,6 +1,7 @@
 import math
 from unittest.mock import Mock
 
+import numpy as np
 import rclpy
 
 from flight_intelligent.phased_orbits_mission import PhasedOrbitsMission
@@ -178,6 +179,25 @@ class TestPhasedOrbitsLanding:
         first_peel, _ = self.node._nominal_setpoint()
         assert math.hypot(*(last_spiral[:2] - first_peel[:2])) < 0.01
 
+    def test_peeloff_latches_the_guarded_phase_without_waiting_another_revolution(self):
+        gate = 1_000_000
+        self.node._orbit_gate_us = gate
+        self.node.orbit_duration = 2.0 * math.pi / self.node.omega
+        self.node._phase_cmd = self.node.phi + 0.4
+        end = gate + int(
+            (self.node.spiral_time_s + self.node.orbit_duration) * 1e6)
+        self.node._phase_cmd_us = end
+        self.node._now_us = Mock(return_value=end + 1_000)
+
+        first_peel, _ = self.node._nominal_setpoint()
+
+        expected = np.array([
+            self.node.center[0] + self.node.radius * math.cos(self.node._phase_cmd),
+            self.node.center[1] + self.node.radius * math.sin(self.node._phase_cmd),
+        ])
+        assert np.linalg.norm(first_peel[:2] - expected) < 0.01
+        assert self.node.orbit_duration == 2.0 * math.pi / self.node.omega
+
     def test_come_home_during_the_climb_lands_at_the_pad(self):
         # The anchor re-latches to the live position every climb tick, so there is
         # nowhere to fly back to.
@@ -231,8 +251,10 @@ class TestPhasedOrbitsLanding:
         self.node.staging_enabled = True
         self.node._staging_complete = False
         self.node.spawn_e, self.node.spawn_n = 7.0, -8.0
+        self.node.shared_slot_e, self.node.shared_slot_n = 7.0, -8.0
         self.node.stage_e, self.node.stage_n = 1.0, 4.5
         self.node._anchor = (0.0, 0.0)
+        self.node._launch_xy = (0.0, 0.0)
         self.node._climbed = True
         self.node.peer_namespaces = []
         self.node.x = self.node.y = 0.0
@@ -255,4 +277,104 @@ class TestPhasedOrbitsLanding:
 
         assert self.node._staging_complete is True
         assert self.node._anchor == target_local
+        assert self.node._home_offset == (-target_local[0], -target_local[1])
         assert position[:2] == (0.0, 0.0)
+
+    def test_line_trim_uses_predecessor_range_and_remembers_launch_home(self):
+        from flight_intelligent.phased_orbits_mission import MODE_DECONFLICT, MODE_NOMINAL
+
+        self.node.index = 1
+        self.node.count = 2
+        self.node.line_trim_enabled = True
+        self.node.staging_enabled = True
+        self.node._staging_complete = False
+        self.node._stage_start_us = 1_000_000
+        self.node._line_trim_us = 2_950_000
+        self.node.line_trim_settle_s = 0.0
+        self.node.line_direction = np.array([0.0, -1.0])
+        self.node._anchor = (0.0, 0.0)
+        self.node.y, self.node.x = 0.0, -0.4
+        self.node.vx = self.node.vy = 0.0
+        self.node.avoidance_mode = MODE_DECONFLICT
+        self.node.peer_state[0] = Mock(mode=MODE_NOMINAL)
+        self.node.peer_state_us[0] = 3_000_000
+        self.node.relative_state[0] = Mock(range_m=3.0)
+        self.node.relative_state_us[0] = 3_000_000
+        self.node._now_us = Mock(return_value=3_000_000)
+
+        position, _ = self.node._line_trim_setpoint(0.0)
+
+        assert position[:2] == (0.0, 0.0)
+        assert self.node._line_trim_ready
+        assert self.node.avoidance_mode == MODE_NOMINAL
+        assert self.node._anchor == (0.0, -0.4)
+        assert self.node._home_offset == (0.0, 0.4)
+
+        self.node._now_us.return_value += 50_000
+        self.node._line_trim_setpoint(0.0)
+        assert self.node._staging_complete
+
+    def test_line_trim_staging_does_not_invoke_orca(self):
+        self.node.peer_namespaces = ["px4_1"]
+        self.node._climbed = True
+        self.node.staging_enabled = True
+        self.node.line_trim_enabled = True
+        self.node._staging_complete = False
+        self.node._publish_world_state = Mock()
+        self.node._nominal_setpoint = Mock(
+            return_value=((1.0, 2.0, 6.0), 0.0))
+        self.node._avoidance_velocity = Mock()
+
+        setpoint = self.node.compute_setpoint()
+
+        assert len(setpoint) == 4
+        self.node._avoidance_velocity.assert_not_called()
+
+    def test_fixed_formation_transit_does_not_invoke_orca(self):
+        self.node.peer_namespaces = ["px4_1"]
+        self.node._climbed = True
+        self.node.staging_enabled = False
+        self.node._publish_world_state = Mock()
+        self.node._nominal_setpoint = Mock(
+            return_value=((1.0, 2.0, 6.0), 0.0))
+        self.node._avoidance_velocity = Mock()
+
+        setpoint = self.node.compute_setpoint()
+
+        assert len(setpoint) == 4
+        self.node._avoidance_velocity.assert_not_called()
+
+    def test_random_staging_invokes_orca(self):
+        self.node.peer_namespaces = ["px4_1"]
+        self.node._climbed = True
+        self.node.staging_enabled = True
+        self.node._staging_complete = False
+        self.node._publish_world_state = Mock()
+        self.node._nominal_setpoint = Mock(
+            return_value=((1.0, 2.0, 6.0), 0.0))
+        self.node._avoidance_velocity = Mock(return_value=np.array([0.5, -0.25]))
+
+        setpoint = self.node.compute_setpoint()
+
+        assert len(setpoint) == 7
+        self.node._avoidance_velocity.assert_called_once()
+
+    def test_local_frame_reset_preserves_shared_pose_and_rebases_cached_goals(self):
+        self.node.shared_slot_e = 100.0
+        self.node.shared_slot_n = 200.0
+        self.node._launch_xy = (10.0, 20.0)  # NED north, east
+        self.node.x, self.node.y = 12.0, 23.0
+        self.node._anchor = (23.0, 12.0)
+        self.node._last_goal_xy = np.array([24.0, 13.0])
+        before = self.node._world_xy()
+
+        # The base controller rebases its launch reference before invoking the
+        # mission hook. PX4 reports the same physical point in the new frame.
+        self.node._launch_xy = (15.0, 18.0)
+        self.node.on_local_frame_reset((5.0, -2.0), 0.0, 0.0)
+        self.node.x, self.node.y = 17.0, 21.0
+
+        assert self.node._world_xy() == before
+        assert self.node._anchor == (21.0, 17.0)
+        assert np.allclose(self.node._last_goal_xy, [22.0, 18.0])
+        assert self.node._frame_epoch == 1

@@ -15,6 +15,8 @@
 #   scripts/sitl.sh up [mission_config.yaml]   # launch (GUI), write pidfile
 #   scripts/sitl.sh up-random [seed] [mission_config.yaml]
 #                                               # seeded random M-Air spawns
+#   scripts/sitl.sh up-line [seed] [mission_config.yaml]
+#                                               # ordered, uneven ground line
 #   scripts/sitl.sh ready                       # one-shot readiness snapshot
 #   scripts/sitl.sh takeoff                     # fire /start_mission
 #   scripts/sitl.sh orbit                       # fire /begin_orbit
@@ -56,7 +58,8 @@ _pub_gate() {
 
 _launch_up() {
   local random_seed="$1"
-  local config="$2"
+  local rough_line="$2"
+  local config="$3"
   cd "$REPO"
   _source_ws
   rm -f "$LOG" "$EFFECTIVE_FLEET"
@@ -69,13 +72,17 @@ _launch_up() {
   [ -n "${SITL_UWB_FAR_RATE_HZ:-}" ] && args+=("uwb_far_rate_hz:=$SITL_UWB_FAR_RATE_HZ")
   [ -n "${SITL_UWB_NEAR_RATE_HZ:-}" ] && args+=("uwb_near_rate_hz:=$SITL_UWB_NEAR_RATE_HZ")
   if [ -n "$random_seed" ]; then
-    args+=("random_spawn:=true" "spawn_seed:=$random_seed")
+    if [ "$rough_line" = true ]; then
+      args+=("rough_line_spawn:=true" "spawn_seed:=$random_seed")
+    else
+      args+=("random_spawn:=true" "spawn_seed:=$random_seed")
+    fi
   fi
   DISPLAY=:1 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 GZ_IP=127.0.0.1 \
     PX4_DIR="$PX4_DIR" \
     ros2 launch bringup phased_orbits.launch.py "${args[@]}" > "$LOG" 2>&1 &
   echo "$!" > "$PIDFILE"
-  echo "launched pid $(cat "$PIDFILE")  N=$N  log=$LOG  config=${config:-<default>} random_seed=${random_seed:-<fixed>}"
+  echo "launched pid $(cat "$PIDFILE")  N=$N  log=$LOG  config=${config:-<default>} seed=${random_seed:-<fixed>} rough_line=$rough_line"
   echo "watch readiness:  scripts/sitl.sh ready"
 }
 
@@ -84,14 +91,21 @@ cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   up)
     config="${1:-${MISSION_CONFIG:-}}"
-    _launch_up "${SITL_RANDOM_SEED:-}" "$config"
+    _launch_up "${SITL_RANDOM_SEED:-}" false "$config"
     ;;
 
   up-random)
     seed="${1:-$(date +%s)}"
     [ $# -gt 0 ] && shift
     config="${1:-${MISSION_CONFIG:-}}"
-    _launch_up "$seed" "$config"
+    _launch_up "$seed" false "$config"
+    ;;
+
+  up-line)
+    seed="${1:-$(date +%s)}"
+    [ $# -gt 0 ] && shift
+    config="${1:-${MISSION_CONFIG:-}}"
+    _launch_up "$seed" true "$config"
     ;;
 
   ready)
@@ -159,7 +173,7 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: scripts/sitl.sh {up [config]|up-random [seed] [config]|ready|takeoff|orbit|home|land|sep|status|down}" >&2
+    echo "usage: scripts/sitl.sh {up [config]|up-random [seed] [config]|up-line [seed] [config]|ready|takeoff|orbit|home|land|sep|status|down}" >&2
     exit 2
     ;;
 esac

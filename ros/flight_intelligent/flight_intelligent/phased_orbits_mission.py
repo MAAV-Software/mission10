@@ -4,8 +4,8 @@ Each PX4 instance's EKF local NED frame is anchored at its own spawn point
 (verified: drone i reads its own vehicle_local_position as ~0,0 at rest). So if
 every drone spawns on its hover spot (3 m apart) and flies the *identical*
 launch-relative geometry (circle center 4.6 m downrange, R=4.6), the physical
-spawn offsets reconstruct the world pattern. Drones differ only in phase phi_i =
-phase0 + phase_step*i. No absolute setpoint is ever computed.
+spawn offsets reconstruct the world pattern. Drones differ only in their fixed
+phase offsets. No absolute setpoint is ever computed.
 
 Operator commands (qualifier rules section 221), each a single shared instant
 delivered to all drones.
@@ -51,11 +51,10 @@ sense.
 A global origin can be set once at link-up for simulations and global failsafes,
 but the normal landing path stays local and does not require GNSS altitude.
 
-Range-history localization and ORCA own the horizontal command whenever peers
-are present.  Each peer's protected radius expands with localization uncertainty
-and closing speed.  The mission's position path is converted to a preferred
-velocity before avoidance, so the PX4 position loop cannot add a hidden
-horizontal correction around the planner.
+Fused relative localization and ORCA deconflict random-spawn staging. The
+fixed formation transits on its deterministic position path. During the locked
+orbit, the phase schedule owns the position setpoint and each drone applies a
+one-variable barrier clamp to its own angular rate.
 """
 from __future__ import annotations
 
@@ -77,28 +76,19 @@ from flight_lib import (
     STATUS_TRACKING,
     closest_point_of_approach,
     orca_effective_radius,
-    orca_velocity,
+    orca_solution,
+    phase_guard_rate,
     peeloff_duration,
     phased_orbit_insertion,
     phased_orbit_peeloff,
-    phased_orbit_setpoint,
 )
 from px4_offboard.controller import OffboardController, wrap_pi
 from px4_offboard.gate_qos import MISSION_GATE_QOS
 
 YAW_ACCEPTANCE_RAD = math.radians(10.0)  # climb-phase yaw alignment gate
 MODE_NOMINAL = UwbState.MODE_NOMINAL if UwbState is not None else 0
+MODE_PHASE = UwbState.MODE_PHASE if UwbState is not None else 1
 MODE_DECONFLICT = UwbState.MODE_DECONFLICT if UwbState is not None else 3
-
-# Range-only localization needs two-dimensional relative motion before it can
-# supply ORCA with a bearing.  Each drone traces the same small circle with an
-# identity-dependent phase, returning to its launch point every cycle.  A 0.25 m
-# radius gives adjacent identities a 0.71 m relative baseline, comfortably over
-# the estimator's 0.5 m acquisition threshold while each drone stays within
-# 0.5 m of its random spawn.
-LOCALIZATION_RADIUS_M = 0.25
-LOCALIZATION_CYCLE_S = 6.0
-
 
 def enu_to_ned_setpoint(position_enu, yaw_enu):
     east, north, up = position_enu
@@ -119,6 +109,7 @@ class PhasedOrbitsMission(OffboardController):
         self.declare_parameter("orbit_speed_mps", 2.0)
         self.declare_parameter("phase_step_deg", 90.0)
         self.declare_parameter("phase0_deg", -90.0)
+        self.declare_parameter("orbit_phase_deg", [math.nan])
         self.declare_parameter("orbit_mod_amp", [0.0, 0.0, 0.0, 0.0])
         self.declare_parameter("orbit_mod_phase_deg", [0.0, 0.0, 0.0, 0.0])
         self.declare_parameter("insertion_spin_deg", 235.0)
@@ -143,13 +134,30 @@ class PhasedOrbitsMission(OffboardController):
         self.declare_parameter("orca_response_time_s", 0.6)
         self.declare_parameter("orca_horizon_s", 5.0)
         self.declare_parameter("orca_max_speed_mps", 3.0)
+        self.declare_parameter("phase_guard_enabled", True)
+        self.declare_parameter("phase_protected_separation_m", 2.8)
+        self.declare_parameter("phase_barrier_gamma", 1.0)
+        self.declare_parameter("phase_tracking_gain", 0.8)
+        self.declare_parameter("phase_error_deadband_deg", 3.0)
+        self.declare_parameter("phase_min_rate_scale", 0.4)
+        self.declare_parameter("phase_max_rate_scale", 1.5)
+        self.declare_parameter("peer_state_timeout_s", 0.5)
         self.declare_parameter("spawn_e_m", 0.0)
         self.declare_parameter("spawn_n_m", 0.0)
+        self.declare_parameter("shared_slot_e_m", 0.0)
+        self.declare_parameter("shared_slot_n_m", 0.0)
         self.declare_parameter("stage_e_m", 0.0)
         self.declare_parameter("stage_n_m", 0.0)
         self.declare_parameter("staging_enabled", False)
         self.declare_parameter("staging_speed_mps", 2.0)
         self.declare_parameter("staging_acceptance_m", 0.35)
+        self.declare_parameter("line_trim_enabled", False)
+        self.declare_parameter("line_spacing_m", 3.0)
+        self.declare_parameter("line_trim_speed_mps", 0.75)
+        self.declare_parameter("line_trim_tolerance_m", 0.20)
+        self.declare_parameter("line_trim_settle_s", 0.5)
+        self.declare_parameter("line_direction_e_m", 0.0)
+        self.declare_parameter("line_direction_n_m", -1.0)
         self.declare_parameter("peer_namespaces", [""])
         self.declare_parameter("origin_lat", 42.2658783)
         self.declare_parameter("origin_lon", -83.7487304)
@@ -177,9 +185,23 @@ class PhasedOrbitsMission(OffboardController):
         self.speed_mps = float(self.get_parameter("orbit_speed_mps").value)
         self.phase_step = math.radians(float(self.get_parameter("phase_step_deg").value))
         self.phase0 = math.radians(float(self.get_parameter("phase0_deg").value))
+        phase_degrees = [
+            float(value) for value in self.get_parameter("orbit_phase_deg").value
+        ]
+        if len(phase_degrees) == 1 and math.isnan(phase_degrees[0]):
+            self.phases = None
+        else:
+            if len(phase_degrees) != self.count or not all(map(math.isfinite, phase_degrees)):
+                raise ValueError("orbit_phase_deg must contain one finite phase per drone")
+            self.phases = [math.radians(value) for value in phase_degrees]
+        self.mod_amps = [float(value) for value in self.get_parameter("orbit_mod_amp").value]
+        self.mod_phases = [
+            math.radians(float(value))
+            for value in self.get_parameter("orbit_mod_phase_deg").value
+        ]
         self.mod_amp, self.mod_phase = self._mod_for_index(
-            list(self.get_parameter("orbit_mod_amp").value),
-            list(self.get_parameter("orbit_mod_phase_deg").value))
+            self.mod_amps,
+            [math.degrees(value) for value in self.mod_phases])
         self.spin = math.radians(float(self.get_parameter("insertion_spin_deg").value))
         self.to_center_time_s = float(self.get_parameter("to_center_time_s").value)
         self.spiral_time_s = float(self.get_parameter("spiral_time_s").value)
@@ -210,17 +232,55 @@ class PhasedOrbitsMission(OffboardController):
             self.get_parameter("orca_response_time_s").value)
         self.orca_horizon = float(self.get_parameter("orca_horizon_s").value)
         self.orca_max_speed = float(self.get_parameter("orca_max_speed_mps").value)
+        self.phase_guard_enabled = bool(self.get_parameter("phase_guard_enabled").value)
+        self.phase_protected_separation = float(
+            self.get_parameter("phase_protected_separation_m").value)
+        self.phase_barrier_gamma = float(self.get_parameter("phase_barrier_gamma").value)
+        self.phase_tracking_gain = float(self.get_parameter("phase_tracking_gain").value)
+        self.phase_error_deadband = math.radians(float(
+            self.get_parameter("phase_error_deadband_deg").value))
+        base_omega = self.speed_mps / self.radius
+        self.phase_min_rate = base_omega * float(
+            self.get_parameter("phase_min_rate_scale").value)
+        self.phase_max_rate = base_omega * float(
+            self.get_parameter("phase_max_rate_scale").value)
+        self.peer_state_timeout_us = int(1e6 * float(
+            self.get_parameter("peer_state_timeout_s").value))
         if self.orca_protected_radius <= 0.0 or self.orca_response_time < 0.0:
             raise ValueError("ORCA protected radius must be positive and response time nonnegative")
         self.spawn_e = float(self.get_parameter("spawn_e_m").value)
         self.spawn_n = float(self.get_parameter("spawn_n_m").value)
+        self.shared_slot_e = float(self.get_parameter("shared_slot_e_m").value)
+        self.shared_slot_n = float(self.get_parameter("shared_slot_n_m").value)
         self.stage_e = float(self.get_parameter("stage_e_m").value)
         self.stage_n = float(self.get_parameter("stage_n_m").value)
         self.staging_enabled = bool(self.get_parameter("staging_enabled").value)
         self.staging_speed = float(self.get_parameter("staging_speed_mps").value)
         self.staging_acceptance = float(self.get_parameter("staging_acceptance_m").value)
+        self.line_trim_enabled = bool(self.get_parameter("line_trim_enabled").value)
+        self.line_spacing = float(self.get_parameter("line_spacing_m").value)
+        self.line_trim_speed = float(self.get_parameter("line_trim_speed_mps").value)
+        self.line_trim_tolerance = float(
+            self.get_parameter("line_trim_tolerance_m").value)
+        self.line_trim_settle_s = float(self.get_parameter("line_trim_settle_s").value)
+        line_direction = np.array([
+            float(self.get_parameter("line_direction_e_m").value),
+            float(self.get_parameter("line_direction_n_m").value),
+        ])
+        line_norm = float(np.linalg.norm(line_direction))
+        self.line_direction = (
+            line_direction / line_norm if line_norm > 1e-6 else np.array([0.0, -1.0])
+        )
         if self.staging_speed <= 0.0:
             raise ValueError("staging_speed_mps must be positive")
+        if self.line_trim_enabled and (
+            not self.staging_enabled
+            or self.line_spacing <= 0.0
+            or self.line_trim_speed <= 0.0
+            or self.line_trim_tolerance <= 0.0
+            or self.line_trim_settle_s < 0.0
+        ):
+            raise ValueError("line trim requires staging and positive spacing/speed/tolerance")
         self.peer_namespaces = [p for p in self.get_parameter("peer_namespaces").value if p]
         self.origin = (
             float(self.get_parameter("origin_lat").value),
@@ -233,7 +293,10 @@ class PhasedOrbitsMission(OffboardController):
 
         self.alt = self.takeoff_altitude_m
         self.omega = self.speed_mps / self.radius
-        self.phi = self.phase0 + self.phase_step * self.index
+        self.phi = (
+            self.phase0 + self.phase_step * self.index
+            if self.phases is None else self.phases[self.index]
+        )
 
         # The orbit runs until /end_mission, at which point on_return_home() sets a
         # finite duration on a revolution boundary. Until then `orbit_t < inf`
@@ -250,10 +313,11 @@ class PhasedOrbitsMission(OffboardController):
         self._transit_us = 0
         self._staging_complete = not self.staging_enabled
         self._stage_start_us = 0
-        self._localization_complete = not (
-            self.staging_enabled and bool(self.peer_namespaces))
-        self._localization_start_us = 0
-        self._localization_cycle = 0
+        self._line_trim_us = 0
+        self._line_trim_settle_us = 0
+        self._line_trim_offset = 0.0
+        self._line_trim_ready = False
+        self._home_offset = (0.0, 0.0)
         self._center_logged = False
         self._pre_excite_hover_us = 0
         self._excite_us = 0
@@ -269,13 +333,23 @@ class PhasedOrbitsMission(OffboardController):
         self._last_nominal = None
         self._last_goal_xy = None
         self._last_goal_us = 0
+        self._frame_epoch = 0
+        self._phase_cmd = None
+        self._phase_cmd_us = 0
+        self._phase_offset = 0.0
+        self._phase_rate_cmd = self.omega
+        self._phase_solution = None
+        self._phase_last_infeasible_us = 0
+        self._peel_phase = None
         self.create_subscription(
             Bool, "begin_orbit", self._orbit_gate_cb, MISSION_GATE_QOS
         )
 
         self._seq = 0
         self.peer_state: dict = {}
+        self.peer_state_us: dict = {}
         self.relative_state: dict = {}
+        self.relative_state_us: dict = {}
         self.avoidance_mode = MODE_NOMINAL
         self.avoidance_active_ticks = 0
         self.avoidance_total_ticks = 0
@@ -335,15 +409,55 @@ class PhasedOrbitsMission(OffboardController):
             self.get_logger().info("begin_orbit received, starting circle choreography.")
 
     def _peer_state_cb(self, msg: UwbState):
-        self.peer_state[int(msg.vehicle_id)] = msg
+        peer_id = int(msg.vehicle_id)
+        self.peer_state[peer_id] = msg
+        self.peer_state_us[peer_id] = self._now_us()
 
     def _relative_state_cb(self, msg: RelativePeerState):
         if int(msg.observer_id) == self.index:
-            self.relative_state[int(msg.peer_id)] = msg
+            peer_id = int(msg.peer_id)
+            self.relative_state[peer_id] = msg
+            self.relative_state_us[peer_id] = self._now_us()
 
     def _world_xy(self):
-        """Own position in the shared world ENU frame (spawn offset + local)."""
-        return (self.spawn_e + self.y, self.spawn_n + self.x)  # NED y=east, x=north
+        """Reset-continuous shared ENU position relative to the launch slot."""
+        if self._launch_xy is None:
+            return self.shared_slot_e, self.shared_slot_n
+        launch_n, launch_e = self._launch_xy
+        return (
+            self.shared_slot_e + self.y - launch_e,
+            self.shared_slot_n + self.x - launch_n,
+        )
+
+    def _anchor_world_xy(self):
+        if self._launch_xy is None:
+            return self.shared_slot_e, self.shared_slot_n
+        launch_n, launch_e = self._launch_xy
+        return (
+            self.shared_slot_e + self._anchor[0] - launch_e,
+            self.shared_slot_n + self._anchor[1] - launch_n,
+        )
+
+    def _locked_orbit_time(self):
+        if self._orbit_gate_us == 0:
+            return None
+        tau = max(0.0, (self._now_us() - self._orbit_gate_us) * 1e-6)
+        orbit_t = tau - self.spiral_time_s
+        return orbit_t if 0.0 <= orbit_t < self.orbit_duration else None
+
+    def _actual_phase(self):
+        orbit_t = self._locked_orbit_time()
+        if orbit_t is None:
+            return None
+        world_e, world_n = self._world_xy()
+        anchor_e, anchor_n = self._anchor_world_xy()
+        radial = np.array([
+            world_e - anchor_e - self.center[0],
+            world_n - anchor_n - self.center[1],
+        ])
+        if float(np.linalg.norm(radial)) < 0.5 * self.radius:
+            return None
+        return math.atan2(float(radial[1]), float(radial[0]))
 
     def _publish_world_state(self):
         if UwbState is None:
@@ -353,12 +467,39 @@ class PhasedOrbitsMission(OffboardController):
         msg.sequence = self._seq
         self._seq += 1
         msg.vehicle_id = self.index
-        msg.yaw_rad = float(self.yaw)
+        msg.frame_epoch = self._frame_epoch
+        msg.yaw_rad = wrap_pi(math.pi / 2.0 - float(self.yaw))
         we, wn = self._world_xy()
-        msg.position_enu_m = [float(we), float(wn), float(-self.z)]
+        up = -(self.z - self._launch_z) if self._launch_z_latched else -self.z
+        msg.position_enu_m = [float(we), float(wn), float(up)]
         msg.velocity_enu_mps = [float(self.vy), float(self.vx), float(-self.vz)]
+        msg.gnss_enu_m = list(msg.position_enu_m)
+        validity = UwbState.VALID_YAW if self._attitude_seen else 0
+        if self._xy_valid and self._z_valid:
+            validity |= UwbState.VALID_POSITION
+        if self._v_xy_valid and all(math.isfinite(v) for v in (self.vx, self.vy, self.vz)):
+            validity |= UwbState.VALID_VELOCITY
+        phase = self._actual_phase()
+        if phase is not None:
+            radial_e = math.cos(phase)
+            radial_n = math.sin(phase)
+            tangential_speed = self.vy * (-radial_n) + self.vx * radial_e
+            msg.phase_rad = float(phase)
+            msg.phase_rate_rad_s = float(tangential_speed / self.radius)
+            validity |= UwbState.VALID_PHASE
+        msg.validity = validity
         msg.mode = self.avoidance_mode
         self.state_pub.publish(msg)
+
+    def on_local_frame_reset(self, delta_xy, delta_z, delta_heading):
+        delta_n, delta_e = delta_xy
+        self._anchor = (
+            self._anchor[0] + float(delta_e),
+            self._anchor[1] + float(delta_n),
+        )
+        if self._last_goal_xy is not None:
+            self._last_goal_xy = self._last_goal_xy + np.array([delta_e, delta_n])
+        self._frame_epoch = (self._frame_epoch + 1) & 0xffff
 
     def _preferred_velocity(self, goal_xy, now_us):
         """Finite-difference path feed-forward plus local position feedback."""
@@ -398,7 +539,9 @@ class PhasedOrbitsMission(OffboardController):
         d_cpa = math.nan
         range_alert = False
 
-        for peer_id, estimate in self.relative_state.items():
+        for peer_id, estimate in sorted(self.relative_state.items()):
+            if now_us - self.relative_state_us.get(peer_id, 0) > self.peer_state_timeout_us:
+                continue
             range_m = float(estimate.range_m)
             if int(estimate.status) != STATUS_TRACKING:
                 continue
@@ -433,13 +576,14 @@ class PhasedOrbitsMission(OffboardController):
 
         range_alert = limiting_clearance <= 0.0
 
-        safe = orca_velocity(
+        solution = orca_solution(
             preferred,
             own_velocity,
             peers,
             time_horizon_s=self.orca_horizon,
             max_speed_mps=self.orca_max_speed,
-        ) if peers else preferred.copy()
+        ) if peers else None
+        safe = solution.velocity if solution is not None else preferred.copy()
 
         delta = float(np.linalg.norm(safe - preferred))
         self.avoidance_total_ticks += 1
@@ -459,9 +603,15 @@ class PhasedOrbitsMission(OffboardController):
             msg = AvoidanceDecision()
             msg.stamp = self.get_clock().now().to_msg()
             msg.vehicle_id = self.index
+            msg.controller = AvoidanceDecision.CONTROLLER_ORCA
             msg.nominal_velocity_enu_mps = [float(v) for v in preferred]
             msg.safe_velocity_enu_mps = [float(v) for v in safe]
             msg.estimator_usable = bool(peers)
+            msg.solution_feasible = solution is None or solution.feasible
+            msg.active_constraints = (
+                0 if solution is None else min(255, solution.active_constraints))
+            msg.constraint_slack = (
+                0.0 if solution is None else -float(solution.max_violation))
             msg.range_alert = range_alert
             msg.limiting_peer_id = limiting_peer
             msg.limiting_range_m = limiting_range
@@ -471,6 +621,138 @@ class PhasedOrbitsMission(OffboardController):
             msg.d_cpa_m = d_cpa
             self.avoidance_pub.publish(msg)
         return safe
+
+    def _scheduled_phase(self, index, orbit_t):
+        phase = (
+            self.phase0 + self.phase_step * index
+            if self.phases is None else self.phases[index]
+        )
+        modulation = self.mod_amps[index] * (
+            math.sin(self.omega * orbit_t + self.mod_phases[index])
+            - math.sin(self.mod_phases[index]))
+        return self.omega * orbit_t + phase + modulation
+
+    def _scheduled_rate(self, index, orbit_t):
+        return self.omega * (
+            1.0 + self.mod_amps[index]
+            * math.cos(self.omega * orbit_t + self.mod_phases[index]))
+
+    def _phase_yaw(self, phase):
+        if self.yaw_mode == "hold":
+            return self._mission_yaw(0.0)
+        if self.yaw_mode == "tangent":
+            return wrap_pi(phase + math.pi / 2.0)
+        return wrap_pi(phase + math.pi)
+
+    def _phase_guard_setpoint(self, orbit_t):
+        now_us = self._now_us()
+        desired_phase = self._scheduled_phase(self.index, orbit_t)
+        nominal_rate = self._scheduled_rate(self.index, orbit_t)
+        if self._phase_cmd is None:
+            self._phase_cmd = desired_phase
+            self._phase_cmd_us = now_us
+            self._phase_offset = 0.0
+
+        own_position = None
+        own_radial = None
+        own_phase = self._actual_phase()
+        if own_phase is not None:
+            own_position = np.asarray(self._world_xy(), float)
+            center = np.asarray(self._anchor_world_xy(), float) + np.asarray(self.center)
+            own_radial = own_position - center
+
+        peer_positions = []
+        peer_velocities = []
+        required = UwbState.VALID_POSITION | UwbState.VALID_VELOCITY
+        for peer_id, state in sorted(self.peer_state.items()):
+            fresh = (
+                now_us - self.peer_state_us.get(peer_id, 0)
+                <= self.peer_state_timeout_us)
+            if fresh and (int(state.validity) & required) == required:
+                peer_positions.append(state.position_enu_m[:2])
+                peer_velocities.append(state.velocity_enu_mps[:2])
+
+        solution = None
+        rate = nominal_rate
+        if self.phase_guard_enabled and own_position is not None and peer_positions:
+            solution = phase_guard_rate(
+                own_position,
+                own_radial,
+                nominal_rate,
+                peer_positions,
+                peer_velocities,
+                protected_distance_m=self.phase_protected_separation,
+                gamma=self.phase_barrier_gamma,
+                min_rate_rad_s=self.phase_min_rate,
+                max_rate_rad_s=self.phase_max_rate,
+            )
+            rate = solution.rate
+            if (
+                not solution.feasible
+                and now_us - self._phase_last_infeasible_us >= 1_000_000
+            ):
+                self._phase_last_infeasible_us = now_us
+                self.get_logger().warn(
+                    f"phase guard has no feasible own-rate interval; "
+                    f"minimum slack={solution.min_slack:.3f}"
+                )
+
+        self._phase_rate_cmd = float(rate)
+        dt = (now_us - self._phase_cmd_us) * 1e-6
+        if 0.0 < dt <= 0.25:
+            self._phase_offset += (
+                self._phase_rate_cmd - nominal_rate
+                - self.phase_tracking_gain * self._phase_offset
+            ) * dt
+        elif dt > 0.25:
+            self._phase_offset = 0.0
+        if (
+            (solution is None or solution.active_constraints == 0)
+            and abs(self._phase_offset) <= self.phase_error_deadband
+        ):
+            self._phase_offset = 0.0
+        self._phase_cmd = desired_phase + self._phase_offset
+        self._phase_cmd_us = now_us
+        self._phase_solution = solution
+        self.avoidance_mode = MODE_PHASE
+
+        ce, cn = self.center
+        phase = self._phase_cmd
+        position = np.array([
+            ce + self.radius * math.cos(phase),
+            cn + self.radius * math.sin(phase),
+            self._altitude_up(),
+        ])
+        self._publish_phase_decision(orbit_t, rate, solution)
+        return position, self._phase_yaw(phase)
+
+    def _publish_phase_decision(self, orbit_t, rate, solution):
+        if self.avoidance_pub is None:
+            return
+        phase = self._phase_cmd
+        nominal_rate = self._scheduled_rate(self.index, orbit_t)
+        nominal = self.radius * nominal_rate * np.array([
+            -math.sin(phase), math.cos(phase)])
+        safe = self.radius * float(rate) * np.array([
+            -math.sin(phase), math.cos(phase)])
+        msg = AvoidanceDecision()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.vehicle_id = self.index
+        msg.controller = AvoidanceDecision.CONTROLLER_PHASE_GUARD
+        msg.nominal_velocity_enu_mps = [float(value) for value in nominal]
+        msg.safe_velocity_enu_mps = [float(value) for value in safe]
+        msg.estimator_usable = solution is not None
+        msg.solution_feasible = solution is None or solution.feasible
+        msg.active_constraints = (
+            0 if solution is None else min(255, solution.active_constraints))
+        msg.constraint_slack = 0.0 if solution is None else float(solution.min_slack)
+        msg.limiting_peer_id = 255
+        msg.limiting_range_m = math.inf
+        msg.limiting_closing_speed_mps = 0.0
+        msg.limiting_effective_radius_m = self.phase_protected_separation
+        msg.t_cpa_s = math.nan
+        msg.d_cpa_m = math.nan
+        self.avoidance_pub.publish(msg)
 
     def on_link_acquired(self):
         if not self.set_origin_on_link:
@@ -486,6 +768,8 @@ class PhasedOrbitsMission(OffboardController):
         # so spool-up/takeoff disturbances are corrected instead of re-latched.
         hold_yaw_ned = self._launch_yaw if self._launch_yaw_latched else self.yaw
         self._hold_yaw_enu = wrap_pi(math.pi / 2.0 - hold_yaw_ned)
+        if self.line_trim_enabled and self.index > 0:
+            self.avoidance_mode = MODE_DECONFLICT
         if self.orbit_auto_start and self._orbit_gate_us == 0:  # single-drone smoke test
             self._orbit_gate_us = self._now_us()
         self.get_logger().info(
@@ -548,73 +832,9 @@ class PhasedOrbitsMission(OffboardController):
         return dict(
             spacing=0.0, downrange=self.center[1], base=(self.center[0], 0.0),
             altitude=self._altitude_up(), phase_step=self.phase_step, phase0=self.phase0,
+            phases=self.phases,
             yaw_mode=yaw_mode, fixed_yaw=self._mission_yaw(0.0),
         )
-
-    @staticmethod
-    def _bearing_resolved(estimate):
-        return (
-            int(estimate.status) == STATUS_TRACKING
-            or (
-                not bool(estimate.alternate_valid)
-                and float(estimate.observability) >= 0.10
-                and all(math.isfinite(v) for v in estimate.position_enu_m)
-            )
-        )
-
-    def _all_peer_bearings_resolved(self):
-        return (
-            len(self.relative_state) >= len(self.peer_namespaces)
-            and all(
-                self._bearing_resolved(estimate)
-                for estimate in self.relative_state.values()
-            )
-        )
-
-    def _localization_setpoint(self, yaw_enu):
-        """Run bounded horizontal excitation and return to the launch point.
-
-        Staging cannot safely create traffic while any peer is still only a
-        scalar range.  Repeat the same small cycle until every peer has a usable
-        bearing; completing only at a cycle boundary keeps the staging seam
-        position-continuous.
-        """
-        now = self._now_us()
-        if self._localization_start_us == 0:
-            self._localization_start_us = now
-            self.get_logger().info(
-                f"resolving peer bearings before staging: "
-                f"radius={LOCALIZATION_RADIUS_M:.2f}m "
-                f"cycle={LOCALIZATION_CYCLE_S:.1f}s")
-
-        elapsed = max(0.0, (now - self._localization_start_us) * 1e-6)
-        cycle = int(elapsed / LOCALIZATION_CYCLE_S)
-        if cycle > self._localization_cycle:
-            self._localization_cycle = cycle
-            resolved = sum(
-                self._bearing_resolved(estimate)
-                for estimate in self.relative_state.values()
-            )
-            if self._all_peer_bearings_resolved():
-                self._localization_complete = True
-                self._stage_start_us = 0
-                self.get_logger().info(
-                    f"peer bearing sides resolved "
-                    f"({resolved}/{len(self.peer_namespaces)}); "
-                    "starting staging")
-                return self._hold(0.0, 0.0, yaw_enu)
-            self.get_logger().warn(
-                f"peer bearings incomplete ({resolved}/{len(self.peer_namespaces)}); "
-                "repeating localization cycle")
-
-        angle = 2.0 * math.pi * (
-            (elapsed % LOCALIZATION_CYCLE_S) / LOCALIZATION_CYCLE_S)
-        identity_phase = 2.0 * math.pi * self.index / max(1, self.count)
-        east = LOCALIZATION_RADIUS_M * (
-            math.sin(angle + identity_phase) - math.sin(identity_phase))
-        north = LOCALIZATION_RADIUS_M * (
-            math.cos(angle + identity_phase) - math.cos(identity_phase))
-        return self._hold(east, north, yaw_enu)
 
     def _staging_setpoint(self, yaw_enu):
         """Converge from a random spawn onto this drone's fixed line slot.
@@ -624,6 +844,9 @@ class PhasedOrbitsMission(OffboardController):
         choreography anchor and the normal center transit starts without a
         setpoint jump. Active ORCA owns the horizontal velocity around peers.
         """
+        if self.line_trim_enabled:
+            return self._line_trim_setpoint(yaw_enu)
+
         now = self._now_us()
         if self._stage_start_us == 0:
             self._stage_start_us = now
@@ -647,7 +870,12 @@ class PhasedOrbitsMission(OffboardController):
         if u >= 1.0 and error <= self.staging_acceptance:
             # The old anchor + delta and the new anchor + zero are identical, so
             # switching frames here is position-continuous.
+            old_anchor = self._anchor
             self._anchor = target_local
+            self._home_offset = (
+                old_anchor[0] - self._anchor[0],
+                old_anchor[1] - self._anchor[1],
+            )
             self._staging_complete = True
             self._transit_us = now
             self.get_logger().info(
@@ -656,6 +884,100 @@ class PhasedOrbitsMission(OffboardController):
             return self._hold(0.0, 0.0, yaw_enu)
 
         return self._hold(delta[0] * smooth, delta[1] * smooth, yaw_enu)
+
+    def _line_trim_setpoint(self, yaw_enu):
+        """Build the 3 m hover line in ID order from predecessor UWB range."""
+        now = self._now_us()
+        if self._stage_start_us == 0:
+            self._stage_start_us = now
+            self._line_trim_us = now
+            self.get_logger().info(
+                f"line trim ready: predecessor={self.index - 1 if self.index else 'anchor'} "
+                f"target={self.line_spacing:.2f}m"
+            )
+
+        if not self._line_trim_ready and self.index == 0:
+            self._line_trim_ready = True
+            self.avoidance_mode = MODE_NOMINAL
+            self.get_logger().info("line anchor holding; releasing drone 1")
+
+        if not self._line_trim_ready and self.index > 0:
+            predecessor = self.index - 1
+            peer = self.peer_state.get(predecessor)
+            estimate = self.relative_state.get(predecessor)
+            peer_fresh = (
+                peer is not None
+                and now - self.peer_state_us.get(predecessor, 0) <= self.peer_state_timeout_us
+            )
+            range_fresh = (
+                estimate is not None
+                and now - self.relative_state_us.get(predecessor, 0)
+                <= self.peer_state_timeout_us
+            )
+            predecessor_ready = peer_fresh and int(peer.mode) == MODE_NOMINAL
+            range_m = float(estimate.range_m) if range_fresh else math.nan
+            can_trim = (
+                now - self._stage_start_us >= 1_000_000
+                and predecessor_ready
+                and math.isfinite(range_m)
+                and range_m > 0.0
+            )
+
+            dt = (now - self._line_trim_us) * 1e-6
+            self._line_trim_us = now
+            if can_trim and 0.0 < dt <= 0.25:
+                error = self.line_spacing - range_m
+                speed = float(np.clip(
+                    0.8 * error, -self.line_trim_speed, self.line_trim_speed))
+                self._line_trim_offset += speed * dt
+                line_speed = float(
+                    np.array([self.vy, self.vx]) @ self.line_direction)
+                settled = (
+                    abs(error) <= self.line_trim_tolerance
+                    and abs(line_speed) <= 0.25
+                )
+                if settled:
+                    self._line_trim_settle_us = self._line_trim_settle_us or now
+                else:
+                    self._line_trim_settle_us = 0
+                dwell = (
+                    (now - self._line_trim_settle_us) * 1e-6
+                    if self._line_trim_settle_us else 0.0
+                )
+                if dwell >= self.line_trim_settle_s:
+                    old_anchor = self._anchor
+                    self._anchor = (self.y, self.x)
+                    self._home_offset = (
+                        old_anchor[0] - self._anchor[0],
+                        old_anchor[1] - self._anchor[1],
+                    )
+                    self._line_trim_ready = True
+                    self.avoidance_mode = MODE_NOMINAL
+                    self.get_logger().info(
+                        f"line gap settled at {range_m:.2f}m; "
+                        f"releasing drone {self.index + 1}"
+                        if self.index + 1 < self.count
+                        else f"line gap settled at {range_m:.2f}m; formation ready"
+                    )
+                    return self._hold(0.0, 0.0, yaw_enu)
+
+            offset = self.line_direction * self._line_trim_offset
+            return self._hold(float(offset[0]), float(offset[1]), yaw_enu)
+
+        last_ready = self.index == self.count - 1
+        if not last_ready:
+            last = self.peer_state.get(self.count - 1)
+            last_ready = (
+                last is not None
+                and now - self.peer_state_us.get(self.count - 1, 0)
+                <= self.peer_state_timeout_us
+                and int(last.mode) == MODE_NOMINAL
+            )
+        if last_ready:
+            self._staging_complete = True
+            self._transit_us = now
+            self.get_logger().info("UWB line complete; transiting to orbit center")
+        return self._hold(0.0, 0.0, yaw_enu)
 
     def _pre_orbit_setpoint(self):
         """Takeoff -> hold-at-center, the staged ready state (pre begin_orbit).
@@ -680,23 +1002,16 @@ class PhasedOrbitsMission(OffboardController):
             if alt_ok and yaw_ok:
                 self._climbed = True
                 now = self._now_us()
-                if self._localization_complete:
-                    if self.staging_enabled:
-                        self._stage_start_us = 0
-                    else:
-                        self._transit_us = now
+                if self.staging_enabled:
+                    self._stage_start_us = 0
+                else:
+                    self._transit_us = now
                 ae, an = self._anchor
-                next_phase = (
-                    "localizing" if not self._localization_complete
-                    else "staging" if self.staging_enabled
-                    else "transiting")
+                next_phase = "staging" if self.staging_enabled else "transiting"
                 self.get_logger().info(
                     f"climbed + yawed to center bearing, {next_phase}. "
                     f"frame anchor ENU=({ae:+.2f},{an:+.2f})")
             return self._hold(0.0, 0.0, face_center)
-
-        if not self._localization_complete:
-            return self._localization_setpoint(face_center)
 
         if not self._staging_complete:
             return self._staging_setpoint(face_center)
@@ -763,7 +1078,12 @@ class PhasedOrbitsMission(OffboardController):
         pos_enu, yaw = result
         ae, an = self._anchor  # whole choreography rides on the latched frame
         pos_enu = (pos_enu[0] + ae, pos_enu[1] + an, pos_enu[2])
-        if self.peer_namespaces:
+        random_staging = (
+            self.staging_enabled
+            and not self.line_trim_enabled
+            and not self._staging_complete
+        )
+        if self.peer_namespaces and self._climbed and random_staging:
             safe_enu = self._avoidance_velocity(pos_enu[:2])
             # Mixed-axis Offboard: ORCA owns horizontal velocity while PX4 keeps
             # the mission altitude as a position target. NaN disables horizontal
@@ -797,12 +1117,22 @@ class PhasedOrbitsMission(OffboardController):
             if not self._orbit_logged:
                 self._orbit_logged = True
                 self.get_logger().info("orbit begins (locked phased orbit).")
-            pos, yaw = phased_orbit_setpoint(
-                orbit_t, self.index, self.count, self.radius, self.omega,
-                mod_amp=self.mod_amp, mod_phase=self.mod_phase, **self._orbit_kw())
-            return pos, float(yaw)
+            return self._phase_guard_setpoint(orbit_t)
 
         rt = orbit_t - self.orbit_duration
+        self.avoidance_mode = MODE_NOMINAL
+        if self._peel_phase is None:
+            self._peel_phase = (
+                self._phase_cmd
+                if self._phase_cmd is not None
+                else self._scheduled_phase(self.index, self.orbit_duration)
+            )
+        peel_kw = self._orbit_kw()
+        if self.phases is None:
+            peel_kw["phase0"] = self._peel_phase - self.phase_step * self.index
+        else:
+            shift = self._peel_phase - self.phases[self.index]
+            peel_kw["phases"] = [phase + shift for phase in self.phases]
         if rt < self.return_duration:
             if not self._return_logged:
                 self._return_logged = True
@@ -811,7 +1141,7 @@ class PhasedOrbitsMission(OffboardController):
                 rt, self.index, self.count, self.radius, self.omega,
                 peel_order=self.peel_order, lead_in=self.peel_lead_in_s,
                 stagger=self.peel_stagger_s, peel_duration=self.peel_duration_s,
-                spin=self.peel_spin, **self._orbit_kw())
+                spin=self.peel_spin, **peel_kw)
             return pos, float(yaw)
 
         # Peel-off ends at the orbit center. Reverse the pre-orbit center transit
@@ -822,7 +1152,7 @@ class PhasedOrbitsMission(OffboardController):
             self.return_duration, self.index, self.count, self.radius, self.omega,
             peel_order=self.peel_order, lead_in=self.peel_lead_in_s,
             stagger=self.peel_stagger_s, peel_duration=self.peel_duration_s,
-            spin=self.peel_spin, **self._orbit_kw())
+            spin=self.peel_spin, **peel_kw)
         return self._home_setpoint((ce, cn, self._altitude_up()), final_yaw, home_t)
 
     def _home_setpoint(self, from_enu, yaw, home_t):
@@ -837,9 +1167,10 @@ class PhasedOrbitsMission(OffboardController):
         s = u * u * (3.0 - 2.0 * u)
         fe, fn, fz = from_enu
         alt = self._altitude_up()
+        he, hn = self._home_offset
         anchor_setpoint = (
-            fe * (1.0 - s),
-            fn * (1.0 - s),
+            fe * (1.0 - s) + he * s,
+            fn * (1.0 - s) + hn * s,
             fz + (alt - fz) * s,
         )
 
@@ -848,7 +1179,7 @@ class PhasedOrbitsMission(OffboardController):
             return anchor_setpoint, float(yaw)
 
         ae, an = self._anchor
-        xy_error = math.hypot(self.x - an, self.y - ae)
+        xy_error = math.hypot(self.x - (an + hn), self.y - (ae + he))
         vxy = math.hypot(self.vx, self.vy)
         settled = (
             math.isfinite(xy_error)

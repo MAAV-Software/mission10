@@ -21,11 +21,12 @@
     orbit_speed_mps: 2.0
     phase_step_deg: 90.0
     phase0_deg: -180.0
-    # Per-drone orbit speed modulation (see phased_orbit_setpoint). Offline-
-    # optimized to lift the orbit min sep above the constant-speed floor on the
-    # same circles. Zero amp = steady orbit. Both lists must be length drone_count.
-    orbit_mod_amp: [-0.50, 0.43, 0.42, -0.29]
-    orbit_mod_phase_deg: [358.0, 204.0, 72.0, 254.0]
+    # Fixed non-uniform phases give 3.83 m nominal orbit separation. Their
+    # common rotation and peel order maximize the insertion/exit seams for the
+    # north-south M-Air launch line.
+    orbit_phase_deg: [107.0, 11.21, 134.34, 38.55]
+    orbit_mod_amp: [0.0, 0.0, 0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0, 0.0, 0.0]
     insertion_spin_deg: 235.0
     to_center_time_s: 3.0
     # Random-spawn SITL inserts a world-frame convergence onto the fixed 3 m
@@ -41,7 +42,7 @@
     peel_stagger_s: 3.0
     peel_duration_s: 4.0
     peel_spin_deg: 90.0
-    peel_order: ""
+    peel_order: "2,0,1,3"
     orbit_auto_start: false
     yaw_mode: tangent
     # Active horizontal deconfliction: the protected footprint is inflated per
@@ -50,6 +51,15 @@
     orca_response_time_s: 0.6
     orca_horizon_s: 5.0
     orca_max_speed_mps: 3.0
+    # ORCA is only for random-spawn staging. The fixed 3 m formation keeps its
+    # deterministic position path. On the circle, adjust positive angular rates.
+    phase_guard_enabled: true
+    phase_protected_separation_m: 3.0
+    phase_barrier_gamma: 1.0
+    phase_tracking_gain: 0.8
+    phase_error_deadband_deg: 3.0
+    phase_min_rate_scale: 0.4
+    phase_max_rate_scale: 1.5
     # EKF global origin (M-Air pad); set once at link-up so
     # AUTO.RTL/Land and failsafes work with the local-only EV estimate. The launch
     # overrides this per drone with its own spawn LLA (home_gps + pose offset) so

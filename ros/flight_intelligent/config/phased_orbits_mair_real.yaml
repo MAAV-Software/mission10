@@ -60,6 +60,13 @@
     orca_response_time_s: 0.6
     orca_horizon_s: 5.0
     orca_max_speed_mps: 3.0
+    phase_guard_enabled: true
+    phase_protected_separation_m: 3.0
+    phase_barrier_gamma: 1.0
+    phase_tracking_gain: 0.8
+    phase_error_deadband_deg: 3.0
+    phase_min_rate_scale: 0.4
+    phase_max_rate_scale: 1.5
     set_global_origin_on_link: false   # REAL: GPS provides the EKF origin
     # Ignored while set_global_origin_on_link=false; kept for documentation (the
     # M-Air pad) and as the fallback if ever flown on an EV/GPS-denied estimate.

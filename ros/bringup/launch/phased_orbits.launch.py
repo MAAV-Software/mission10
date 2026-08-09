@@ -47,18 +47,10 @@ def _launch_file(package: str, *parts: str) -> str:
     return os.path.join(get_package_share_directory(package), "launch", *parts)
 
 
-def _topic_gate(name, *, ros_topics=(), gz_topics=(), timeout_s=120.0):
-    """ExecuteProcess that blocks until all listed topics exist, then exits 0
-    (exit 1 on timeout). Replaces a fixed startup sleep: it polls `ros2 topic
-    list` / `gz topic -l` once a second and releases the dependent nodes the
-    instant the world is ready, so a slow PX4 rebuild just waits longer instead
-    of racing a fixed timer. The poll runs in a launch subprocess, so its own
-    `sleep` is fine."""
+def _topic_gate(name, *, gz_topics=(), timeout_s=120.0):
+    """Wait for Gazebo topics before starting the ROS consumers."""
     tries = max(1, int(timeout_s))
     blocks = []
-    if ros_topics:
-        greps = " && ".join(f"grep -qxF '{t}' <<<\"$R\"" for t in ros_topics)
-        blocks.append(f'R="$(ros2 topic list 2>/dev/null)" && {greps}')
     if gz_topics:
         greps = " && ".join(f"grep -qxF '{t}' <<<\"$G\"" for t in gz_topics)
         blocks.append(f'G="$(gz topic -l 2>/dev/null)" && {greps}')
@@ -103,6 +95,8 @@ def _setup(context, *args, **kwargs):
     boot_timeout = float(LaunchConfiguration("boot_timeout_s").perform(context))
     random_spawn = LaunchConfiguration("random_spawn").perform(context).lower() in (
         "1", "true", "yes", "on")
+    rough_line_spawn = LaunchConfiguration("rough_line_spawn").perform(context).lower() in (
+        "1", "true", "yes", "on")
     spawn_seed_raw = LaunchConfiguration("spawn_seed").perform(context).strip()
     spawn_seed = int(spawn_seed_raw) if spawn_seed_raw else None
     effective_fleet = LaunchConfiguration("effective_fleet").perform(context).strip()
@@ -117,7 +111,12 @@ def _setup(context, *args, **kwargs):
         mission_config = os.path.join(
             get_package_share_directory("flight_intelligent"), "config", "phased_orbits.yaml")
 
-    fleet = load_fleet(config_file, random_spawn=random_spawn, spawn_seed=spawn_seed)
+    fleet = load_fleet(
+        config_file,
+        random_spawn=random_spawn,
+        rough_line_spawn=rough_line_spawn,
+        spawn_seed=spawn_seed,
+    )
     world = world_override or fleet.get("world", "default")
     vehicles = fleet["vehicles"]
     home_gps = fleet.get("home_gps", {})
@@ -132,7 +131,10 @@ def _setup(context, *args, **kwargs):
             "fleet_config": config_file,
             "world": world,
             "random_spawn": str(random_spawn).lower(),
-            "spawn_seed": str(fleet.get("_random_spawn", {}).get("seed", "")),
+            "rough_line_spawn": str(rough_line_spawn).lower(),
+            "spawn_seed": str(
+                fleet.get("_random_spawn", fleet.get("_rough_line_spawn", {})).get("seed", "")
+            ),
         }.items(),
     )
 
@@ -187,9 +189,18 @@ def _setup(context, *args, **kwargs):
                 "drone_count": num,
                 "spawn_e_m": east,
                 "spawn_n_m": north,
+                "shared_slot_e_m": east,
+                "shared_slot_n_m": north,
                 "stage_e_m": stage_east,
                 "stage_n_m": stage_north,
-                "staging_enabled": random_spawn,
+                "staging_enabled": random_spawn or rough_line_spawn,
+                "line_trim_enabled": rough_line_spawn,
+                "line_direction_e_m": (
+                    0.0 if i == 0 else stage_east - stage_xy[i - 1][0]
+                ),
+                "line_direction_n_m": (
+                    0.0 if i == 0 else stage_north - stage_xy[i - 1][1]
+                ),
                 "peer_namespaces": peers if peers else [""],
             })
         mission_nodes.append(Node(
@@ -239,19 +250,12 @@ def _setup(context, *args, **kwargs):
             }],
         ))
 
-    # Readiness gates instead of fixed sleeps. EV bridges wait on each model's gz
-    # odometry topic (model spawned); missions wait on every EV bridge's odom
-    # output (world up + EV flowing), then self-gate on PX4 telemetry in
-    # WAIT_LINK. mission_gate's topics only appear once the EV nodes run, so it
-    # naturally sequences after them.
+    # Wait for the Gazebo world, then start the consumers. The mission nodes
+    # already wait for PX4 telemetry in WAIT_LINK; an extra `ros2 topic list`
+    # gate is both redundant and unreliable under Cyclone DDS on the sim host.
     ev_gate = _topic_gate(
         "ev_gate",
         gz_topics=[f"/world/{world}/dynamic_pose/info"],
-        timeout_s=boot_timeout)
-    mission_gate = _topic_gate(
-        "mission_gate",
-        ros_topics=[f"/{vehicles[i].get('namespace', f'px4_{i}')}/ground_truth/odometry"
-                    for i in range(num)],
         timeout_s=boot_timeout)
 
     # Runtime consumers such as sep_monitor must use the randomized poses rather
@@ -268,15 +272,16 @@ def _setup(context, *args, **kwargs):
     mode_summary = (
         f"random spawn seed={fleet['_random_spawn']['seed']}"
         if random_spawn else "fixed spawn")
+    if rough_line_spawn:
+        mode_summary = f"rough line seed={fleet['_rough_line_spawn']['seed']}"
 
     return [
         LogInfo(msg=f"{mode_summary}: {spawn_summary}"),
         sitl,
         ev_gate,
-        RegisterEventHandler(OnProcessExit(target_action=ev_gate, on_exit=_on_ready("ev_gate", ev_nodes))),
-        mission_gate,
         RegisterEventHandler(OnProcessExit(
-            target_action=mission_gate, on_exit=_on_ready("mission_gate", mission_nodes))),
+            target_action=ev_gate,
+            on_exit=_on_ready("ev_gate", [*ev_nodes, *mission_nodes]))),
     ]
 
 
@@ -291,6 +296,7 @@ def generate_launch_description():
         DeclareLaunchArgument("world", default_value="",
                               description="gz world override (e.g. 'windy'); empty uses fleet.yaml."),
         DeclareLaunchArgument("random_spawn", default_value="false"),
+        DeclareLaunchArgument("rough_line_spawn", default_value="false"),
         DeclareLaunchArgument("spawn_seed", default_value=""),
         DeclareLaunchArgument("effective_fleet", default_value="/tmp/maav_sitl_effective_fleet.yaml"),
         DeclareLaunchArgument("uwb_far_rate_hz", default_value="5.0"),

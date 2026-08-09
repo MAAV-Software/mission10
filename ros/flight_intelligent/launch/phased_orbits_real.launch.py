@@ -78,6 +78,8 @@ def _setup(context, *args, **kwargs):
     index = _select_vehicle(selector, vehicles)
 
     namespace = namespaces[index]
+    pose = [float(value) for value in vehicles[index].get(
+        "pose", "0,0,0,0,0,0").split(",")]
     peers = [
         value for peer_index, value in enumerate(namespaces) if peer_index != index
     ]
@@ -108,6 +110,8 @@ def _setup(context, *args, **kwargs):
                 # the equivalent SITL world layout and are not local setpoints.
                 "spawn_e_m": 0.0,
                 "spawn_n_m": 0.0,
+                "shared_slot_e_m": pose[0],
+                "shared_slot_n_m": pose[1],
                 "staging_enabled": False,
                 "wait_for_start": True,
             },
