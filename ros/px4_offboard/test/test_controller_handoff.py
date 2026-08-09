@@ -33,10 +33,15 @@ class TestControllerHandoff:
 
     def test_launch_reference_holds_operator_heading(self):
         self.node._launch_xy = (1.0, 2.0)
+        self.node.x, self.node.y = self.node._launch_xy
         self.node.z = -0.28
         self.node.yaw = 0.42
+        self.node._xy_valid = True
         self.node._z_valid = True
         self.node._attitude_seen = True
+        self.node._last_local_reset_us = (
+            self.node._now_us() - int((self.node.launch_stability_s + 0.1) * 1e6)
+        )
 
         assert self.node._latch_launch_reference()
         self.node.publish_position_setpoint = Mock()
@@ -45,6 +50,19 @@ class TestControllerHandoff:
         self.node.publish_position_setpoint.assert_called_once_with(
             1.0, 2.0, -self.node.takeoff_altitude_m, 0.42
         )
+
+    def test_launch_reference_rejects_transient_map_projection_coordinates(self):
+        self.node.x = 701989.0
+        self.node.y = -9464699.0
+        self.node.z = 0.0
+        self.node._xy_valid = True
+        self.node._z_valid = True
+        self.node._attitude_seen = True
+        self.node._last_local_reset_us = (
+            self.node._now_us() - int((self.node.launch_stability_s + 0.1) * 1e6)
+        )
+
+        assert not self.node._latch_launch_reference()
 
     def test_rejected_land_keeps_offboard_hold_until_auto_land(self):
         self.node.state = LAND_REQUESTED
@@ -137,6 +155,10 @@ class TestControllerHandoff:
         # The whole point of the split: /end_mission must not reach _begin_landing.
         self.node.state = ACTIVE
         self.node.arm_state = VehicleStatus.ARMING_STATE_ARMED
+        self.node.nav_state = VehicleStatus.NAVIGATION_STATE_OFFBOARD
+        self.node._xy_valid = True
+        self.node._v_xy_valid = True
+        self.node._z_valid = True
         self.node._publish_heartbeat = Mock()
         self.node._publish_command = Mock()
         self.node.compute_setpoint = Mock(return_value=None)
