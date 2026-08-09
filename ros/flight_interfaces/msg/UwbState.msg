@@ -4,6 +4,13 @@
 builtin_interfaces/Time stamp
 uint32 sequence
 uint8 vehicle_id
+uint16 frame_epoch
+uint16 VALID_PHASE=1
+uint16 VALID_YAW=2
+uint16 VALID_POSITION=4
+uint16 VALID_VELOCITY=8
+uint16 HOST_STALE=32768
+uint16 validity
 float32 phase_rad
 float32 phase_rate_rad_s
 float32 yaw_rad

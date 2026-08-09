@@ -14,7 +14,12 @@ from pathlib import Path
 
 from .config import GenConfig
 from .manifest import scene_manifest
-from .scene import build_scene, scene_labels
+from .scene import (
+    build_scene,
+    image_stem,
+    scene_labels,
+    selected_station_indices,
+)
 
 
 def parse_range(spec: str) -> range:
@@ -27,12 +32,15 @@ def parse_range(spec: str) -> range:
 def write_scene(cfg: GenConfig, index: int, out: Path) -> dict:
     scene = build_scene(cfg, index)
     labels = scene_labels(cfg, scene)
+    station_indices = selected_station_indices(cfg, scene, labels)
     (out / "labels").mkdir(parents=True, exist_ok=True)
-    for stem, boxes in labels.items():
+    for k in station_indices:
+        stem = image_stem(cfg, scene, k)
+        boxes = labels[stem]
         (out / "labels" / f"{stem}.txt").write_text(
             "".join(b.line() + "\n" for b in boxes)
         )
-    man = scene_manifest(cfg, scene, labels)
+    man = scene_manifest(cfg, scene, labels, station_indices)
     (out / f"{cfg.seed}_s{scene.index:04d}.manifest.json").write_text(
         json.dumps(man, indent=2)
     )

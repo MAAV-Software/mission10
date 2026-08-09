@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Tuple
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Mapping, Tuple
 
 from mission_engine.core.config import CameraModel
 
@@ -11,7 +11,7 @@ from mission_engine.core.config import CameraModel
 @dataclass(frozen=True)
 class GenConfig:
     seed: str = "m10"  # dataset identity; per-scene rngs derive from it
-    n_scenes: int = 50
+    n_scenes: int = 300
 
     camera: CameraModel = field(default_factory=CameraModel)
 
@@ -21,7 +21,7 @@ class GenConfig:
 
     # mines (PFM-1 replica footprint)
     mines_min: int = 4
-    mines_max: int = 12
+    mines_max: int = 20
     mine_dims_m: Tuple[float, float, float] = (0.12, 0.061, 0.020)
     min_separation_m: float = 1.0
     edge_margin_m: float = 0.5
@@ -29,10 +29,14 @@ class GenConfig:
     # camera stations (serpentine, lanes centered across the east extent)
     n_lanes: int = 3
     lane_spacing_m: float = 6.0
-    station_interval_m: float = 1.0
+    station_interval_m: float = 2.0
+    # Render every analytically positive station and a small, stable sample
+    # of negatives. Post-render occlusion may turn positives into additional
+    # hard negatives, which are deliberately retained.
+    negative_frame_keep: float = 0.05
     # sampled per scene; the survey cruises anywhere from near-ground dips to
     # max mapping altitude, so train across the full envelope
-    alt_range_m: Tuple[float, float] = (1.0, 8.0)
+    alt_range_m: Tuple[float, float] = (1.0, 7.0)
     yaw_jitter_deg: float = 3.0
     # camera tilt from nadir, sampled per scene: the physical CM2 mount is
     # nadir; the range covers in-flight body pitch plus viewpoint diversity
@@ -61,16 +65,41 @@ class GenConfig:
     p_tag_none: float = 0.01
     tag_up_prob: float = 0.5  # guess: real resting orientation may be biased
 
+    # Mine-filament domain randomization. Each mine independently picks a
+    # bounded filament anchor, then varies around it. Co-locating different
+    # colors under identical scene conditions discourages scene-level color
+    # shortcuts while spanning the observed competition and replica range.
+    mine_color_names: Tuple[str, ...] = (
+        "official_sage_gray",
+        "legacy_pale_green",
+        "team_lime",
+        "green",
+        "muddy_olive",
+    )
+    mine_color_palette_srgb: Tuple[Tuple[float, float, float], ...] = (
+        (0x8A / 255, 0xA0 / 255, 0x98 / 255),  # #8AA098
+        (0xC8 / 255, 0xCC / 255, 0xB5 / 255),  # #C8CCB5
+        (0x44 / 255, 0xBE / 255, 0x66 / 255),  # #44BE66
+        (0x4F / 255, 0x7D / 255, 0x36 / 255),  # #4F7D36
+        (0x55 / 255, 0x57 / 255, 0x37 / 255),  # #555737
+    )
+    mine_color_weights: Tuple[float, ...] = (0.30, 0.10, 0.10, 0.25, 0.25)
+    mine_color_hue_jitter_deg: float = 6.0
+    mine_color_saturation_scale: Tuple[float, float] = (0.50, 1.20)
+    mine_color_value_scale: Tuple[float, float] = (0.80, 1.20)
+
+    # Grass-primary scenes are usually sparse, with rare deliberately hard
+    # dense/tall scenes. A balanced deterministic schedule realizes this
+    # fraction without small-shard Bernoulli variance. These are absolute GG
+    # Grass Painter density inputs, sampled by the pure scene model so the
+    # choice is manifest-auditable.
+    grass_dense_prob: float = 0.10
+    grass_sparse_blade_m: Tuple[float, float] = (0.12, 0.35)
+    grass_sparse_density: Tuple[float, float] = (210.0, 600.0)
+    grass_dense_blade_m: Tuple[float, float] = (0.50, 0.55)
+    grass_dense_density: Tuple[float, float] = (1800.0, 2500.0)
+
     # render randomization (consumed by the bpy adapter only)
-    # tallest blade length of the painter layer, sampled per scene: it sets
-    # how much real blade occlusion mine silhouettes get. The managed arena
-    # ground plausibly spans mowed stubble to shin-high August growth at the
-    # edges; the per-area brush-weight noise then varies actual height (and
-    # hue) well below the draw, so short cover appears within tall scenes too
-    grass_blade_m: Tuple[float, float] = (0.05, 0.35)
-    # per-scene multiplier on the strand count: thin patchy cover through
-    # full density, never lush-only
-    grass_density: Tuple[float, float] = (0.35, 1.0)
     sun_elevation_deg: Tuple[float, float] = (25.0, 80.0)
     sun_azimuth_deg: Tuple[float, float] = (0.0, 360.0)
     # clear-sky daylight is sun-dominated (~4:1 over sky fill); the bpy
@@ -85,8 +114,49 @@ class GenConfig:
     # is imperfect, and the positive skew lets some frames run slightly hot
     # (clipped highlights) instead of every frame sitting at the same midtone
     exposure_jitter_ev: Tuple[float, float] = (-0.4, 0.9)
-    mine_hue_jitter: float = 0.05
     render_samples: int = 16
+    eevee_render_samples: int = 8
+    png_compression: int = 15
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "GenConfig":
+        """Rebuild an exact config from a JSON-decoded manifest record."""
+        unknown = set(raw) - {f.name for f in fields(cls)}
+        if unknown:
+            raise ValueError(f"unknown GenConfig fields: {sorted(unknown)}")
+        defaults = cls()
+
+        def coerce(value: Any, exemplar: Any) -> Any:
+            if isinstance(exemplar, tuple):
+                if not isinstance(value, (list, tuple)):
+                    raise ValueError(f"expected sequence like {exemplar!r}")
+                if exemplar and isinstance(exemplar[0], tuple):
+                    return tuple(tuple(item) for item in value)
+                return tuple(value)
+            return value
+
+        values = {}
+        for f in fields(cls):
+            if f.name not in raw:
+                raise ValueError(f"manifest config missing {f.name}")
+            value = raw[f.name]
+            exemplar = getattr(defaults, f.name)
+            if f.name == "camera":
+                if not isinstance(value, Mapping):
+                    raise ValueError("manifest camera config is not an object")
+                value = CameraModel(**value)
+            else:
+                value = coerce(value, exemplar)
+            values[f.name] = value
+        cfg = cls(**values)
+        if asdict(cfg) != dict(raw):
+            # Lists in JSON compare differently to dataclass tuples, so compare
+            # through the JSON-shaped coercion used by manifests.
+            import json
+
+            if json.loads(json.dumps(asdict(cfg))) != dict(raw):
+                raise ValueError("manifest config did not round-trip exactly")
+        return cfg
 
     def __post_init__(self) -> None:
         if self.n_scenes < 1:
@@ -113,17 +183,70 @@ class GenConfig:
             raise ValueError("mixed surfaces require at least two surface_materials")
         # silent-failure guards: a bad probability skews the dataset without
         # raising anywhere downstream
-        for name in ("mixed_surface_prob", "tag_up_prob"):
+        for name in (
+            "mixed_surface_prob",
+            "tag_up_prob",
+            "grass_dense_prob",
+            "negative_frame_keep",
+        ):
             v = getattr(self, name)
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"bad {name} {v}")
         weights = (self.p_tag_both, self.p_tag_one, self.p_tag_none)
         if min(weights) < 0.0 or sum(weights) <= 0.0:
             raise ValueError(f"bad tag layout weights {weights}")
-        if not (0.0 < self.grass_blade_m[0] <= self.grass_blade_m[1]):
-            raise ValueError(f"bad grass_blade_m {self.grass_blade_m}")
-        if not (0.0 < self.grass_density[0] <= self.grass_density[1] <= 1.0):
-            raise ValueError(f"bad grass_density {self.grass_density}")
+        palette_lengths = (
+            len(self.mine_color_names),
+            len(self.mine_color_palette_srgb),
+            len(self.mine_color_weights),
+        )
+        if min(palette_lengths) == 0 or len(set(palette_lengths)) != 1:
+            raise ValueError(f"bad mine color palette lengths {palette_lengths}")
+        if any(
+            not isinstance(name, str) or not name.strip()
+            for name in self.mine_color_names
+        ) or len({name.casefold() for name in self.mine_color_names}) != len(
+            self.mine_color_names
+        ):
+            raise ValueError(
+                f"mine color family names must be non-empty and unique: "
+                f"{self.mine_color_names}"
+            )
+        if (
+            min(self.mine_color_weights) < 0.0
+            or sum(self.mine_color_weights) <= 0.0
+        ):
+            raise ValueError(f"bad mine color weights {self.mine_color_weights}")
+        if any(
+            len(rgb) != 3 or any(channel < 0.0 or channel > 1.0 for channel in rgb)
+            for rgb in self.mine_color_palette_srgb
+        ):
+            raise ValueError(f"bad mine sRGB palette {self.mine_color_palette_srgb}")
+        if self.mine_color_hue_jitter_deg < 0.0:
+            raise ValueError(
+                f"bad mine color hue jitter {self.mine_color_hue_jitter_deg}"
+            )
+        for scale, name in (
+            (self.mine_color_saturation_scale, "mine_color_saturation_scale"),
+            (self.mine_color_value_scale, "mine_color_value_scale"),
+        ):
+            if not (0.0 < scale[0] <= scale[1]):
+                raise ValueError(f"bad {name} {scale}")
+        for values, name in (
+            (self.grass_sparse_blade_m, "grass_sparse_blade_m"),
+            (self.grass_dense_blade_m, "grass_dense_blade_m"),
+            (self.grass_sparse_density, "grass_sparse_density"),
+            (self.grass_dense_density, "grass_dense_density"),
+        ):
+            if not (0.0 < values[0] <= values[1]):
+                raise ValueError(f"bad {name} {values}")
+        if self.render_samples < 1 or self.eevee_render_samples < 1:
+            raise ValueError(
+                "render sample counts must be positive: "
+                f"{self.render_samples}, {self.eevee_render_samples}"
+            )
+        if not 0 <= self.png_compression <= 100:
+            raise ValueError(f"bad png_compression {self.png_compression}")
         if not (0.0 <= self.tilt_range_deg[0] <= self.tilt_range_deg[1]):
             raise ValueError(f"bad tilt_range_deg {self.tilt_range_deg}")
         if self.exposure_jitter_ev[1] < self.exposure_jitter_ev[0]:

@@ -1,0 +1,54 @@
+# Mission sensing configuration for the SVO flow frontend.
+label: "Drone4 CM2 820x616 flow frontend"
+id: maavcm2flow820x6160000000000000
+# Exact 2x scaling of the patched Kalibr rolling-shutter candidate in
+# reference/cyclops_offline/calibration/20260724_drone4_intrinsics/.
+cameras:
+- camera:
+    label: cam0
+    id: maavcm2flowcam000000000000000000
+    # SVO tracks the raw rolling-shutter image. Row timing is handled by the
+    # downstream flow adapter with the measured native-resolution line delay.
+    line-delay-nanoseconds: 0
+    image_height: 616
+    image_width: 820
+    type: pinhole
+    intrinsics:
+      cols: 1
+      rows: 4
+      data: [649.34692597, 649.78164409, 413.85121136, 308.80212924]
+    distortion:
+      type: radial-tangential
+      parameters:
+        cols: 1
+        rows: 4
+        data: [0.15046410, -0.23368367, 0.00000042, -0.00209991]
+  # VO scale and pose are deliberately unused by this experiment.
+  T_B_C:
+    cols: 4
+    rows: 4
+    data: [1.0, 0.0, 0.0, 0.0,
+           0.0, 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0, 0.0,
+           0.0, 0.0, 0.0, 1.0]
+
+imu_params:
+  delay_imu_cam: 0.0
+  max_imu_delta_t: 0.02
+  acc_max: 176.0
+  omega_max: 17.0
+  sigma_omega_c: 0.001
+  sigma_acc_c: 0.01
+  sigma_omega_bias_c: 0.01
+  sigma_acc_bias_c: 0.1
+  sigma_integration: 0.0
+  g: 9.806
+  imu_rate: 200
+
+imu_initialization:
+  velocity: [0.0, 0.0, 0.0]
+  omega_bias: [0.0, 0.0, 0.0]
+  acc_bias: [0.0, 0.0, 0.0]
+  velocity_sigma: 2.0
+  omega_bias_sigma: 0.01
+  acc_bias_sigma: 0.1

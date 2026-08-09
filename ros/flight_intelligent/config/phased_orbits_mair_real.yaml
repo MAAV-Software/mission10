@@ -1,4 +1,4 @@
-# Single-drone phased-orbit for the REAL drone at M-Air (no sim).
+# Four-drone phased-orbit parameters for real vehicles at M-Air (no sim).
 #
 # Same node and trajectory as the SITL config (phased_orbits_mair.yaml) — that is
 # the sim2real point: PX4 consumes the identical 20 Hz OFFBOARD setpoint stream
@@ -9,7 +9,7 @@
 #                                  send SET_GPS_GLOBAL_ORIGIN (it can shove the
 #                                  local frame mid-air). (SITL needed it because
 #                                  the EV-only estimate had no global anchor.)
-#   - bvc_enabled false         -> single drone, no peers to deconflict
+#   - peer namespaces and identity come from bringup/config/fleet.yaml
 # Flight controller side (NOT set here — set on the Pixhawk): a GPS airframe (not
 # the EV airframe 4023), real RC/datalink/battery failsafes, and a geofence
 # (cap alt < ~12 m + tight radius) as the net backstop.
@@ -22,20 +22,19 @@
     prestream_cycles: 10
     wait_for_start: true
     force_arm: false           # REAL: preflight checks on, no force-arm bypass
-    takeoff_altitude_m: 5.0    # matches the proven 5 m square; M-Air net is 15.2 m
+    takeoff_altitude_m: 4.0    # conservative first-flight height under the M-Air net
     takeoff_acceptance_m: 0.5
     takeoff_timeout_s: 40.0
     status_stale_timeout_s: 5.0
-    drone_count: 1
+    drone_count: 4
     orbit_center_e_m: 0.0
     orbit_center_n_m: 0.0      # orbit the takeoff point (EKF local origin)
-    orbit_radius_m: 4.6        # sim-verified to clear the net by >=7.3 m
+    orbit_radius_m: 4.0
     orbit_speed_mps: 2.0
-    orbit_revolutions: 6.0     # ~87 s of capture; sim used 10 (raise once trusted)
     phase_step_deg: 90.0
     phase0_deg: -90.0
-    orbit_mod_amp: [0.0]
-    orbit_mod_phase_deg: [0.0]
+    orbit_mod_amp: [0.0, 0.0, 0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0, 0.0, 0.0]
     insertion_spin_deg: 235.0
     to_center_time_s: 3.0
     spiral_time_s: 10.0
@@ -45,10 +44,29 @@
     peel_spin_deg: 90.0
     peel_order: ""
     orbit_auto_start: false
-    yaw_mode: tangent
-    bvc_enabled: false         # REAL single drone: no peers
-    bvc_safety_radius_m: 0.75
-    bvc_lookahead_m: 0.3
+    yaw_mode: hold             # actively hold the operator-set pre-arm heading
+    # VIO scale excitation. Position-only is intentional: publishing the
+    # analytic downward velocity can trip PX4's land/ground-effect detector.
+    excite_enabled: true
+    pre_excite_hover_s: 30.0   # clean raw-FIFO vibration reference before the bob
+    excite_amp_m: 1.0
+    excite_freq_hz: 0.4
+    excite_cycles: 4.0
+    # Return to the post-climb launch anchor, settle, then request local NAV_LAND.
+    land_xy_acceptance_m: 0.35
+    land_vxy_acceptance_mps: 0.20
+    land_settle_time_s: 1.0
+    orca_protected_radius_m: 1.25
+    orca_response_time_s: 0.6
+    orca_horizon_s: 5.0
+    orca_max_speed_mps: 3.0
+    phase_guard_enabled: true
+    phase_protected_separation_m: 3.0
+    phase_barrier_gamma: 1.0
+    phase_tracking_gain: 0.8
+    phase_error_deadband_deg: 3.0
+    phase_min_rate_scale: 0.4
+    phase_max_rate_scale: 1.5
     set_global_origin_on_link: false   # REAL: GPS provides the EKF origin
     # Ignored while set_global_origin_on_link=false; kept for documentation (the
     # M-Air pad) and as the fallback if ever flown on an EV/GPS-denied estimate.

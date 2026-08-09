@@ -7,7 +7,6 @@ It targets `embedded-hal` 1.0 and provides:
 - a blocking driver: `Dw1000`
 - an async driver: `AsyncDw1000`
 - typed PHY/address configuration helpers
-- a caller-driven ranging state machine for tag/anchor flows
 - an Embassy example for STM32L432 hardware
 
 ## Features
@@ -17,7 +16,6 @@ It targets `embedded-hal` 1.0 and provides:
 - async SPI support via `embedded-hal-async`
 - optional `defmt` formatting support
 - basic receive metrics and timestamp access
-- reusable ranging protocol helpers in [`src/ranging.rs`](src/ranging.rs)
 
 ## Add To Your Project
 
@@ -96,41 +94,6 @@ radio.start_receive(RxOptions {
 .await?;
 radio.transmit(b"ping", TxOptions::default()).await?;
 let frame = radio.read_frame(&mut buffer).await?;
-```
-
-### Ranging State Machine
-
-For tag/anchor exchanges, use `RangingNode` on top of the driver:
-
-```rust
-use dw1000_rs::{RangingConfig, RangingEvent, RangingNode, RangingSchedule, Role};
-
-let mut config = RangingConfig::new(identity);
-config.schedule = RangingSchedule::new();
-let mut node = RangingNode::<4>::new(Role::Tag, config);
-let mut rx_buffer = [0u8; 127];
-
-node.start(&mut radio, now_ms)?;
-
-if let Some(event) = node.tick(&mut radio, now_ms)? {
-    match event {
-        RangingEvent::PeerInactive(short) => {
-            // peer timed out
-        }
-        _ => {}
-    }
-}
-
-if let Some(event) = node.on_rx(&mut radio, now_ms, &mut rx_buffer)? {
-    match event {
-        RangingEvent::RangeUpdated(peer) => {
-            let distance_m = peer.range_m;
-        }
-        _ => {}
-    }
-}
-
-node.on_tx_done(&mut radio)?;
 ```
 
 ## Example Firmware

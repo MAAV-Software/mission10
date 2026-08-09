@@ -1,7 +1,9 @@
 """Closed-loop mission test: engine + kinematic fake + scripted minefield
 through the real ingest/back-projection wire shapes."""
 
+import math
 import unittest
+from dataclasses import replace
 
 from mission_engine.core.config import CameraModel
 from mission_engine.core.dumpproto import build_payload, decode_frame, encode_frame
@@ -36,7 +38,9 @@ CFG = MissionConfig(
 MINES = [(6.0, 2.0), (12.0, 6.0)]  # between lanes -> seen on two passes
 
 
-def run_mission(cfg=CFG, mines=MINES, sim_s=600.0, dt=0.05, abort_at=None):
+def run_mission(
+    cfg=CFG, mines=MINES, sim_s=600.0, dt=0.05, abort_at=None, guard_abort_at=None
+):
     log = MineLog(confirm_obs=5, confirm_passes=2)
     eng = MissionEngine(cfg, log)
     body = KinematicPoint(pos=(0.0, 0.0, 0.0))
@@ -60,6 +64,9 @@ def run_mission(cfg=CFG, mines=MINES, sim_s=600.0, dt=0.05, abort_at=None):
         if abort_at is not None and t >= abort_at:
             eng.operator_abort()
             abort_at = None
+        if guard_abort_at is not None and t >= guard_abort_at:
+            eng.request_abort("tag anchor disagrees with flight layer by 5.40 m")
+            guard_abort_at = None
         if t - last_det >= 0.1:  # 10 Hz detector
             last_det = t
             eng.note_detector_alive(t)
@@ -119,6 +126,65 @@ class TestAbort(unittest.TestCase):
         self.assertEqual(eng.phase, DONE)
         self.assertEqual(eng.abort_reason, "operator")
         self.assertFalse(eng.dump_acked)
+
+    def test_guard_abort_lands_without_dump(self):
+        """The rim's guards (tag anchor, link health) reach the same exit."""
+        eng, _, _ = run_mission(abort_at=None, guard_abort_at=20.0)
+        self.assertEqual(eng.phase, DONE)
+        self.assertIn("anchor", eng.abort_reason)
+        self.assertFalse(eng.dump_acked)
+
+
+class TestEnvelope(unittest.TestCase):
+    """The envelope guards the deployed survey did not have on 2026-07-24
+    (wall-impact REPORT.md, contributing conditions 1 and 3)."""
+
+    def test_a_field_outside_the_fence_never_flies(self):
+        cfg = replace(CFG, fence_radius_m=6.0)  # lanes reach 16 m
+        eng, _, _ = run_mission(cfg=cfg)
+        self.assertEqual(eng.phase, DONE)
+        self.assertIn("fence", eng.abort_reason)
+
+    def test_the_fence_catches_the_command_before_the_estimate(self):
+        """The command leaves the envelope first, so the abort names it."""
+        cfg = replace(CFG, fence_radius_m=6.0)
+        eng, _, _ = run_mission(cfg=cfg)
+        self.assertIn("command", eng.abort_reason)
+
+    def test_a_survey_that_cannot_finish_comes_home(self):
+        cfg = replace(CFG, mission_timeout_s=30.0)
+        eng, _, t_end = run_mission(cfg=cfg)
+        self.assertEqual(eng.phase, DONE)
+        self.assertIn("timeout", eng.abort_reason)
+        self.assertLess(t_end, 90.0)
+
+    def test_an_envelope_wide_enough_does_not_fire(self):
+        cfg = replace(CFG, fence_radius_m=40.0, mission_timeout_s=600.0)
+        eng, _, _ = run_mission(cfg=cfg)
+        self.assertEqual(eng.phase, DONE)
+        self.assertIsNone(eng.abort_reason)
+
+
+class TestRotatedLanes(unittest.TestCase):
+    """M-Air runs the survey on cardinal south, not on the NED axes."""
+
+    def test_a_rotated_field_is_covered_the_same(self):
+        cfg = replace(CFG, lane_heading_deg=180.0, fence_radius_m=0.0)
+        eng, log, _ = run_mission(cfg=cfg, mines=[(-6.0, -2.0), (-12.0, -6.0)])
+        self.assertEqual(eng.phase, DONE)
+        self.assertEqual(eng.coverage_report()["gaps"], [])
+        self.assertEqual(len(log.clusters), 2)
+
+    def test_rotation_preserves_lane_spacing(self):
+        for heading in (0.0, 37.0, 180.0, -95.0):
+            lanes = MissionEngine(replace(CFG, lane_heading_deg=heading)).lanes
+            fwd = (math.cos(math.radians(heading)), math.sin(math.radians(heading)))
+            perp = (-fwd[1], fwd[0])
+            for i in range(1, len(lanes)):
+                d = (lanes[i].start[0] - lanes[i - 1].start[0]) * perp[0] + (
+                    lanes[i].start[1] - lanes[i - 1].start[1]
+                ) * perp[1]
+                self.assertAlmostEqual(d, CFG.lane_spacing, places=6, msg=f"{heading}°")
 
 
 if __name__ == "__main__":

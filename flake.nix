@@ -19,7 +19,10 @@
         };
 
         uwbRust = pkgs.rust-bin.stable."1.92.0".default.override {
-          targets = [ "thumbv7em-none-eabihf" ];
+          targets = [
+            "thumbv7em-none-eabihf"
+            "aarch64-unknown-linux-gnu"
+          ];
           extensions = [ "rust-src" "llvm-tools-preview" ];
         };
 
@@ -50,9 +53,11 @@
             name = "mission10-uwb";
             packages = [
               uwbRust
+              pkgs.cargo-zigbuild
               pkgs.cargo-binutils
               pkgs.flip-link
               pkgs.probe-rs-tools
+              pkgs.zig
             ];
           };
         } // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -80,6 +85,7 @@
               (with pkgs.rosPackages.jazzy; buildEnv {
                 paths = [
                   ros-core # rclpy, ros2cli, ament, ...
+                  rmw-cyclonedds-cpp # drone image RMW; needed to talk to the fleet
                   nav-msgs # gz truth odometry -> sim_truth_ev
                   vision-msgs # detection wire contract
                   ros-gz-sim # Gazebo (gz) integration

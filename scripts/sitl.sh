@@ -9,20 +9,28 @@
 #   - liveness via the pidfile + a self-safe child count (a pgrep run from this
 #     script does not match the pattern, since the script's cmdline is just
 #     "bash sitl.sh ...", so counts are never inflated by the grep itself).
-#   - gate firing with -w scaled to the drone count (VOLATILE subs need a few
-#     publishes after the wait).
+#   - gate firing with -w scaled to the drone count and the shared durable QoS.
 #
 # Usage:
 #   scripts/sitl.sh up [mission_config.yaml]   # launch (GUI), write pidfile
+#   scripts/sitl.sh up-random [seed] [mission_config.yaml]
+#                                               # seeded random M-Air spawns
+#   scripts/sitl.sh up-line [seed] [mission_config.yaml]
+#                                               # ordered, uneven ground line
 #   scripts/sitl.sh ready                       # one-shot readiness snapshot
-#   scripts/sitl.sh takeoff                     # fire /start_mission  (-w N)
-#   scripts/sitl.sh orbit                       # fire /begin_orbit    (-w N)
-#   scripts/sitl.sh land                        # fire /end_mission (emergency)
+#   scripts/sitl.sh takeoff                     # fire /start_mission
+#   scripts/sitl.sh orbit                       # fire /begin_orbit
+#   scripts/sitl.sh home                        # fire /end_mission   (peel off,
+#                                               #   return, land at the anchor)
+#   scripts/sitl.sh land                        # fire /abort_mission (land in
+#                                               #   place, now)
 #   scripts/sitl.sh status                      # launch + child liveness
 #   scripts/sitl.sh sep                         # start the separation monitor
 #   scripts/sitl.sh down                        # SIGINT launch -> reaper cleans
 #
-# Env: SITL_N (drone count, default 4), PX4_DIR, MISSION_CONFIG, SITL_WORLD
+# Env: SITL_N (drone count, default 4), PX4_DIR, MISSION_CONFIG, SITL_WORLD,
+#      SITL_RANDOM_SEED (makes `up` randomized, equivalent to `up-random SEED`)
+#      SITL_UWB_FAR_RATE_HZ / SITL_UWB_NEAR_RATE_HZ (optional rate sweep),
 #      (gz world override, e.g. SITL_WORLD=windy for wind mode), SITL_FLEET
 #      (fleet_config path override, e.g. fleet_mair.yaml for the M-Air cage).
 set -uo pipefail
@@ -32,6 +40,7 @@ PX4_DIR="${PX4_DIR:-/home/muku/Projects/MAAV/PX4-Autopilot}"
 PIDFILE="/tmp/maav_sitl.pid"
 LOG="/tmp/refly.log"
 SEP_LOG="/tmp/sep.log"
+EFFECTIVE_FLEET="/tmp/maav_sitl_effective_fleet.yaml"
 N="${SITL_N:-4}"
 
 _source_ws() { set +u; source "$REPO/install/setup.bash"; set -u; }
@@ -39,8 +48,42 @@ _source_ws() { set +u; source "$REPO/install/setup.bash"; set -u; }
 _pub_gate() {
   local topic="$1"
   _source_ws
-  echo "firing /$topic (-w $N)"
-  ros2 topic pub -w "$N" --times 5 -r 5 "/$topic" std_msgs/msg/Bool "{data: true}"
+  echo "firing /$topic (TRANSIENT_LOCAL, waiting for $N subscribers)"
+  # The second publish is a small operator-path safety margin. Reliability and
+  # transient history make the old five-message discovery workaround unnecessary.
+  ros2 topic pub -w "$N" --times 2 -r 2 --keep-alive 1 \
+    --qos-depth 1 --qos-reliability reliable --qos-durability transient_local \
+    "/$topic" std_msgs/msg/Bool "{data: true}"
+}
+
+_launch_up() {
+  local random_seed="$1"
+  local rough_line="$2"
+  local config="$3"
+  cd "$REPO"
+  _source_ws
+  rm -f "$LOG" "$EFFECTIVE_FLEET"
+  local args=("px4_dir:=$PX4_DIR" "num_vehicles:=$N"
+              "effective_fleet:=$EFFECTIVE_FLEET")
+  [ -n "$config" ] && args+=("mission_config:=$config")
+  [ -n "${SITL_MISSION_EXEC:-}" ] && args+=("mission_executable:=$SITL_MISSION_EXEC")
+  [ -n "${SITL_FLEET:-}" ] && args+=("fleet_config:=$SITL_FLEET")
+  [ -n "${SITL_WORLD:-}" ] && args+=("world:=$SITL_WORLD")
+  [ -n "${SITL_UWB_FAR_RATE_HZ:-}" ] && args+=("uwb_far_rate_hz:=$SITL_UWB_FAR_RATE_HZ")
+  [ -n "${SITL_UWB_NEAR_RATE_HZ:-}" ] && args+=("uwb_near_rate_hz:=$SITL_UWB_NEAR_RATE_HZ")
+  if [ -n "$random_seed" ]; then
+    if [ "$rough_line" = true ]; then
+      args+=("rough_line_spawn:=true" "spawn_seed:=$random_seed")
+    else
+      args+=("random_spawn:=true" "spawn_seed:=$random_seed")
+    fi
+  fi
+  DISPLAY=:1 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 GZ_IP=127.0.0.1 \
+    PX4_DIR="$PX4_DIR" \
+    ros2 launch bringup phased_orbits.launch.py "${args[@]}" > "$LOG" 2>&1 &
+  echo "$!" > "$PIDFILE"
+  echo "launched pid $(cat "$PIDFILE")  N=$N  log=$LOG  config=${config:-<default>} seed=${random_seed:-<fixed>} rough_line=$rough_line"
+  echo "watch readiness:  scripts/sitl.sh ready"
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
@@ -48,19 +91,21 @@ cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   up)
     config="${1:-${MISSION_CONFIG:-}}"
-    cd "$REPO"
-    _source_ws
-    rm -f "$LOG"
-    args=("px4_dir:=$PX4_DIR" "num_vehicles:=$N")
-    [ -n "$config" ] && args+=("mission_config:=$config")
-    [ -n "${SITL_FLEET:-}" ] && args+=("fleet_config:=$SITL_FLEET")
-    [ -n "${SITL_WORLD:-}" ] && args+=("world:=$SITL_WORLD")
-    DISPLAY=:1 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 GZ_IP=127.0.0.1 \
-      PX4_DIR="$PX4_DIR" \
-      ros2 launch bringup phased_orbits.launch.py "${args[@]}" > "$LOG" 2>&1 &
-    echo "$!" > "$PIDFILE"
-    echo "launched pid $(cat "$PIDFILE")  N=$N  log=$LOG  config=${config:-<default>}"
-    echo "watch readiness:  scripts/sitl.sh ready"
+    _launch_up "${SITL_RANDOM_SEED:-}" false "$config"
+    ;;
+
+  up-random)
+    seed="${1:-$(date +%s)}"
+    [ $# -gt 0 ] && shift
+    config="${1:-${MISSION_CONFIG:-}}"
+    _launch_up "$seed" false "$config"
+    ;;
+
+  up-line)
+    seed="${1:-$(date +%s)}"
+    [ $# -gt 0 ] && shift
+    config="${1:-${MISSION_CONFIG:-}}"
+    _launch_up "$seed" true "$config"
     ;;
 
   ready)
@@ -74,12 +119,16 @@ case "$cmd" in
 
   takeoff) _pub_gate start_mission ;;
   orbit)   _pub_gate begin_orbit ;;
-  land)    _pub_gate end_mission ;;
+  home)    _pub_gate end_mission ;;
+  land)    _pub_gate abort_mission ;;
 
   sep)
-    [ -f /tmp/sep_monitor.py ] || { echo "no /tmp/sep_monitor.py"; exit 1; }
     _source_ws
-    python3 /tmp/sep_monitor.py > "$SEP_LOG" 2>&1 &
+    fleet_path="${SITL_FLEET:-}"
+    [ -z "$fleet_path" ] && [ -f "$EFFECTIVE_FLEET" ] && fleet_path="$EFFECTIVE_FLEET"
+    sep_args=()
+    [ -n "$fleet_path" ] && sep_args+=(--fleet "$fleet_path")
+    python3 "$REPO/scripts/sep_monitor.py" "${sep_args[@]}" > "$SEP_LOG" 2>&1 &
     echo "sep_monitor pid $! -> $SEP_LOG"
     ;;
 
@@ -89,7 +138,7 @@ case "$cmd" in
     else
       echo "launch not running"
     fi
-    echo "px4=$(pgrep -fc 'px4_sitl_default/bin/px4') gz=$(pgrep -fc 'gz sim') missions=$(pgrep -fc phased_orbits_mission) agent=$(pgrep -xc MicroXRCEAgent) bridges=$(pgrep -fc parameter_bridge) ev=$(pgrep -fc gt_to_ev)"
+    echo "px4=$(pgrep -fc 'px4_sitl_default/bin/px4') gz=$(pgrep -fc 'gz sim') missions=$(pgrep -fc 'phased_orbits_mission|survey_mission') relative=$(pgrep -fc '/relative_localization') uwb=$(pgrep -fc uwb_range_sim) monitor=$(pgrep -fc relative_truth_monitor) agent=$(pgrep -xc MicroXRCEAgent) bridges=$(pgrep -fc parameter_bridge) truth=$(pgrep -fc world_truth_to_odom) ev=$(pgrep -fc gt_to_ev)"
     ;;
 
   down)
@@ -108,19 +157,23 @@ case "$cmd" in
       echo "stopped launch $pid"
     fi
     pkill -INT -f phased_orbits_mission
+    pkill -INT -f '/relative_localization'
+    pkill -INT -f uwb_range_sim
+    pkill -INT -f relative_truth_monitor
     pkill -INT -f sep_monitor.py
     pkill -9 -f px4_sitl
     pkill -9 -f 'gz sim'
     pkill -9 -x gz
     pkill -9 -f MicroXRCEAgent
     pkill -9 -f parameter_bridge   # EV gz<->ROS bridges self-detach like gz; reap or they pile up
+    pkill -9 -f sim_truth_ev/lib/sim_truth_ev/world_truth_to_odom # shared truth splitter leaks with detached launch
     pkill -9 -f sim_truth_ev/lib/sim_truth_ev/gt_to_ev   # EV pose feeders leak the same way (piled to 102 over days)
-    rm -f "$PIDFILE"
+    rm -f "$PIDFILE" "$EFFECTIVE_FLEET"
     echo "teardown complete"
     ;;
 
   *)
-    echo "usage: scripts/sitl.sh {up [config]|ready|takeoff|orbit|land|sep|status|down}" >&2
+    echo "usage: scripts/sitl.sh {up [config]|up-random [seed] [config]|up-line [seed] [config]|ready|takeoff|orbit|home|land|sep|status|down}" >&2
     exit 2
     ;;
 esac

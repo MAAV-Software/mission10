@@ -1,5 +1,5 @@
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use defmt::warn;
 use embassy_futures::join::join;
@@ -7,58 +7,87 @@ use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Instant};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, Receiver, Sender};
 use embassy_usb::driver::Driver;
-use mission10_uwb_protocol::EgoState;
 use mission10_uwb_protocol::host::{
-    Diagnostic, HOST_FRAME_MAX_SIZE, HOST_RAW_MAX_SIZE, HealthCounters, HostToRadio, RadioToHost,
-    RadioToHostEnvelope, decode_host_to_radio, encode_radio_to_host,
+    Diagnostic, HOST_FRAME_MAX_SIZE, HOST_RAW_MAX_SIZE, HealthCounters, HostToRadio,
+    LatestExchanges, RadioConfiguration, RadioToHost, RadioToHostEnvelope, decode_host_to_radio,
+    encode_radio_to_host,
 };
+use mission10_uwb_protocol::{EgoState, StateValidity};
 
 const USB_PACKET_SIZE: usize = 64;
 
-static MEASUREMENTS: Channel<CriticalSectionRawMutex, RadioToHost, 16> = Channel::new();
+static MEASUREMENTS: Mutex<CriticalSectionRawMutex, RefCell<LatestExchanges>> =
+    Mutex::new(RefCell::new(LatestExchanges::new()));
+static MEASUREMENT_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CONTROL: Channel<CriticalSectionRawMutex, RadioToHost, 8> = Channel::new();
 static DIAGNOSTICS: Channel<CriticalSectionRawMutex, RadioToHost, 8> = Channel::new();
-static EGO_STATE: Mutex<CriticalSectionRawMutex, RefCell<Option<EgoState>>> =
+static CONFIGURATIONS: Channel<CriticalSectionRawMutex, RadioConfiguration, 2> = Channel::new();
+
+#[derive(Clone, Copy)]
+pub struct ClockReply {
+    pub request_id: u16,
+    pub mission_rx_us: u64,
+    pub mission_tx_us: u64,
+    pub mission_generation: u32,
+    pub source_error_us: u32,
+    pub local_rx_us: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct ClockProbeSent {
+    pub request_id: u16,
+    pub local_tx_us: u64,
+}
+
+static CLOCK_REPLIES: Channel<CriticalSectionRawMutex, ClockReply, 4> = Channel::new();
+static CLOCK_PROBE_SENT: Channel<CriticalSectionRawMutex, ClockProbeSent, 4> = Channel::new();
+
+#[derive(Clone, Copy)]
+struct TimedEgoState {
+    state: EgoState,
+    received_at: Instant,
+}
+
+static EGO_STATE: Mutex<CriticalSectionRawMutex, RefCell<Option<TimedEgoState>>> =
     Mutex::new(RefCell::new(None));
 static RADIO_COUNTERS: Mutex<CriticalSectionRawMutex, RefCell<HealthCounters>> =
-    Mutex::new(RefCell::new(HealthCounters {
-        irq_wakes: 0,
-        spurious_irq_wakes: 0,
-        wait_timeouts: 0,
-        recoveries: 0,
-        missed_deadlines: 0,
-        malformed_air_frames: 0,
-        unexpected_air_frames: 0,
-        host_decode_errors: 0,
-        host_command_drops: 0,
-        control_drops: 0,
-        measurement_drops: 0,
-        diagnostic_drops: 0,
-    }));
+    Mutex::new(RefCell::new(HealthCounters::ZERO));
 
 static HOST_DECODE_ERRORS: AtomicU32 = AtomicU32::new(0);
 static HOST_COMMAND_DROPS: AtomicU32 = AtomicU32::new(0);
 static CONTROL_DROPS: AtomicU32 = AtomicU32::new(0);
 static MEASUREMENT_DROPS: AtomicU32 = AtomicU32::new(0);
 static DIAGNOSTIC_DROPS: AtomicU32 = AtomicU32::new(0);
+static HOST_STALE_TRANSITIONS: AtomicU32 = AtomicU32::new(0);
+static EGO_WAS_STALE: AtomicBool = AtomicBool::new(true);
+static HOST_CONNECTED: AtomicBool = AtomicBool::new(false);
+const EGO_STALE_AFTER: Duration = Duration::from_millis(100);
 
 pub fn publish(event: RadioToHost) {
     match event {
-        RadioToHost::Range { .. } | RadioToHost::PeerState { .. } => {
-            publish_latest_measurement(event);
+        RadioToHost::CompletedExchange { exchange } => {
+            let replaced = MEASUREMENTS.lock(|slots| slots.borrow_mut().push(exchange));
+            if replaced {
+                MEASUREMENT_DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+            MEASUREMENT_SIGNAL.signal(());
         }
         RadioToHost::RadioId { .. }
         | RadioToHost::Otp { .. }
         | RadioToHost::Ready { .. }
         | RadioToHost::Configured { .. }
+        | RadioToHost::ClockProbe { .. }
+        | RadioToHost::ClockStatus { .. }
         | RadioToHost::Health { .. } => {
             if CONTROL.try_send(event).is_err() {
                 CONTROL_DROPS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        RadioToHost::Rx { .. } | RadioToHost::Error { .. } => {
+        RadioToHost::Error { .. } => {
             if DIAGNOSTICS.try_send(event).is_err() {
                 DIAGNOSTIC_DROPS.fetch_add(1, Ordering::Relaxed);
             }
@@ -66,21 +95,52 @@ pub fn publish(event: RadioToHost) {
     }
 }
 
-fn publish_latest_measurement(event: RadioToHost) {
-    if MEASUREMENTS.try_send(event).is_ok() {
-        return;
-    }
-    if MEASUREMENTS.try_receive().is_ok() {
-        MEASUREMENT_DROPS.fetch_add(1, Ordering::Relaxed);
-    }
-    if MEASUREMENTS.try_send(event).is_err() {
-        MEASUREMENT_DROPS.fetch_add(1, Ordering::Relaxed);
-    }
+fn try_measurement() -> Option<RadioToHost> {
+    MEASUREMENTS.lock(|slots| {
+        slots
+            .borrow_mut()
+            .pop_oldest()
+            .map(|exchange| RadioToHost::CompletedExchange { exchange })
+    })
 }
 
-#[allow(dead_code)] // Consumed by the native ranging FSM once its peer is available.
 pub fn latest_ego_state() -> EgoState {
-    EGO_STATE.lock(|state| state.borrow().unwrap_or_default())
+    let now = Instant::now();
+    let (mut state, stale) = EGO_STATE.lock(|slot| match *slot.borrow() {
+        Some(timed) => (
+            timed.state,
+            now.saturating_duration_since(timed.received_at) >= EGO_STALE_AFTER,
+        ),
+        None => (EgoState::default(), true),
+    });
+    if stale {
+        state.validity.0 |= StateValidity::HOST_STALE;
+    }
+    let was_stale = EGO_WAS_STALE.swap(stale, Ordering::Relaxed);
+    if stale && !was_stale {
+        HOST_STALE_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    state
+}
+
+pub fn try_configuration() -> Option<RadioConfiguration> {
+    CONFIGURATIONS.try_receive().ok()
+}
+
+pub fn try_clock_reply() -> Option<ClockReply> {
+    CLOCK_REPLIES.try_receive().ok()
+}
+
+pub fn try_clock_probe_sent() -> Option<ClockProbeSent> {
+    CLOCK_PROBE_SENT.try_receive().ok()
+}
+
+pub fn host_connected() -> bool {
+    HOST_CONNECTED.load(Ordering::Relaxed)
+}
+
+pub fn clear_measurements() {
+    MEASUREMENTS.lock(|slots| slots.borrow_mut().clear());
 }
 
 pub fn transport_counters() -> HealthCounters {
@@ -90,6 +150,7 @@ pub fn transport_counters() -> HealthCounters {
         control_drops: CONTROL_DROPS.load(Ordering::Relaxed),
         measurement_drops: MEASUREMENT_DROPS.load(Ordering::Relaxed),
         diagnostic_drops: DIAGNOSTIC_DROPS.load(Ordering::Relaxed),
+        host_stale_transitions: HOST_STALE_TRANSITIONS.load(Ordering::Relaxed),
         ..HealthCounters::default()
     }
 }
@@ -119,12 +180,17 @@ where
     let mut sequence = 0_u32;
     let mut frame = [0_u8; HOST_FRAME_MAX_SIZE];
     let mut schedule = QueueSchedule::default();
+    let mut pending = None;
     loop {
+        HOST_CONNECTED.store(false, Ordering::Relaxed);
         sender.wait_connection().await;
+        HOST_CONNECTED.store(true, Ordering::Relaxed);
         loop {
-            let event = next_event(&mut schedule).await;
+            let event = match pending {
+                Some(event) => event,
+                None => next_event(&mut schedule).await,
+            };
             let envelope = RadioToHostEnvelope::new(sequence, event);
-            sequence = sequence.wrapping_add(1);
             let length = match encode_radio_to_host(&envelope, &mut frame) {
                 Ok(length) => length,
                 Err(_) => {
@@ -148,8 +214,29 @@ where
                 failed = true;
             }
             if failed {
+                HOST_CONNECTED.store(false, Ordering::Relaxed);
+                if let RadioToHost::CompletedExchange { exchange } = event {
+                    // Return an interrupted measurement to the latest-per-peer
+                    // slots. A newer exchange can replace it while disconnected.
+                    let discarded = MEASUREMENTS.lock(|slots| slots.borrow_mut().restore(exchange));
+                    if discarded {
+                        MEASUREMENT_DROPS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    MEASUREMENT_SIGNAL.signal(());
+                    pending = None;
+                } else {
+                    pending = Some(event);
+                }
                 break;
             }
+            if let RadioToHost::ClockProbe { request_id } = event {
+                let _ = CLOCK_PROBE_SENT.try_send(ClockProbeSent {
+                    request_id,
+                    local_tx_us: Instant::now().as_micros(),
+                });
+            }
+            pending = None;
+            sequence = sequence.wrapping_add(1);
         }
     }
 }
@@ -186,19 +273,19 @@ impl QueueSchedule {
 }
 
 async fn next_event(schedule: &mut QueueSchedule) -> RadioToHost {
-    if schedule.events_since_diagnostic >= MAX_EVENTS_BEFORE_DIAGNOSTIC {
-        if let Ok(event) = DIAGNOSTICS.try_receive() {
-            schedule.selected(EventQueue::Diagnostic);
-            return event;
-        }
+    if schedule.events_since_diagnostic >= MAX_EVENTS_BEFORE_DIAGNOSTIC
+        && let Ok(event) = DIAGNOSTICS.try_receive()
+    {
+        schedule.selected(EventQueue::Diagnostic);
+        return event;
     }
-    if schedule.measurements_since_control >= MAX_MEASUREMENTS_BEFORE_CONTROL {
-        if let Ok(event) = CONTROL.try_receive() {
-            schedule.selected(EventQueue::Control);
-            return event;
-        }
+    if schedule.measurements_since_control >= MAX_MEASUREMENTS_BEFORE_CONTROL
+        && let Ok(event) = CONTROL.try_receive()
+    {
+        schedule.selected(EventQueue::Control);
+        return event;
     }
-    if let Ok(event) = MEASUREMENTS.try_receive() {
+    if let Some(event) = try_measurement() {
         schedule.selected(EventQueue::Measurement);
         return event;
     }
@@ -211,13 +298,18 @@ async fn next_event(schedule: &mut QueueSchedule) -> RadioToHost {
         return event;
     }
     let (event, queue) = match select3(
-        MEASUREMENTS.receive(),
+        MEASUREMENT_SIGNAL.wait(),
         CONTROL.receive(),
         DIAGNOSTICS.receive(),
     )
     .await
     {
-        Either3::First(event) => (event, EventQueue::Measurement),
+        Either3::First(()) => loop {
+            if let Some(event) = try_measurement() {
+                break (event, EventQueue::Measurement);
+            }
+            MEASUREMENT_SIGNAL.wait().await;
+        },
         Either3::Second(event) => (event, EventQueue::Control),
         Either3::Third(event) => (event, EventQueue::Diagnostic),
     };
@@ -292,7 +384,13 @@ where
 fn route_command(command: HostToRadio) {
     match command {
         HostToRadio::SetEgoState { state } => {
-            EGO_STATE.lock(|slot| *slot.borrow_mut() = Some(state));
+            EGO_STATE.lock(|slot| {
+                *slot.borrow_mut() = Some(TimedEgoState {
+                    state,
+                    received_at: Instant::now(),
+                })
+            });
+            EGO_WAS_STALE.store(false, Ordering::Relaxed);
         }
         HostToRadio::Configure { configuration } => {
             if !configuration.is_valid() {
@@ -301,15 +399,34 @@ fn route_command(command: HostToRadio) {
                 });
                 return;
             }
-            publish(RadioToHost::Error {
-                diagnostic: Diagnostic::UnsupportedInMode,
-            });
+            if CONFIGURATIONS.try_send(configuration).is_err() {
+                HOST_COMMAND_DROPS.fetch_add(1, Ordering::Relaxed);
+            }
         }
         HostToRadio::RequestHealth { request_id } => {
             publish(RadioToHost::Health {
                 request_id,
                 counters: health_counters(),
             });
+        }
+        HostToRadio::ClockReply {
+            request_id,
+            mission_rx_us,
+            mission_tx_us,
+            mission_generation,
+            source_error_us,
+        } => {
+            let reply = ClockReply {
+                request_id,
+                mission_rx_us,
+                mission_tx_us,
+                mission_generation,
+                source_error_us,
+                local_rx_us: Instant::now().as_micros(),
+            };
+            if CLOCK_REPLIES.try_send(reply).is_err() {
+                HOST_COMMAND_DROPS.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }

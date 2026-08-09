@@ -4,7 +4,8 @@ From pfm1-mine-grass.blend: keep only the IARC_PFM-1_mine template, zero the
 baked junk rotation (settle tilt + 199 deg yaw), apply the ~0.001 non-uniform
 scale, set the origin to the geometric bbox center (so the tag-down pi-flip
 about local X is symmetric and never sinks the mesh), rename the material to
-mine_body (hue jitter excludes materials named *tag*), save as m10-mine.blend.
+mine_body (appearance tint excludes materials named *tag*), save as
+m10-mine.blend.
 """
 import bpy
 

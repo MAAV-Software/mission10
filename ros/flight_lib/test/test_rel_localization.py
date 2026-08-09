@@ -1,6 +1,6 @@
 import numpy as np
 
-from flight_lib import RelativePositionEKF, gnss_common_mode
+from flight_lib import FusedRelativeTracker, RelativePositionEKF, gnss_common_mode
 
 
 def test_common_mode_cancels_in_difference():
@@ -71,3 +71,32 @@ def test_fused_estimate_beats_gnss_alone_radially():
         ekf.update_range(5.0 + rng.normal(0, 0.08), 0.08 ** 2)
     assert ekf.cov[0, 0] < ekf.cov[1, 1]
     assert np.linalg.norm(ekf.mean - true_rel) < 0.2
+
+
+def test_fused_tracker_uses_shared_position_to_select_the_range_branch():
+    tracker = FusedRelativeTracker(position_noise_std=0.6, range_noise_std=0.08)
+    estimate = None
+    for step in range(30):
+        estimate = tracker.update(
+            step * 0.1,
+            [0.0, 0.0],
+            [3.0, 1.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            range_m=np.sqrt(10.0),
+        )
+    assert estimate.position[1] > 0.0
+    assert np.linalg.norm(estimate.position - [3.0, 1.0]) < 0.1
+
+
+def test_fused_tracker_reseeds_cleanly_on_frame_epoch_change():
+    tracker = FusedRelativeTracker()
+    first = tracker.update(
+        0.0, [10.0, 4.0], [13.0, 5.0], [0.0, 0.0], [0.0, 0.0],
+        range_m=np.sqrt(10.0), own_epoch=0, peer_epoch=0)
+    reset = tracker.update(
+        0.1, [10.0, 4.0], [13.0, 5.0], [0.0, 0.0], [0.0, 0.0],
+        range_m=np.sqrt(10.0), own_epoch=1, peer_epoch=0)
+    assert first.reseeded
+    assert reset.reseeded
+    assert np.linalg.norm(reset.position - first.position) < 1e-9

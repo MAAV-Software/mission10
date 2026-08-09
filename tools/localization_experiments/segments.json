@@ -1,0 +1,14 @@
+{
+  "source": "flight1_survey_mission.log plus recorded camera span",
+  "segments": [
+    {"name": "preflight", "start_s": 1784937708.888245, "end_s": 1784937714.727742},
+    {"name": "takeoff", "start_s": 1784937714.727742, "end_s": 1784937720.727804},
+    {"name": "hover", "start_s": 1784937720.727804, "end_s": 1784937756.192614},
+    {"name": "serpentine", "start_s": 1784937756.192614, "end_s": 1784937820.629060},
+    {"name": "regap", "start_s": 1784937820.629060, "end_s": 1784937838.628216},
+    {"name": "crosshatch", "start_s": 1784937838.628216, "end_s": 1784937896.632910},
+    {"name": "cube", "start_s": 1784937896.632910, "end_s": 1784937938.337522},
+    {"name": "home_settle", "start_s": 1784937938.337522, "end_s": 1784937972.553432},
+    {"name": "return_landed", "start_s": 1784937972.553432, "end_s": 1784937980.845000}
+  ]
+}

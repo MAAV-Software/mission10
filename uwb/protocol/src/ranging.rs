@@ -1,9 +1,23 @@
 pub const TIMESTAMP_MASK: u64 = (1_u64 << 40) - 1;
 pub const DTU_PER_US: u64 = 63_897;
 pub const DTU_METRES: f64 = 0.004_691_763_978_615_9;
+pub const MAX_SCHEDULED_TX_ERROR_DTU: u64 = 512;
+/// Give the initiator time to re-arm RX after it transmits Final.
+pub const REPORT_TURNAROUND_US: u32 = 2_000;
 
 pub const fn wrapping_delta(later: u64, earlier: u64) -> u64 {
     later.wrapping_sub(earlier) & TIMESTAMP_MASK
+}
+
+pub const fn scheduled_tx_matches(expected: u64, actual: u64) -> bool {
+    let forward = wrapping_delta(actual, expected);
+    let backward = wrapping_delta(expected, actual);
+    let error = if forward < backward {
+        forward
+    } else {
+        backward
+    };
+    error <= MAX_SCHEDULED_TX_ERROR_DTU
 }
 
 /// Round a delayed-transmit timestamp to the resolution required by DX_TIME.
@@ -15,18 +29,18 @@ pub const fn delayed_tx_time(base: u64, delay_us: u32) -> u64 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponderTimestamps {
     pub poll_rx: u64,
-    pub poll_ack_tx: u64,
-    pub range_rx: u64,
+    pub response_tx: u64,
+    pub final_rx: u64,
 }
 
 /// Asymmetric double-sided TWR. Both native peers evaluate this function over
 /// the same six hardware timestamps.
 pub fn distance_metres(initiator: [u64; 3], responder: ResponderTimestamps) -> Option<f64> {
-    let [poll_tx, poll_ack_rx, range_tx] = initiator;
-    let round1 = wrapping_delta(poll_ack_rx, poll_tx) as i128;
-    let reply1 = wrapping_delta(responder.poll_ack_tx, responder.poll_rx) as i128;
-    let round2 = wrapping_delta(responder.range_rx, responder.poll_ack_tx) as i128;
-    let reply2 = wrapping_delta(range_tx, poll_ack_rx) as i128;
+    let [poll_tx, response_rx, final_tx] = initiator;
+    let round1 = wrapping_delta(response_rx, poll_tx) as i128;
+    let reply1 = wrapping_delta(responder.response_tx, responder.poll_rx) as i128;
+    let round2 = wrapping_delta(responder.final_rx, responder.response_tx) as i128;
+    let reply2 = wrapping_delta(final_tx, response_rx) as i128;
     let denominator = round1 + round2 + reply1 + reply2;
     if denominator == 0 {
         return None;
@@ -53,20 +67,28 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_transmit_tolerance_handles_boundaries_and_wraparound() {
+        assert!(scheduled_tx_matches(1_000, 1_512));
+        assert!(!scheduled_tx_matches(1_000, 1_513));
+        assert!(scheduled_tx_matches(TIMESTAMP_MASK - 10, 9));
+        assert!(!scheduled_tx_matches(TIMESTAMP_MASK - 10, 1_000));
+    }
+
+    #[test]
     fn synthetic_ds_twr_recovers_known_time_of_flight() {
         let tof = 2_130_u64;
         let poll_tx = TIMESTAMP_MASK - 10_000;
         let poll_rx = (poll_tx + tof) & TIMESTAMP_MASK;
-        let poll_ack_tx = (poll_rx + 447_283_000) & TIMESTAMP_MASK;
-        let poll_ack_rx = (poll_ack_tx + tof) & TIMESTAMP_MASK;
-        let range_tx = (poll_ack_rx + 447_279_000) & TIMESTAMP_MASK;
-        let range_rx = (range_tx + tof) & TIMESTAMP_MASK;
+        let response_tx = (poll_rx + 447_283_000) & TIMESTAMP_MASK;
+        let response_rx = (response_tx + tof) & TIMESTAMP_MASK;
+        let final_tx = (response_rx + 447_279_000) & TIMESTAMP_MASK;
+        let final_rx = (final_tx + tof) & TIMESTAMP_MASK;
         let distance = distance_metres(
-            [poll_tx, poll_ack_rx, range_tx],
+            [poll_tx, response_rx, final_tx],
             ResponderTimestamps {
                 poll_rx,
-                poll_ack_tx,
-                range_rx,
+                response_tx,
+                final_rx,
             },
         )
         .unwrap();

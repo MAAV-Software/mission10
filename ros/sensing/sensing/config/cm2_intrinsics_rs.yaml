@@ -1,0 +1,13 @@
+# Mission sensing calibration for the downward Camera Module 2.
+cam0:
+  # Candidate from the patched Kalibr rolling-shutter solve documented at
+  # reference/cyclops_offline/calibration/20260724_drone4_intrinsics/README.md.
+  # The runtime flow frontend consumes these values; it does not re-estimate
+  # intrinsics or line delay.
+  camera_model: pinhole
+  distortion_model: radtan
+  distortion_coeffs: [0.15046410, -0.23368367, 0.00000042, -0.00209991]
+  intrinsics: [1298.69385194, 1299.56328818, 827.70242273, 617.60425847]
+  resolution: [1640, 1232]
+  shutter_model: rolling
+  line_delay: 0.00000968869339923

@@ -1,0 +1,66 @@
+# Mission engine for the real Drone4 flight at M-Air.
+#
+# Fly the center-return qualification pattern from the 2026-07-26 flight
+# card. Each short leg returns over tags 6 and 7. The engine accepts a new
+# map-to-flight correction only from a fresh, geometrically consistent pair.
+# It holds at center until the correction has converged.
+#
+# Before NAV_LAND, hold the center with valid horizontal state and low speed
+# for three continuous seconds. A failed gate keeps Offboard position hold;
+# it does not hand a moving aircraft to Auto Land.
+/**:
+  ros__parameters:
+    # base controller: real preflight, safety pilot on RC, and no motion until
+    # the operator publishes /start_mission
+    wait_for_start: true
+    force_arm: false
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20        # 1.0 s at 20 Hz; rfd-mission-execution 3
+    takeoff_altitude_m: 2.0
+    takeoff_acceptance_m: 0.25
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    launch_stability_s: 3.0
+
+    # eight fixed compass legs, center -> outer point -> center
+    mission_pattern: center_return_rosette
+    rosette_radius_m: 1.5
+    rosette_outer_hold_s: 0.5
+    rosette_center_hold_s: 0.5
+    survey_alt_m: 2.0
+    lane_speed_mps: 1.0
+    goto_max_heading_rate_deg_s: 30.0
+    reach_tolerance_m: 0.20
+    land_settle_s: 3.0
+    land_speed_tolerance_mps: 0.20
+
+    # guards the core applies to the estimate and the command
+    fence_radius_m: 2.0
+    mission_timeout_s: 0.0
+    max_dips: 0
+    detector_silence_s: 0.0     # 0 disables the guard
+
+    # the nadir detector, which the flight recorder runs on its own frames
+    detections_topic: /detections/down
+    camera_fx_px: 1298.69385194
+    camera_width_px: 1640
+    camera_height_px: 1232
+    camera_roll_deg: 0.0
+    camera_tilt_deg: 0.0
+
+    # PX4 fuses CM2 optical flow. Tags 6 and 7 correct the mission-to-PX4
+    # transform at each center return; no tag EV stream is fused in this gate.
+    anchor_tag_ids: [6, 7]
+    anchor_aborts: false
+    anchor_corrects: true
+    anchor_gate_m: 1.5
+    anchor_persist_s: 1.0
+    anchor_max_radial_m: 3.0
+    anchor_correction_rate_mps: 0.30
+    anchor_correction_max_m: 5.0
+    anchor_correction_fresh_s: 0.5
+    anchor_correction_pair_error_m: 0.25
+    anchor_correction_settle_m: 0.10
+
+    drone_id: drone4
+    dump_dir: /mnt/recordings

@@ -424,9 +424,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "futures",
- "heapless",
  "libm",
- "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -1116,6 +1114,7 @@ dependencies = [
  "dw1000-rs",
  "embedded-hal 1.0.0",
  "gpiocdev",
+ "libc",
  "linux-embedded-hal",
  "mission10-uwb-protocol",
 ]

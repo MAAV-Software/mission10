@@ -1,0 +1,100 @@
+{
+  "date": "2026-07-28",
+  "source_dataset": "/tmp/maav_localization_20260724_2005/prepared/svo_dataset",
+  "configuration": "B_hover_psd_floor",
+  "svo": {
+    "repository": "reference/rpg_svo_pro_with_digital_twins",
+    "branch": "maav/initializer-scale-response",
+    "commit": "93215126f511e6cdc9629338d90cbd23530c2ab2"
+  },
+  "experiment": {
+    "last_bundle": 350,
+    "visual_success_bundle": 200,
+    "visual_reference_bundle": 0,
+    "initializer_model": "FivePoint",
+    "initializer_inliers": 317,
+    "initializer_inlier_hash": 3687260644750140001,
+    "automatic_reinitialization": false,
+    "reconstruction": {
+      "states": 2,
+      "active_keyframes_before_current_submission": 1,
+      "landmarks": 328,
+      "first_reference_imu_samples": 23,
+      "full_imu_samples": 1390,
+      "inherited_marginalization_prior": false,
+      "state_path_matches_live_no_global_position_path": true,
+      "solver_time_limit_preserved": true
+    },
+    "arms": [
+      {
+        "map_scale": 0.75,
+        "rebuild_body_baseline_m": 0.001573140047648144,
+        "first_solve_pose_scale": 1.0,
+        "first_solve_landmark_scale": 1.0,
+        "first_solve_initial_cost": 105.38727380460185,
+        "first_solve_final_cost": 105.38727380460185,
+        "first_factor_mismatch_bundle": 201,
+        "tracking_failure_bundle": 202
+      },
+      {
+        "map_scale": 1.5,
+        "rebuild_body_baseline_m": 0.005142926857028583,
+        "first_solve_pose_scale": 1.0,
+        "first_solve_landmark_scale": 1.0,
+        "first_solve_initial_cost": 105.45941607493874,
+        "first_solve_final_cost": 105.45941607493874,
+        "first_factor_mismatch_bundle": null,
+        "tracking_failure_bundle": null
+      },
+      {
+        "map_scale": 3.0,
+        "rebuild_body_baseline_m": 0.012518687764446559,
+        "first_solve_pose_scale": 1.0,
+        "first_solve_landmark_scale": 1.0,
+        "first_solve_initial_cost": 105.60786912746005,
+        "first_solve_final_cost": 105.60786912746005,
+        "first_factor_mismatch_bundle": 201,
+        "tracking_failure_bundle": null
+      }
+    ]
+  },
+  "exact_solve_control": {
+    "ceres_iterations": 20,
+    "ceres_time_limit_s": null,
+    "arms": [
+      {
+        "map_scale": 0.75,
+        "first_solve_pose_scale": 0.969136344287108,
+        "first_solve_landmark_scale": 1.0000014764907812,
+        "first_solve_final_cost": 89.52088068395585
+      },
+      {
+        "map_scale": 1.5,
+        "first_solve_pose_scale": 0.32726008965626513,
+        "first_solve_landmark_scale": 1.1018052383131833,
+        "first_solve_final_cost": 59.077450191901185
+      },
+      {
+        "map_scale": 3.0,
+        "first_solve_pose_scale": 0.2994209375672436,
+        "first_solve_landmark_scale": 1.1227861938295558,
+        "first_solve_final_cost": 33.78404007192741
+      }
+    ]
+  },
+  "interpretation": [
+    "The live-consistent reconstructed graph did not correct scale in its first three-iteration solve.",
+    "The 0.75 arm failed tracking two bundles after visual initialization.",
+    "The live frontend factor streams differed at bundle 201. Later trajectory agreement cannot certify scale convergence.",
+    "The exact solve reduced cost, but its corrections were not reciprocal and did not converge the three baselines to one geometry.",
+    "An earlier reconstruction used a different state overload and lost the Ceres time-limit callback. Those results are rejected."
+  ],
+  "decision": {
+    "current_metric_latch_valid": false,
+    "backend_recovers_arbitrary_visual_scale": false,
+    "long_replay_gate_passed": false,
+    "long_replay_run": false,
+    "visual_initialization_handoff_is_only_failure": false,
+    "next_bounded_experiment": "Replay one recorded frontend factor stream into a shadow backend before changing the estimator."
+  }
+}

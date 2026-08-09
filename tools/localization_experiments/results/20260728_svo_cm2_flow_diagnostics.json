@@ -1,0 +1,91 @@
+{
+  "source": {
+    "rl_vo_fork": "https://github.com/calgary-kirisame/rl_vo",
+    "branch": "maav/cm2-flow-frontend",
+    "commit": "96c5a3eafa1a7dae772c7e81f421056ab56411f9"
+  },
+  "lab_replay": {
+    "frames": 2603,
+    "duration_s": 86.687788009,
+    "effective_rate_hz": 30.01576184790709,
+    "gyro_prediction": true,
+    "valid_availability_after_1s": 1.0,
+    "latency_ms": {
+      "median": 2.603915985673666,
+      "p95": 5.466148117557168,
+      "max": 8.944886038079858
+    },
+    "deterministic_tracks_sha256": "d292e01a355832bdc17373ddb70db45531cba591c2b21dee7f56dfed03b185dd"
+  },
+  "flight_replay_20260724": {
+    "frames": 6670,
+    "duration_s": 250.540000999,
+    "effective_rate_hz": 26.618503925154126,
+    "gyro_prediction": true,
+    "valid_availability_after_1s": 1.0,
+    "latency_ms": {
+      "median": 4.408047534525394,
+      "p95": 8.423862478230149,
+      "max": 16.162142157554626
+    }
+  },
+  "development_selection": {
+    "interval_s": [0.0, 70.35],
+    "selected_reducer": "tile_diagnostic_huber",
+    "availability": 1.0,
+    "scale_median": 0.9553681186449827,
+    "vector_error_median_m": 0.0034883145533931344,
+    "vector_error_p95_m": 0.018071681039261885
+  },
+  "held_out_flow": {
+    "interval_s": [70.35, 75.6],
+    "samples": 16,
+    "scale_median": 0.9816363883996497,
+    "vector_error_median_m": 0.004459146307137633,
+    "vector_error_p95_m": 0.011530096907112476,
+    "velocity_error_proxy_m_s": {
+      "median": 0.008918292614275266,
+      "p95": 0.023060193814224952
+    },
+    "klt_vector_error_median_m": 0.004072220674244383,
+    "klt_vector_error_p95_m": 0.011311912961594704,
+    "beats_klt_on_both_error_gates": false,
+    "passes_px4_flow_proxy_gates": true
+  },
+  "loop_research": {
+    "klt_endpoint_error_m": 0.03534912099366625,
+    "diagnostic_huber_endpoint_error_m": 0.024467095552187346,
+    "development_selected_endpoint_error_m": 0.05591930071348479,
+    "used_as_px4_flow_gate": false
+  },
+  "tracker_diagnostics": {
+    "attempts": 831306,
+    "successful": 695479,
+    "success_fraction": 0.8366101050635987,
+    "failure_counts": {
+      "max_iterations": 118000,
+      "reference_border": 801,
+      "current_border": 17026
+    },
+    "track_age_16_plus_success_fraction": 0.9723023256392584,
+    "prediction_error_px": {
+      "median": 3.6277488333272254,
+      "p95": 26.447344566641796
+    },
+    "photometric_rmse": {
+      "median": 6.458115100860596,
+      "p95": 26.662258720397944
+    },
+    "high_angular_rate_residual_growth": {
+      "under_10_deg_s_p95_rad": 0.01211941088012859,
+      "10_to_30_deg_s_p95_rad": 0.08732179013942895,
+      "over_30_deg_s_p95_rad": 0.10884119927267306
+    }
+  },
+  "decision": {
+    "strict_klt_superiority": false,
+    "px4_flow_offline_qualification": true,
+    "live_adapter_in_scope": false,
+    "conclusion": "Plan a selectable live SVO flow adapter separately. The frontend remains cleared; use the new boundary diagnostics to localize the still-unknown downstream initialization or backend failure."
+  }
+}

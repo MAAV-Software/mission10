@@ -16,5 +16,10 @@ setup(
     maintainer_email="131201352+calgary-kirisame@users.noreply.github.com",
     description="Mission execution layer for one drone: survey state machine, lane geometry, detection back-projection, mine log, and regroup dump.",
     license="MPL-2.0",
-    entry_points={},
+    entry_points={
+        "console_scripts": [
+            "mission_engine = mission_engine.rim.engine_node:main",
+            "tag_detector = mission_engine.rim.tag_detector:main",
+        ],
+    },
 )

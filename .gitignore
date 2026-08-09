@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+
+# Local credentials (copy values from the provider's deploy snippet)
+.env.local
 .venv/
 env/
 
@@ -19,3 +22,4 @@ models/*/dataset/
 test*
 *.jpg
 *.png
+._*

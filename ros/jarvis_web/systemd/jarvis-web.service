@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis operator voice-command webapp
+After=network.target
+
+[Service]
+Type=simple
+User=maav
+Group=maav
+WorkingDirectory=/home/maav/mission10
+ExecStart=/home/maav/mission10/ros/jarvis_web/run_jarvis.sh
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,67 @@
+# Mission sensing parameters. The proven orbit replay used rl_vo's euroc.yaml.
+# Keep this configuration
+# identical except for the downward-camera keyframe criterion and the correctly
+# spelled reinitialization key. SVO remains visual-only.
+T_world_imuinit/qw: 1
+T_world_imuinit/qx: 0
+T_world_imuinit/qy: 0
+T_world_imuinit/qz: 0
+automatic_reinitialization: false
+depth_filter_affine_est_gain: true
+depth_filter_affine_est_offset: true
+detector_threshold_primary: 10
+detector_threshold_secondary: 200
+grid_size: 20
+# Flow uses point tracks in an isotropic planar model. SVO edgelets carry a
+# one-dimensional constraint that the full pose optimizer understands but this
+# adapter does not.
+use_edgelets: false
+# Preserve the stable reference patch to avoid adjacent-frame track drift, but
+# replenish the spatial grid before coverage becomes sparse.
+klt_template_is_first_observation: true
+tracker_min_tracks_to_detect_new_features: 180
+# At 30 Hz the CM2 inter-frame displacement is small. Starting at level 2
+# avoids the quantization bias observed with the inherited EuRoC level 4.
+klt_max_level: 2
+# Match the 0.01-pixel convergence precision used by the OpenCV KLT baseline.
+klt_min_update_squared: 0.0001
+img_align_est_illumination_gain: true
+img_align_est_illumination_offset: true
+img_align_max_level: 4
+img_align_min_level: 2
+img_align_prior_lambda_rot: 0.0
+img_align_prior_lambda_trans: 0.0
+init_min_disparity: 30
+kfselect_criterion: DOWNLOOKING
+kfselect_min_angle: 5
+kfselect_min_disparity: 20
+kfselect_min_dist_metric: 0.001
+kfselect_min_num_frames_between_kfs: 1
+kfselect_numkfs_lower_thresh: 90
+kfselect_numkfs_upper_thresh: 180
+map_scale: 1.0
+max_depth_inv: 0.05
+max_fts: 140
+max_n_kfs: 20
+mean_depth_inv: 0.3
+min_depth_inv: 1.0
+n_pyr_levels: 3
+pipeline_is_stereo: false
+poseoptim_prior_lambda: 0.0
+poseoptim_thresh: 2.0
+poseoptim_using_unit_sphere: false
+publish_every_nth_dense_input: 5
+publish_marker_scale: 0.5
+quality_max_drop_fts: 80
+quality_min_fts: 40
+relocalization_max_trials: 10
+reprojector_affine_est_gain: true
+reprojector_affine_est_offset: true
+reprojector_max_n_kfs: 5
+scan_epi_unit_sphere: false
+seed_convergence_sigma2_thresh: 200
+update_seeds_with_old_keyframes: true
+use_async_reprojectors: false
+use_ceres_backend: false
+use_imu: false
+use_threaded_depthfilter: false

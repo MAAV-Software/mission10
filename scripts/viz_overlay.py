@@ -38,8 +38,6 @@ def build(config):
     with open(FLEET) as f:
         fleet = yaml.safe_load(f)
     spawn = [tuple(float(x) for x in v["pose"].split(",")[:3]) for v in fleet["vehicles"]]
-    spacing = spawn[1][0] - spawn[0][0] if len(spawn) > 1 else 3.0
-
     n = int(d["drone_count"])
     R = float(d["orbit_radius_m"])
     ce, cn = float(d["orbit_center_e_m"]), float(d["orbit_center_n_m"])
@@ -48,12 +46,14 @@ def build(config):
     phase0 = math.radians(float(d["phase0_deg"]))
     step = math.radians(float(d["phase_step_deg"]))
 
-    kw = dict(spacing=spacing, downrange=cn, base=(ce, 0.0), altitude=alt)
+    # Each mission node generates the same launch-relative trajectory; the
+    # fleet's two-dimensional spawn offsets place it in the shared world.
+    kw = dict(spacing=0.0, downrange=cn, base=(ce, 0.0), altitude=alt)
     pkw = dict(phase_step=step, phase0=phase0)
 
     ins_spin1 = math.radians(float(d.get("insertion_spin_deg", 235.0)))
 
-    centers = [(ce + spacing * i, cn) for i in range(n)]
+    centers = [(spawn[i][0] + ce, spawn[i][1] + cn) for i in range(n)]
     out, mid = [], 1  # ids start at 1 (gz treats id 0 as auto-assign)
     for i in range(n):
         c = COLORS[i % 4]

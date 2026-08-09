@@ -12,18 +12,15 @@ mod device;
 mod driver_core;
 pub mod dw1000;
 pub mod error;
-pub mod protocol;
-pub mod ranging;
 pub mod registers;
 pub mod time;
 
 pub use async_dw1000::AsyncDw1000;
 pub use config::*;
 pub use device::{
-    AntennaDelay, DeviceIdentity, Eui64, PanId, PeerSnapshot, RxFrame, ShortAddress, SignalMetrics,
-    SysStatus, Timestamps,
+    AntennaDelay, DelayedTransmit, DeviceIdentity, DxTimeDeadline, Eui64, OnAirTimestamp, PanId,
+    PeerSnapshot, RadioDebugState, RxFrame, ShortAddress, SignalMetrics, SysStatus, Timestamps,
 };
 pub use dw1000::Dw1000;
-pub use error::{Error, ProtocolError, RxError};
-pub use ranging::{RangingConfig, RangingEvent, RangingNode, RangingSchedule, Role};
+pub use error::{Error, RxError};
 pub use time::{DW1000Time, DwTime};

@@ -1,0 +1,74 @@
+{
+  "date": "2026-07-28",
+  "source_dataset": "/tmp/maav_localization_20260724_2005/prepared/svo_dataset",
+  "configuration": "B_hover_psd_floor",
+  "svo": {
+    "repository": "reference/rpg_svo_pro_with_digital_twins",
+    "branch": "maav/initializer-scale-response",
+    "commit": "fe542469f074afb5fde397fef3da243c07cf0032"
+  },
+  "experiment": {
+    "last_bundle": 350,
+    "visual_success_bundle": 200,
+    "visual_reference_bundle": 0,
+    "initializer_model": "FivePoint",
+    "initializer_inliers": 317,
+    "initializer_inlier_hash": 3687260644750140001,
+    "forced_keyframes": [214, 226, 237, 252, 284, 306],
+    "arms": [
+      {
+        "map_scale": 0.75,
+        "visual_depth_m": 0.7500000000000016,
+        "visual_baseline_m": 0.0037040066727915453,
+        "backend_geometry_scale_to_1p5": 1.0065716249930976,
+        "first_handoff_translation_m": 0.1153465743393218
+      },
+      {
+        "map_scale": 1.5,
+        "visual_depth_m": 1.500000000000003,
+        "visual_baseline_m": 0.007408013345582859,
+        "backend_geometry_scale_to_1p5": 1.0,
+        "first_handoff_translation_m": 0.11515933622492426
+      },
+      {
+        "map_scale": 3.0,
+        "visual_depth_m": 3.0000000000000067,
+        "visual_baseline_m": 0.014816026691165529,
+        "backend_geometry_scale_to_1p5": 1.0056277229539863,
+        "first_handoff_translation_m": 0.11514195707819559
+      }
+    ]
+  },
+  "causal_controls": {
+    "same_initializer_in_all_arms": true,
+    "same_keyframes_in_all_arms": true,
+    "first_live_factor_mismatch_bundle": 201,
+    "pose_seed_control": {
+      "first_visual_initial_cost": 5613454.032204404,
+      "first_visual_final_cost": 5.700882898372414,
+      "first_visual_pose_scale": 0.03956959157016843,
+      "next_load_handoff_translation_m": 0.11514414857142573
+    }
+  },
+  "metric_latch": {
+    "bundle": 215,
+    "frames_after_visual_success": 15,
+    "distance_ratio": 0.9999999999999953,
+    "reference_keyframe_in_backend": false,
+    "current_keyframe_in_backend": true,
+    "current_keyframe_fixed": true
+  },
+  "interpretation": [
+    "The visual scale injection worked exactly, but the initialized two-view baseline was only 3.7 to 14.8 mm.",
+    "Bundle 200 already existed as an inertially propagated backend state before visual initialization. Its backend trajectory was nearly invariant to the 0.5x and 2x visual scale changes.",
+    "The live frontend streams diverged at bundle 201, when backend writeback first acted on the differently scaled maps. The three live arms therefore do not prove metric-scale convergence.",
+    "Directly seeding the bundle-200 backend pose was rejected by the first solve. The inherited previsual backend state and prior chain overwhelmed the visual handoff.",
+    "The metric latch fired on the frontend pair [0, 200] after bundle 200 became fixed and bundle 0 was absent from the backend. Its unity ratio is not a metric-readiness measurement."
+  ],
+  "decision": {
+    "current_metric_latch_valid": false,
+    "backend_recovers_arbitrary_visual_scale": "not established",
+    "primary_failure_localized_to": "visual-initialization to previsual-backend handoff",
+    "next_bounded_experiment": "Reconstruct the backend at visual success with both initializer keyframes and buffered IMU. Do not treat a pose overwrite as a repair."
+  }
+}

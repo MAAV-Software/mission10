@@ -16,33 +16,16 @@ use embassy_time::{Duration, Instant as EmbassyInstant, Timer};
 use embedded_hal_async::spi::SpiDevice;
 use mission10_uwb_protocol::host::{Diagnostic, HealthCounters};
 
-pub const OWN_ADDRESS: [u8; 2] = if cfg!(feature = "initiator") {
-    [0xa0, 0xc0]
-} else {
-    [0xa1, 0xc1]
-};
-pub const PEER_ADDRESS: [u8; 2] = if cfg!(feature = "initiator") {
-    [0xa1, 0xc1]
-} else {
-    [0xa0, 0xc0]
-};
-pub const OWN_INDEX: u8 = if cfg!(feature = "initiator") { 0 } else { 1 };
-pub const PEER_INDEX: u8 = if cfg!(feature = "initiator") { 1 } else { 0 };
 pub const FALLBACK_ANTENNA_DELAY: u16 = 16_390;
 
-// Both delayed DS-TWR legs use the same bench-tunable turnaround. Two
+// Both delayed DS-TWR legs use the same tunable turnaround. Two
 // milliseconds is intentionally still generous: once it is stable against the
 // DW1000 peer we can lower it toward the few-hundred-microsecond hardware limit.
 pub const REPLY_DELAY_US: u32 = 2_000;
 
-// Every response in the bench exchange is scheduled within 2 ms. Give USB and
-// executor activity ample margin, but do not let a lost packet leave both
-// peers receiving forever.
-pub const RESPONSE_TIMEOUT_US: u32 = 10_000;
-
-// Avoid monopolizing the channel in the one-pair diagnostic. Together with the
-// two delayed legs this targets roughly 100 ranging exchanges per second.
-pub const INITIATOR_INTER_EXCHANGE_GUARD_MS: u64 = 5;
+// Every reply marker is 2 ms after the preceding leg. This timeout bounds one
+// failed exchange without delaying other due pairs for a full far-pair period.
+pub const RESPONSE_TIMEOUT_US: u32 = 3_500;
 
 // IEEE short SFD timeout: preamble symbols + 1 + SFD symbols - PAC symbols.
 // The 128-symbol preamble selects PAC8, and the standard SFD is 8 symbols.
@@ -232,7 +215,7 @@ where
     if let Some(microseconds) = frame_wait_timeout_us {
         // RX_FWTO ticks are approximately 1.0256 us. Round up so the hardware
         // deadline is never shorter than the requested interval.
-        let ticks = ((u64::from(microseconds) * 10_000 + 10_255) / 10_256) as u32;
+        let ticks = (u64::from(microseconds) * 10_000).div_ceil(10_256) as u32;
         radio
             .ll()
             .rx_fwto()

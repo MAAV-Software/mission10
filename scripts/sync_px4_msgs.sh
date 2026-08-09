@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate ros/px4_msgs/{msg,srv} from a local PX4-Autopilot checkout.
 # The message set MUST match the firmware in flight: point this at the same
-# fork + branch the FC and image CI use (calgary-kirisame/PX4-Autopilot @
-# uxrce-v1.16.2-fix). versioned/ definitions are flattened in, as PX4 expects.
+# immutable fork commit that the FC and image CI use. Versioned definitions are
+# flattened in, as PX4 expects.
 # Usage: scripts/sync_px4_msgs.sh [px4-dir]   (default: $PX4_DIR)
 set -euo pipefail
 
@@ -21,6 +21,7 @@ copy_glob() {  # <srcdir> <pattern> <dstdir>
   for f in "$1"/$2; do
     [ -e "$f" ] && cp "$f" "$3"
   done
+  return 0
 }
 
 copy_glob "$px4/msg"           "*.msg" "$dst/msg/"
@@ -33,4 +34,7 @@ if sha="$(git -C "$px4" rev-parse --short HEAD 2>/dev/null)"; then
 else
   echo "synced px4_msgs from $px4 (non-git source)"
 fi
-echo "  msgs: $(ls "$dst/msg/"*.msg | wc -l)  srvs: $(ls "$dst/srv/"*.srv 2>/dev/null | wc -l)"
+shopt -s nullglob
+msgs=("$dst/msg/"*.msg)
+srvs=("$dst/srv/"*.srv)
+echo "  msgs: ${#msgs[@]}  srvs: ${#srvs[@]}"

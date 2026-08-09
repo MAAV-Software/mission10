@@ -22,6 +22,9 @@ setup(
     entry_points={
         "console_scripts": [
             "phased_orbits_mission = flight_intelligent.phased_orbits_mission:main",
+            "survey_mission = flight_intelligent.survey_mission:main",
+            "relative_localization = flight_intelligent.relative_localization_shadow:main",
+            "prop_idle_dummy_mission = flight_intelligent.prop_idle_dummy_mission:main",
         ],
     },
 )

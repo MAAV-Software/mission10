@@ -11,11 +11,8 @@ home_gps:
   lon: -83.7104553367608
   alt_m: 0.0
 vehicles:
-  # Spawn 1.5 m east of the pad (world origin), NOT on it: world_truth_to_odom
-  # rejects any transform within origin_clear_m (0.8) of the world origin in XY
-  # to tell model poses from link poses, so a drone spawned at the origin gets
-  # filtered out of the truth feed and EV never flows. The orbit center is set
-  # to the spawn (phased_orbits_mair.yaml: orbit_center_n_m 0), so it takes
-  # off, orbits, and lands at the spawn — still clearing every net wall by
-  # >= 6.1 m. Put it back on the pad once the splitter keys on entity names.
-  - {namespace: px4_0, pose: "1.5,0,0,0,0,0"}
+  # The concrete pad is a 1.2192 m square centered at the world origin. A
+  # 0.4 m east offset keeps the complete x500 footprint on the pad while
+  # remaining outside world_truth_to_odom's model-relative-link rejection
+  # radius.
+  - {namespace: px4_0, pose: "0.4,0,0,0,0,-1.570796327"}

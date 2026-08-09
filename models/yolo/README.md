@@ -1,10 +1,11 @@
 # models/yolo — PFM-1 detection model pipeline
 
-> **Status: blocked on `ros/mission_engine`.** The datagen imports
-> `mission_engine.core` (camera model, projection, serpentine paths) so that
-> label geometry can never drift from runtime geometry — and that package has
-> not been built yet. `datagen/` and `test/` stay red until it lands; the
-> design below is current.
+> **Status: domain-gap remediation.** The leakage-safe real-positive recipe
+> replicated on an unseen phone-photo fold at 30/60/120 px while retaining the
+> untouched synthetic test floor and rejecting real backgrounds. Appearance
+> replay repaired the controlled sage-gray miss without breaking those gates.
+> Native phone framing still misses all held-out mines, and reserved CM2
+> evaluation has not run, so the checkpoint is not promotion-ready.
 
 Single-class YOLOv11 detector for surface-laid PFM-1 replica mines, trained on
 synthetic imagery and deployed to the Hailo-8 on each drone's CM5. This folder
@@ -19,9 +20,10 @@ the resulting `.hef` lives in the ROS detection package.
 | `test/` | Unit tests for the pure pipeline. `cd models/yolo && python3 -m unittest discover -s test -t .` (CI runs this). |
 | `assets.lock` | Pinned checksums + provenance for the Blender scene archive. The payload itself never enters git. |
 | `assets/` | (gitignored) Extracted scene assets — `Grass.blend`, `pfm1-mine-grass.blend`, textures. Fetch per `assets.lock`. |
-| `dataset/` | (future) Rendered images + labels, assembled for training. Never committed. |
-| `train/` | (future) Training configs/scripts (Ultralytics, runs on RunPod). |
-| `export/` | (future) Hailo Dataflow Compiler export → `.hef`, plus `weights.lock`. The DFC wheel is proprietary: bring-your-own-binary, never committed. |
+| `audit/`, `tools/` | Private real-image annotation, tiled audits, quantitative evaluation, hard-negative review, and controlled render diagnostics. |
+| `dataset/` | Rendered images, labels, and selected run artifacts. Bulk data is never committed. |
+| `train/` | Leakage-safe preparation, locked composition presets, Ultralytics training, and operational evaluation. |
+| `export/` | Hailo calibration and profiler helpers. The proprietary DFC wheel is bring-your-own-binary and never committed. |
 
 ## Usage
 
@@ -32,17 +34,341 @@ cd models/yolo
 python3 -m datagen.dump --out /tmp/dump --scenes 0:5
 ```
 
-Rendering (Blender adapter; see the bench list in `datagen/generate.py`
-before trusting output):
+The production corpus contains 300 independently randomized scenes, 4–20 mines
+per scene, camera stations every 2 m, and station altitudes from 1–7 m AGL.
+The 7 m ceiling covers the planned 6 m nominal survey with margin without
+spending training capacity on smaller 8 m views. The adapter analytically
+projects every candidate station before Blender starts, renders every positive
+station plus a deterministic 5% sample of negatives as one compact animation,
+and then computes exact geometry-based occlusion for only those frames.
+Original `k####` station identities survive the compact animation mapping.
+
+Production rendering uses Cycles. On an RTX 3090, `auto` prefers OPTIX and
+falls back to CUDA, then CPU:
 
 ```sh
-blender -b assets/Grass.blend -P datagen/generate.py -- --out dataset/raw --scenes 0:50
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out dataset/raw --scenes 0:300 --cycles-backend auto
+```
+
+Use EEVEE for local smoke tests and performance checks. It exercises the same
+station selection, animation, naming, and occlusion paths:
+
+```sh
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out dataset/smoke --scenes 0:1 --engine eevee
 ```
 
 Determinism: everything derives from `random.Random(f"{seed}:{scene_index}")`.
 Same config + same scene index = byte-identical labels, render-identical
 scenes. Label-only runs and render runs share `write_scene`, so labels can
-never drift from renders.
+never drift from renders. Manifests store the complete configuration and are
+authoritative during materialization; later default changes cannot silently
+change geometry for already-rendered frames.
+
+After rendering, apply exact occlusion and create the 640 px inference-style
+training tiles:
+
+```sh
+python3 -m datagen.materialize --out dataset/raw --tiles
+```
+
+The production defaults keep 3% of empty tiles and emit no full-frame samples,
+because onboard inference always tiles. Empty YOLO label files are intentional.
+Mines remain labeled only when measured geometric visibility multiplied by the
+fraction inside the crop is at least 40%. Tiles containing a rejected mine are
+skipped when at least 15% remains, rather than emitted as false negatives;
+192 px overlap ordinarily provides another crop with a substantially better
+view. Per-frame training jitter coalesces near-duplicate rows or columns made
+by edge clamping, so one-pixel-shifted copies are not emitted.
+Ultralytics recommends roughly
+[0–10% background images](https://github.com/ultralytics/yolov5/issues/9908)
+to reduce false positives. The measured 300-scene production render yields
+12,033 tiles, including 912 empty tiles (7.6%), 12,046 boxes, and 724 poisoned
+boundary tiles skipped after exact grass occlusion. Frames that become empty
+after the exact occlusion pass remain useful hard negatives.
+
+`train/tiles.json` retains the source scene and frame for every tile. Split
+training and validation data by whole scene, never by individual tile, so
+nearby views of one mine layout cannot leak across splits.
+
+The first weight-training pilot uses scenes 0–39 and a committed, stratified
+30/5/5 scene split. Prepare its Ultralytics tree only after all 40 scenes have
+rendered and materialized:
+
+```sh
+python3 train/prepare.py \
+    --raw /workspace/dataset/pilot40-v1/raw \
+    --out /workspace/dataset/pilot40-v1/prepared \
+    --split train/pilot40-split.json
+```
+
+`split.lock.json` hashes every indexed image and label. The preparer hard-links
+files, rejects leakage and stale/unindexed products, and writes `dataset.yaml`.
+`train/run.py` owns the explicit YOLO11m/640 training settings and records the
+source-weight, dataset, package, CUDA, GPU, and git identities in
+`run.lock.json`. Ultralytics is pinned in `train/requirements.txt`.
+
+Audit frozen weights on unlabeled real images with the same 640 px / 192 px
+overlap grid used at deployment. The command writes full-resolution overlays
+and `audit.json`, including image and weight hashes. Pillow is an audit-only
+dependency; supply it ephemerally instead of adding it to the training
+environment:
+
+```sh
+uv run --with pillow --with ultralytics==8.4.115 python tools/audit_irl.py \
+    --weights /path/to/best.pt --out /tmp/irl-audit /path/to/images
+```
+
+Treat this as a qualitative domain-gap audit until the images have independent
+ground-truth labels. The tool merges duplicate detections caused by tile
+overlap, but cannot decide whether two adjacent boxes are fragments of one
+object.
+
+### Certified real-image workflow
+
+Keep real images and labels under the private, Git-ignored `reference/` tree.
+The label schema is `mission10-yolo-real-labels/1`. It stores source hashes,
+EXIF-oriented dimensions, immutable capture-group roles, full-object mine
+boxes, visibility, and ignore regions. Use a separate label document for each
+data role when practical. The five images used during model diagnosis and the
+three legacy renders are development data. The other 71 recovered phone
+photos are training candidates only after a human certifies every image. Keep
+all CM2 images as final holdout data. Keep monochrome CM2 images in the
+separate OOD holdout role.
+
+Start the loopback-only annotation UI with ephemeral Pillow:
+
+```sh
+uv run --with pillow python tools/annotate_irl.py \
+    /private/path/training-labels.json \
+    --init /private/path/phone-candidates/*.jpeg \
+    --capture-group github-phone-training-v1 \
+    --role training_candidate --freeze-by "$USER"
+```
+
+Draw the estimated full object even when grass hides part of it. Use an ignore
+region for an area that cannot be judged; an ignore region is not a negative.
+Treat a mine as `partial` when even one grass blade occludes its outline.
+Mark each image complete, inspect the full sequence again, and use the explicit
+certification control. Model output cannot certify labels. The server binds to
+loopback and refuses non-loopback addresses.
+
+Evaluate a certified development or holdout document with deployment tiling.
+The evaluator reports the low candidate floor and frozen 0.37 operating
+threshold, cross-tile fragments, clear and partial mine recall, empty-tile
+false-positive rate, and 30/60/120 px object-centered scale probes:
+
+```sh
+uv run --with pillow --with ultralytics==8.4.115 python tools/evaluate_irl.py \
+    --weights /path/to/best.pt \
+    --labels /private/path/development-labels.json \
+    --role development_eval \
+    --out /private/path/development-evaluation.json
+```
+
+Re-score a retained tiled audit after label certification without rerunning
+inference, or isolate real-object scale with the standalone 640 px probe:
+
+```sh
+python tools/evaluate_irl_audit.py \
+    --audit /private/path/all-phone-audit.json \
+    --labels /private/path/training-labels.json \
+    --role training_candidate \
+    --out /private/path/offline-training-diagnostic.json
+
+uv run --with pillow --with ultralytics==8.4.115 \
+    python tools/probe_certified_scale.py \
+    --weights /path/to/best.pt \
+    --labels /private/path/training-labels.json \
+    --role training_candidate \
+    --out /private/path/scale-probe.json --device 0
+```
+
+Reports over `training_candidate` are diagnostic-only and cannot promote a
+model. Preserve the audit, labels, weights, and hashes named in each report.
+
+At 1640×1232, the fixed 640 px / 192 px-overlap deployment grid has exactly
+12 tiles (four columns by three rows). A 4284×5712 oriented phone photo has 130
+tiles. Do not compare raw false-positive counts between those sensors without
+normalizing by the exact empty-tile count.
+
+Hard-negative proposals use baseline detections at confidence 0.10 or higher,
+at most eight candidate tiles per certified photo, plus two deterministic clean
+tiles. A proposed tile must not intersect a mine or ignore region. The
+token-protected, loopback-only reviewer defaults to a 32-crop QA sample spread
+across source photos, confidence, and clean controls; it is not a demand to
+inspect the full candidate pool. It preserves earlier decisions and shows the
+exact lossless 640 px EXIF-oriented crop. Press `Y` to confirm a negative, `N`
+to reject it, and the arrow keys to navigate. Only confirmation decisions are
+atomically autosaved; the UI cannot modify proposal provenance or certified
+labels.
+
+The strict materializer still refuses pending entries. After exhaustive labels
+have been human-certified and hash-locked, the explicit
+`--certification-backed` mode may include unreviewed proposals based on the
+certified absence of a mine; human rejections always win. Both modes recheck
+the label and source hashes and every mine/ignore intersection before writing
+an empty YOLO label:
+
+```sh
+uv run --with pillow python tools/materialize_irl_hard_negatives.py propose \
+    --labels /private/path/training-labels.json \
+    --baseline /private/path/all-phone-audit/audit.json \
+    --review /private/path/hard-negative-review.json
+
+uv run --with pillow python tools/review_irl_hard_negatives.py \
+    --labels /private/path/training-labels.json \
+    --baseline /private/path/all-phone-audit/audit.json \
+    --review /private/path/hard-negative-review.json \
+    --qa-size 32
+
+uv run --with pillow python tools/materialize_irl_hard_negatives.py materialize \
+    --labels /private/path/training-labels.json \
+    --baseline /private/path/all-phone-audit/audit.json \
+    --review /private/path/hard-negative-review.json \
+    --out /private/path/hard-negative-component \
+    --certification-backed
+```
+
+The production warm start assigns scenes 0–39 to training because the pilot
+checkpoint has already learned from that shard. Its committed 240/30/30 split
+draws validation and test only from scenes 40–299. After training,
+`train/evaluate.py` chooses a confidence threshold on validation by maximizing
+F2 subject to 90% precision, then applies it unchanged to test. The report
+includes empty-tile false-positive rate and recall by altitude, projected box
+size, surface, grass profile, and filament-color family.
+
+Before a new training run, render the Cycles-only appearance acceptance set.
+It contains exactly 15 centered mine images (five unjittered palette anchors by
+30/60/120 px projected length) on one fixed grass plate and three mine-free
+background plates (grass, dirt, and concrete). The manifest and YOLO labels
+make the test machine-readable. This set is a diagnostic, not training data:
+
+```sh
+blender -b assets/m10-base.blend \
+    -P tools/render_color_scale_matrix.py -- \
+    --out /workspace/dataset/mine-color-scale-v1 \
+    --cycles-backend optix --samples 64
+
+uv run --with pillow --with ultralytics==8.4.115 \
+    python tools/evaluate_color_scale_matrix.py \
+    --weights /path/to/best.pt \
+    --matrix /workspace/dataset/mine-color-scale-v1 \
+    --out /workspace/dataset/mine-color-scale-v1-baseline-evaluation.json
+```
+
+Acceptance requires a matched detection in all 15 positive images and no
+detection on any of the three empty plates at the frozen operating threshold.
+The matrix is the per-color-family gate; ordinary v7 scenes contain mixed
+families and therefore report the image-level color group as `mixed`.
+
+Render the 60-scene appearance supplement with its distinct seed, then prepare
+the committed 48/6/6 scene split. Keep the original 300-scene corpus frozen:
+
+```sh
+blender -b assets/m10-base.blend -P datagen/generate.py -- \
+    --out /workspace/dataset/appearance60-v1/raw --scenes 0:60 \
+    --seed m10-appearance-v1 --cycles-backend optix
+python3 -m datagen.materialize \
+    --out /workspace/dataset/appearance60-v1/raw --tiles
+python3 train/prepare.py \
+    --raw /workspace/dataset/appearance60-v1/raw \
+    --out /workspace/dataset/appearance60-v1/prepared \
+    --split train/appearance60-split.json
+```
+
+`train/compose.py` creates content-locked, hard-linked training views. It
+mixes only the training split; every arm uses the untouched production300
+validation and test splits. Presets are `control` (100% production),
+`appearance` (85/15 production/appearance), `hardneg` (85/15
+production/certified hard negatives), `combined` (70/15/15), and the
+conditional `real_positive` arm (75/15/10 production/hard-negative/real-positive).
+After that recipe replicates on an unseen fold, `real_positive_appearance`
+replays the appearance supplement at 65/10/15/10
+production/appearance/hard-negative/real-positive. Both real-positive presets
+require the exact-photo fold lock and exclude all held-out photo provenance.
+The composer repeats smaller
+components deterministically to make the requested fractions exact and hashes
+every input before it creates output.
+
+```sh
+python3 train/compose.py --preset combined \
+    --out /workspace/dataset/ablation-combined \
+    --component production=/workspace/dataset/production300-v1/prepared \
+    --component appearance=/workspace/dataset/appearance60-v1/prepared \
+    --component hardneg=/workspace/dataset/hard-negative-component
+
+python3 train/run.py \
+    --preset combined \
+    --data /workspace/dataset/ablation-combined/dataset.yaml \
+    --model /workspace/inputs/production300/best.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name domain-gap-combined-v1
+```
+
+For the fold-1 appearance replay, retain the frozen nine-epoch stopping rule:
+
+```sh
+python3 train/compose.py --preset real_positive_appearance \
+    --out /workspace/dataset/real-positive-appearance-fold1-composed-v1 \
+    --component production=/workspace/dataset/production300-v1/prepared \
+    --component appearance=/workspace/dataset/appearance60-v1/prepared \
+    --component hardneg=/workspace/dataset/hard-negative-fold1-v1 \
+    --component real_positive=/workspace/dataset/real-positive-fold1-v1 \
+    --fold-lock /workspace/private/mission10_irl_archive/phone-training-folds-v1.json \
+    --held-out-fold 1
+
+python3 train/run.py --preset real_positive_appearance \
+    --data /workspace/dataset/real-positive-appearance-fold1-composed-v1/dataset.yaml \
+    --model /workspace/inputs/production300/best.pt \
+    --project /workspace/runs/mission10-yolo \
+    --name domain-gap-realpositive-appearance-fold1-v1 \
+    --stop-after-epochs 9
+```
+
+The fine-tune presets lock a 20-epoch schedule, AdamW, `lr0=0.0001`, patience
+8, batch 16, 640 px input, deterministic seed 10, streamed images, and one
+checkpoint per epoch. `train/run.py --stop-after-epochs N` intentionally stops
+after `N` completed epochs without shortening the cosine or mosaic schedule;
+its frozen evaluation checkpoint is `last.pt`, never validation-selected
+`best.pt`. Do not add the
+real-positive arm unless hard negatives repair false positives but clear-mine
+recall still misses. Promote only an arm that keeps synthetic mAP50–95 at least
+0.9223 and synthetic recall at least 0.98, detects all 15 matrix mines with no
+plate false positives, reduces phone-development false positives by at least
+80%, detects each clear phone-development mine with one full-object box, and
+stays at or below one false positive per 100 empty real tiles. Final CM2
+precision and recall must both reach 0.90.
+
+If the targeted arms fail the CM2 gate, compare a gated VisDrone lineage under
+the same 50-epoch mine schedule. Do not preserve unused VisDrone or COCO class
+logits in the deployed one-class head. Compile for Hailo only after a model
+passes the promotion gates.
+
+Mine color is bounded material-domain randomization, not arbitrary RGB. Each
+mine independently draws one of five filament anchors: official sage-gray
+`#8AA098` (30%), legacy pale green `#C8CCB5` (10%), team lime `#44BE66`
+(10%), green `#4F7D36` (25%), or muddy olive `#555737` (25%). It then receives
+at most 6 degrees of hue jitter, 0.50–1.20 saturation scale, and 0.80–1.20
+value scale. Per-mine draws in one scene prevent the renderer from correlating
+an entire background and lighting state with one color family. The pure scene
+manifest records both the family and final sRGB value; Blender converts it to
+scene-linear color without tinting the AprilTag. Schema v7 records this
+contract. Materialization continues to accept existing schema-v6 renders.
+
+Grass-primary scenes use a deterministic, manifest-recorded grass profile.
+Sparse cover is the default (90%, density 210–600, tallest blade 12–35 cm).
+Rare dense cover supplies hard occlusion cases (10%, density 1800–2500,
+tallest blade 50–55 cm). The profile draw is independent of mine placement,
+which prevents a density halo from becoming a detector shortcut. A balanced
+deterministic schedule keeps small shards close to the requested 90/10 mix
+instead of relying on a high-variance Bernoulli count.
+
+The generator writes lossless PNG at compression level 15. Cycles uses 16
+samples for production output. Local EEVEE uses 8 samples; this keeps the
+1640×1232 smoke-render path below the two-second weighted performance target
+without changing the Cycles dataset.
 
 ## Geometry contract
 
@@ -96,7 +422,7 @@ YOLOv11x on real RGB imagery of an inert PFM-1 + 3D-printed replicas,
    worked in narrow early-morning diurnal windows.
 8. **Geolocation benchmark:** yaw+AGL+FOV projection (no SfM) achieved
    **1.75 m mean error at 10 m AGL**. Our full-attitude backprojection at
-   4–8 m plus clustering must beat this comfortably.
+   4–7 m plus clustering must beat this comfortably.
 
 Caveats: tiny OOS set (11–15 positives), internal metric inconsistencies,
 one campus, leaf-off winter, hand-placed (no scatter-pose statistics),
@@ -119,7 +445,7 @@ simplify identification. Consequences:
   mines with IDs 0/12; eventually render tagged non-mine objects
   (landmarks/"other items") with other IDs as negatives.
 - **At survey altitude the tag is a *tagged-object* cue, not a mine cue.**
-  At 25.4 mm it spans ~4–9 px at 4–8 m AGL — a high-contrast blob, but
+  At 25.4 mm it spans ~5–9 px at 4–7 m AGL — a high-contrast blob, but
   decoys wear identical-looking blobs, so **shape must carry
   classification**. Render the tag faithfully (the blob is real signal the
   detector will see) but don't expect it to discriminate.
@@ -154,9 +480,11 @@ Surveyed four 2025–2026 *Scientific Reports* "improved YOLO + VisDrone"
 papers. Quality ranged from mediocre to fabricated; none touch mines, grass,
 or synthetic training. The single robust, convergent, Hailo-compilable
 takeaway: **a stride-4 P2 detection head dominates small-object gains**
-(+2.4–3.2 mAP50 standalone in every honest ablation; `yolo11-p2.yaml` in
-Ultralytics), while bolt-on attention modules contribute marginally and often
-don't compile. Relevant because PFM-1 at 8 m AGL letterboxed to a 640 input
-is ~8 px: pick input resolution / altitude band / P2 head as one combined
-budget decision, and measure the px-size vs recall curve on synthetic data
-before spending flight time.
+(+2.4–3.2 mAP50 standalone in every honest ablation), while bolt-on attention
+modules contribute marginally and often don't compile. Upstream YOLO11 ships
+with P3/8 as its smallest detection head, so P2 would be a custom architecture
+that must pass Hailo compilation. Relevant because a PFM-1 at 7 m AGL would be
+~9 px if the full frame were letterboxed to 640; native-resolution tiling keeps
+it ~23 px. Pick input resolution, altitude band, and detection head as one
+combined budget decision, and measure the px-size-vs-recall curve before
+spending flight time.

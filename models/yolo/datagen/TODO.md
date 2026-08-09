@@ -34,15 +34,15 @@ prevents the draw from changing mine geometry or boxes.
 mixed strip. The base blend needs matching material names, and surface scale,
 intersections, shadows, and z-fighting need visual verification.
 
-**Grass (verified on the bench 2026-07-17):** two layers. The grass material
-is a nadir bake of the archive's real hair-particle patch (view-consistent
-with the nadir survey camera), and a camera-following 3x3 grid of the actual
-particle patch (flattened, uniform density) adds real blade occlusion around
-the mines, snapped/flushed off non-grass strips. `grass_blade_m` samples blade
-length per scene — it directly randomizes occlusion severity. Fully buried
+**Grass (verified on the bench 2026-07-29):** two layers. A real-photo PBR
+material carries the broad ground appearance. A camera-following grid of GG
+Grass Painter geometry adds blade detail and real silhouette occlusion,
+snapped/flushed off non-grass strips. Grass-primary scenes record a pure
+`GrassChoice`: 90% sparse cover (density 210–600, blade maximum 12–35 cm) and
+10% dense cover (density 1800–2500, blade maximum 50–55 cm). Fully buried
 mines no longer stay labeled: the renderer writes per-mine visible fractions
 to `out/occlusion/` sidecars and `datagen.materialize` drops boxes whose
-occlusion x edge-clip product falls under `--min-frac`.
+occlusion x edge-clip product falls under `--min-frac` (default 0.40).
 
 **Problem:** datagen currently renders mines on grass only. The Mission 10 arena
 (rules v3.1.2 §184) explicitly contains non-grass surfaces — **pavement, gravel,
@@ -75,13 +75,13 @@ while the unresolved both-vs-one split remains neutral and sweepable.
 `tag_up_prob=0.5` remains the explicitly flagged landing-orientation guess.
 `MinePose.tag_visible` is derived as both -> true, one -> `tag_up`, none ->
 false. Layout, flip, visibility, and the per-scene visible fraction are recorded
-in schema `minefield-datagen/3` manifests. The independent `seed:scene:tags`
+in schema `minefield-datagen/5` manifests. The independent `seed:scene:tags`
 stream keeps these draws from changing geometry or YOLO boxes.
 
 **Bench-only:** `generate.py` rotates tag-invisible mines by pi around the
-template's local long axis and applies body hue jitter while excluding tag-named
-materials. Template origin/orientation, tag appearance, ground contact, and
-material-node behavior need visual verification.
+template's local long axis and applies the pure scene model's bounded filament
+color while excluding tag-named materials. Template origin/orientation, tag
+appearance, ground contact, and material-node behavior need visual verification.
 
 **Problem:** the rulebook doesn't specify whether the prop's AprilTag is on one
 face, both faces, or which way a scattered mine lands. If datagen renders every

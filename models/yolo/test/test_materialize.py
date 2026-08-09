@@ -7,13 +7,28 @@ from pathlib import Path
 from datagen.config import GenConfig
 from datagen.dump import write_scene
 from datagen.labels import raw_extents, yolo_box
-from datagen.materialize import TileParams, materialize_scene, tile_scene
-from datagen.scene import build_scene, image_stem
+from datagen.manifest import OCCLUSION_SCHEMA
+from datagen.materialize import (
+    DEFAULT_MIN_FRAC,
+    POISON_MIN_FRAC,
+    TileParams,
+    _jittered,
+    materialize_scene,
+    tile_scene,
+)
+from datagen.scene import (
+    build_scene,
+    image_stem,
+    scene_labels,
+    selected_station_indices,
+)
+from mission_engine.core.tiles import tile_grid
 
 CFG = GenConfig()
 SCENE = build_scene(CFG, 0)
 CAM = replace(CFG.camera, tilt_deg=SCENE.tilt)
 W, H = CFG.camera.width_px, CFG.camera.height_px
+SELECTED = selected_station_indices(CFG, SCENE, scene_labels(CFG, SCENE))
 
 
 def _boxed_mines(k):
@@ -38,19 +53,23 @@ def _boxed_mines(k):
 def _sidecar(overrides):
     vis = {
         image_stem(CFG, SCENE, k): {str(i): 1.0 for i in range(len(SCENE.mines))}
-        for k in range(len(SCENE.stations))
+        for k in SELECTED
     }
     for (k, i), frac in overrides.items():
         vis[image_stem(CFG, SCENE, k)][str(i)] = frac
     return {
-        "schema": "minefield-occlusion/1",
+        "schema": OCCLUSION_SCHEMA,
         "seed": CFG.seed,
         "scene": 0,
+        "station_indices": SELECTED,
         "visible_frac": vis,
     }
 
 
 class TestMaterialize(unittest.TestCase):
+    def test_production_visibility_threshold_is_forty_percent(self):
+        self.assertEqual(DEFAULT_MIN_FRAC, 0.40)
+
     def setUp(self):
         self.out = Path(tempfile.mkdtemp())
         write_scene(CFG, 0, self.out)
@@ -58,7 +77,7 @@ class TestMaterialize(unittest.TestCase):
         # rule reduces to the occlusion fraction alone
         self.target_k, self.target_i = next(
             (k, i)
-            for k in range(len(SCENE.stations))
+            for k in SELECTED
             for i, box in _boxed_mines(k)
             if box.visible_frac == 1.0
         )
@@ -67,10 +86,10 @@ class TestMaterialize(unittest.TestCase):
         return (self.out / sub / f"{stem}.txt").read_text()
 
     def test_all_visible_reproduces_analytic_labels(self):
-        kept, dropped = materialize_scene(self.out, _sidecar({}), 0.15)
+        kept, dropped = materialize_scene(self.out, _sidecar({}), DEFAULT_MIN_FRAC)
         self.assertEqual(dropped, 0)
         self.assertGreater(kept, 0)
-        for k in range(len(SCENE.stations)):
+        for k in SELECTED:
             stem = image_stem(CFG, SCENE, k)
             self.assertEqual(
                 self._labels("labels", stem), self._labels("labels_filtered", stem)
@@ -78,9 +97,9 @@ class TestMaterialize(unittest.TestCase):
 
     def test_buried_mine_dropped_others_untouched(self):
         occ = _sidecar({(self.target_k, self.target_i): 0.02})
-        kept, dropped = materialize_scene(self.out, occ, 0.15)
+        kept, dropped = materialize_scene(self.out, occ, DEFAULT_MIN_FRAC)
         self.assertEqual(dropped, 1)
-        for k in range(len(SCENE.stations)):
+        for k in SELECTED:
             stem = image_stem(CFG, SCENE, k)
             analytic = self._labels("labels", stem).splitlines()
             filtered = self._labels("labels_filtered", stem).splitlines()
@@ -91,8 +110,8 @@ class TestMaterialize(unittest.TestCase):
                 self.assertEqual(filtered, analytic)
 
     def test_frac_at_threshold_kept(self):
-        occ = _sidecar({(self.target_k, self.target_i): 0.15})
-        _, dropped = materialize_scene(self.out, occ, 0.15)
+        occ = _sidecar({(self.target_k, self.target_i): DEFAULT_MIN_FRAC})
+        _, dropped = materialize_scene(self.out, occ, DEFAULT_MIN_FRAC)
         self.assertEqual(dropped, 0)
 
     def test_product_rule_combines_edge_and_occlusion(self):
@@ -101,7 +120,7 @@ class TestMaterialize(unittest.TestCase):
         clipped = next(
             (
                 (k, i, box)
-                for k in range(len(SCENE.stations))
+                for k in SELECTED
                 for i, box in _boxed_mines(k)
                 if box.visible_frac < 0.6
             ),
@@ -110,11 +129,90 @@ class TestMaterialize(unittest.TestCase):
         if clipped is None:
             self.skipTest("scene 0 has no strongly edge-clipped box")
         k, i, box = clipped
-        occ_f = 0.3  # passes alone; product with the clip does not
-        self.assertGreater(occ_f, 0.15)
-        self.assertLess(occ_f * box.visible_frac, 0.15)
-        _, dropped = materialize_scene(self.out, _sidecar({(k, i): occ_f}), 0.15)
+        occ_f = 0.65  # passes alone; product with the clip does not
+        self.assertGreater(occ_f, DEFAULT_MIN_FRAC)
+        self.assertLess(occ_f * box.visible_frac, DEFAULT_MIN_FRAC)
+        _, dropped = materialize_scene(
+            self.out, _sidecar({(k, i): occ_f}), DEFAULT_MIN_FRAC
+        )
         self.assertEqual(dropped, 1)
+
+    def test_manifest_config_is_authoritative(self):
+        cfg = replace(
+            CFG,
+            seed="banked",
+            n_scenes=2,
+            mines_min=7,
+            mines_max=7,
+            station_interval_m=2.5,
+        )
+        scene = build_scene(cfg, 1)
+        labels = scene_labels(cfg, scene)
+        selected = selected_station_indices(cfg, scene, labels)
+        out = Path(tempfile.mkdtemp())
+        write_scene(cfg, 1, out)
+        occ = {
+            "schema": OCCLUSION_SCHEMA,
+            "seed": cfg.seed,
+            "scene": 1,
+            "station_indices": selected,
+            "visible_frac": {
+                image_stem(cfg, scene, k): {
+                    str(i): 1.0 for i in range(len(scene.mines))
+                }
+                for k in selected
+            },
+        }
+        kept, dropped = materialize_scene(out, occ, DEFAULT_MIN_FRAC)
+        expected_boxes = [
+            box
+            for boxes in labels.values()
+            for box in boxes
+        ]
+        expected_kept = sum(
+            box.visible_frac >= DEFAULT_MIN_FRAC for box in expected_boxes
+        )
+        self.assertEqual(kept, expected_kept)
+        self.assertEqual(dropped, len(expected_boxes) - expected_kept)
+        self.assertEqual(
+            kept + dropped,
+            sum(len(labels[image_stem(cfg, scene, k)]) for k in selected),
+        )
+
+    def test_v6_manifest_remains_materializable(self):
+        manifest_path = self.out / f"{CFG.seed}_s0000.manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema"] = "minefield-datagen/6"
+        # The v6 defaults used one scene-wide family from this older palette.
+        # These fields affect appearance only, so v7's isolated color stream
+        # must still reconstruct identical geometry and station selection.
+        manifest["config"].update(
+            {
+                "mine_color_names": ["lime", "green", "muddy_olive"],
+                "mine_color_palette_srgb": [
+                    [0x76 / 255, 0xA8 / 255, 0x2B / 255],
+                    [0x4F / 255, 0x7D / 255, 0x36 / 255],
+                    [0x55 / 255, 0x57 / 255, 0x37 / 255],
+                ],
+                "mine_color_weights": [0.10, 0.45, 0.45],
+                "mine_color_hue_jitter_deg": 4.0,
+                "mine_color_saturation_scale": [0.90, 1.10],
+                "mine_color_value_scale": [0.85, 1.15],
+            }
+        )
+        manifest_path.write_text(json.dumps(manifest))
+
+        kept, dropped = materialize_scene(
+            self.out, _sidecar({}), DEFAULT_MIN_FRAC
+        )
+        self.assertGreater(kept, 0)
+        self.assertEqual(dropped, 0)
+
+    def test_sidecar_station_selection_must_match_manifest(self):
+        occ = _sidecar({})
+        occ["station_indices"] = occ["station_indices"][:-1]
+        with self.assertRaisesRegex(ValueError, "selections differ"):
+            materialize_scene(self.out, occ, DEFAULT_MIN_FRAC)
 
 
 class TestTileScene(unittest.TestCase):
@@ -124,7 +222,7 @@ class TestTileScene(unittest.TestCase):
         self.out = Path(tempfile.mkdtemp())
         write_scene(CFG, 0, self.out)
         self.n_tiles, self.n_poisoned, self.n_boxes = tile_scene(
-            self.out, _sidecar({}), 0.15, self.TP
+            self.out, _sidecar({}), DEFAULT_MIN_FRAC, self.TP
         )
         self.index = json.loads((self.out / "train" / "tiles.json").read_text())[
             f"{CFG.seed}_s0000"
@@ -190,6 +288,7 @@ class TestTileScene(unittest.TestCase):
         self.assertGreater(checked, 0)
 
     def test_no_emitted_tile_is_poisoned(self):
+        self.assertGreater(self.n_poisoned, 0)
         for entry in self.index["tiles"]:
             if entry.get("full"):
                 continue
@@ -212,7 +311,7 @@ class TestTileScene(unittest.TestCase):
                     0.0, min(v1, y0 + t) - max(v0, y0)
                 )
                 raw = (u1 - u0) * (v1 - v0)
-                if raw > 0.0 and inter / raw >= 0.15:
+                if raw > 0.0 and inter / raw >= POISON_MIN_FRAC:
                     learnable += 1
             self.assertGreaterEqual(
                 n_lines,
@@ -237,9 +336,44 @@ class TestTileScene(unittest.TestCase):
     def test_deterministic(self):
         out2 = Path(tempfile.mkdtemp())
         write_scene(CFG, 0, out2)
-        tile_scene(out2, _sidecar({}), 0.15, self.TP)
+        tile_scene(out2, _sidecar({}), DEFAULT_MIN_FRAC, self.TP)
         index2 = json.loads((out2 / "train" / "tiles.json").read_text())
         self.assertEqual(self.index, index2[f"{CFG.seed}_s0000"])
+
+    def test_jitter_coalesces_near_duplicate_edge_origins(self):
+        class FixedRng:
+            values = iter((319, 295))
+
+            @classmethod
+            def randrange(cls, stop):
+                value = next(cls.values)
+                if not 0 <= value < stop:
+                    raise AssertionError(f"fixed draw {value} outside {stop}")
+                return value
+
+        origins = _jittered(
+            tile_grid(1640, 1232, 640, 192),
+            1640,
+            1232,
+            640,
+            FixedRng(),
+        )
+        self.assertEqual(sorted({x for x, _ in origins}), [319, 652, 1000])
+        self.assertEqual(sorted({y for _, y in origins}), [295, 592])
+        self.assertEqual(len(origins), 6)
+
+    def test_tile_parameter_validation(self):
+        for changes in (
+            {"tile": 0},
+            {"overlap": self.TP.tile},
+            {"empty_keep": -0.01},
+            {"empty_keep": 1.01},
+            {"fullframe_frac": -0.01},
+            {"fullframe_frac": 1.01},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    replace(self.TP, **changes)
 
 
 if __name__ == "__main__":

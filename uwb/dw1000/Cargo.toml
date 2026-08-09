@@ -12,4 +12,5 @@ dw1000-rs = "=0.2.0"
 embedded-hal = "1.0.0"
 gpiocdev = "0.8.0"
 linux-embedded-hal = { version = "0.4.1", default-features = false, features = ["spi"] }
+libc = "0.2.180"
 mission10-uwb-protocol = { path = "../protocol" }

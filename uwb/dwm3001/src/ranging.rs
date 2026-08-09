@@ -1,43 +1,53 @@
 use defmt::warn;
+use dw3000_ng::DW3000;
 use dw3000_ng::hl::SendTime;
 use dw3000_ng::time::Instant as RadioInstant;
-use dw3000_ng::{DW3000, FastCommand};
 use embassy_embedded_hal::SetConfig;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
-use embassy_time::{Delay, Timer};
+use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use mission10_uwb_protocol::dw1000_bench::{FRAME_LEN, Frame, MessageKind};
-use mission10_uwb_protocol::host::{Diagnostic, OperatingMode, RadioToHost};
+use mission10_uwb_protocol::air::{
+    self, AIR_FRAME_MAX_NO_FCS, AirEnvelope, AirMessage, DecodedAirFrame, PAN_ID,
+    REPORT_STATUS_CLOSE,
+};
+use mission10_uwb_protocol::clock::{
+    ClockCorrelator, CorrelationSample, MAPPING_MAX_ERROR_US, q32_rate,
+};
+use mission10_uwb_protocol::host::{
+    CompletedExchange, Diagnostic, HealthCounters, MissionEventTime, RadioConfiguration,
+    RadioToHost,
+};
+use mission10_uwb_protocol::scheduler::{
+    ExchangeId, FlightRoster, MAX_PAIRS, Pair, PairMacState, classify_range, due_pair, next_due_us,
+    pair_index,
+};
 use mission10_uwb_protocol::{
-    ResponderTimestamps, TIMESTAMP_MASK, delayed_tx_time, distance_metres,
+    DTU_PER_US, Destination, NodeAddress, REPORT_TURNAROUND_US, ResponderTimestamps,
+    TIMESTAMP_MASK, delayed_tx_time, distance_metres, scheduled_tx_matches, wrapping_delta,
 };
 
 use crate::Irqs;
 use crate::board::{
-    FALLBACK_ANTENNA_DELAY, INITIATOR_INTER_EXCHANGE_GUARD_MS, OWN_ADDRESS, OWN_INDEX,
-    PEER_ADDRESS, PEER_INDEX, REPLY_DELAY_US, RESPONSE_TIMEOUT_US, RadioHardware, RadioWait,
+    FALLBACK_ANTENNA_DELAY, REPLY_DELAY_US, RESPONSE_TIMEOUT_US, RadioHardware, RadioWait,
     diagnostic, finish_receiving, finish_sending, prepare_rx, prepare_tx, radio_config,
     recoverable_receive_error, reset_after_radio_failure, wait_receive, wait_send,
 };
-use crate::host::{publish, transport_counters, update_radio_counters};
+use crate::host::{
+    clear_measurements, host_connected, latest_ego_state, publish, transport_counters,
+    try_clock_probe_sent, try_clock_reply, try_configuration, update_radio_counters,
+};
+
+const PHY_FCS_LEN: usize = 2;
+const CONFIGURATION_POLL_MS: u64 = 10;
+const POLL_PROGRAM_LEAD_US: u64 = 1_000;
+const RX_RELEASE_LEAD_US: u64 = 1_000;
+const CLOCK_PROBE_INTERVAL_MS: u64 = 250;
+const MAX_IDLE_LISTEN_US: u64 = 100_000;
 
 fn publish_error(diagnostic: Diagnostic) {
     warn!("radio diagnostic={=u8}", diagnostic as u8);
     publish(RadioToHost::Error { diagnostic });
-}
-
-fn publish_health(wait: &RadioWait<'_>, ranges: &mut u32) {
-    *ranges = ranges.wrapping_add(1);
-    if *ranges % 32 == 0 {
-        let mut counters = wait.counters().health_counters();
-        counters.merge_transport(transport_counters());
-        update_radio_counters(counters);
-        publish(RadioToHost::Health {
-            request_id: 0,
-            counters,
-        });
-    }
 }
 
 const RETAINED_RESET_REPORT_MS: u64 = 3_000;
@@ -183,357 +193,882 @@ pub async fn run(hw: RadioHardware) {
     {
         reset_after_radio_failure(Diagnostic::Spi);
     }
-    publish(RadioToHost::Ready {
-        mode: if cfg!(feature = "initiator") {
-            OperatingMode::Dw1000BenchInitiator
-        } else {
-            OperatingMode::Dw1000BenchResponder
-        },
-        rx_delay,
-        tx_delay,
-        node_address: OWN_INDEX as u16,
-    });
-    let initial_counters = wait.counters().health_counters();
+    publish(RadioToHost::Ready { rx_delay, tx_delay });
+    let mut initial_counters = wait.counters().health_counters();
+    if hw.previous_radio_failure.is_some() {
+        initial_counters.radio_reinitializations = 1;
+    }
     update_radio_counters(initial_counters);
     publish(RadioToHost::Health {
         request_id: 0,
         counters: initial_counters,
     });
 
-    let config = radio_config();
-    let mut rx_buf = [0_u8; 128];
-    let mut range_count = 0_u32;
-    // Preparation-path SPI errors get three attempts between completed ranges.
-    // Errors from APIs that consume Ready or occur mid-transfer reset at once
-    // because the driver cannot guarantee a safe typestate for re-entry.
-    let mut spi_errors_since_range = 0_u8;
+    let mut runtime = Runtime::default();
+    runtime.health.radio_reinitializations = initial_counters.radio_reinitializations;
+    let configuration = wait_for_configuration(&mut wait).await;
+    apply_configuration(&mut radio, configuration).await;
+    clear_measurements();
+    publish(RadioToHost::Configured { configuration });
+    runtime.reconfigure(configuration);
 
-    if cfg!(feature = "initiator") {
-        'transaction: loop {
-            if let Err(error) = prepare_tx(&mut radio).await {
-                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-                Timer::after_millis(10).await;
-                continue 'transaction;
-            }
-            let poll = Frame::poll(OWN_ADDRESS);
-            let mut sending = match radio
-                .send_raw(poll.as_bytes(), SendTime::Now, &config)
-                .await
-            {
-                Ok(sending) => sending,
-                Err(error) => reset_after_radio_failure(diagnostic(&error)),
-            };
-            let poll_tx = match wait_send(&mut sending, &mut wait).await {
-                Ok(timestamp) => timestamp,
-                Err(error) => {
-                    reset_after_radio_failure(error);
+    loop {
+        wait.pet_watchdog();
+        if let Some(configuration) = try_configuration() {
+            apply_configuration(&mut radio, configuration).await;
+            clear_measurements();
+            publish(RadioToHost::Configured { configuration });
+            runtime.reconfigure(configuration);
+        }
+        refresh_clock(&mut runtime);
+        let now_us = Instant::now().as_micros();
+        for state in &mut runtime.pair_states {
+            state.expire(now_us);
+        }
+        if let Some(pair) = due_pair(
+            runtime.roster(),
+            runtime.local,
+            now_us,
+            &runtime.pair_states,
+        ) {
+            let exchange_id = runtime.next_exchange_id();
+            let index = pair_index(runtime.roster(), pair)
+                .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration));
+            runtime.pair_states[index].begin_attempt(now_us);
+            runtime.active_pair = Some(pair);
+            let (returned, outcome) = initiate_exchange(
+                radio,
+                &mut wait,
+                &mut runtime,
+                pair.responder,
+                exchange_id,
+                tx_delay,
+            )
+            .await;
+            radio = returned;
+            runtime.finish_attempt(pair, outcome);
+        } else {
+            let next_due = next_due_us(runtime.roster(), runtime.local, &runtime.pair_states);
+            let until_due = next_due.map_or(MAX_IDLE_LISTEN_US, |due| due.saturating_sub(now_us));
+            if until_due <= RX_RELEASE_LEAD_US {
+                if let Some(due) = next_due {
+                    Timer::at(Instant::from_micros(due)).await;
                 }
-            };
-            radio = finish_sending(sending, &mut wait).await;
-
-            if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
-                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-                Timer::after_millis(10).await;
-                continue 'transaction;
-            }
-            let mut receiving = match radio.receive(config).await {
-                Ok(receiving) => receiving,
-                Err(error) => reset_after_radio_failure(diagnostic(&error)),
-            };
-            let (length, poll_ack_rx) =
-                match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
-                    Ok(message) => message,
-                    Err(error) if recoverable_receive_error(error) => {
-                        warn!("restarting exchange after POLL_ACK receive error");
-                        publish_error(error);
-                        wait.recovered();
-                        radio = finish_receiving(receiving, &mut wait).await;
-                        Timer::after_millis(10).await;
-                        continue 'transaction;
-                    }
-                    Err(error) => {
-                        reset_after_radio_failure(error);
-                    }
-                };
-            radio = finish_receiving(receiving, &mut wait).await;
-            if length < FRAME_LEN {
-                publish_error(Diagnostic::ShortPollAck);
                 continue;
             }
-            let ack = match Frame::decode(&rx_buf[..FRAME_LEN]) {
-                Ok(frame) => frame,
-                Err(_) => {
-                    publish_error(Diagnostic::FrameDecode);
-                    continue;
-                }
-            };
-            publish(RadioToHost::Rx {
-                kind: ack.kind() as u8,
-            });
-            if ack.kind() != MessageKind::PollAck || ack.source() != PEER_ADDRESS {
-                continue;
+            let listen_us = until_due
+                .saturating_sub(RX_RELEASE_LEAD_US)
+                .clamp(1, MAX_IDLE_LISTEN_US);
+            let (returned, outcome) = respond_exchange(
+                radio,
+                &mut wait,
+                &mut runtime,
+                u32::try_from(listen_us).unwrap_or(u32::MAX),
+                tx_delay,
+            )
+            .await;
+            radio = returned;
+            if let Some(outcome) = outcome {
+                let pair = Pair::new(runtime.local, outcome.exchange.peer)
+                    .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration));
+                runtime.finish_attempt(pair, Some(outcome));
             }
-
-            let range_at_value = delayed_tx_time(poll_ack_rx.value(), REPLY_DELAY_US);
-            let predicted_range_tx = range_at_value.wrapping_add(tx_delay as u64) & TIMESTAMP_MASK;
-            let range = Frame::range(
-                OWN_ADDRESS,
-                poll_tx.value(),
-                poll_ack_rx.value(),
-                predicted_range_tx,
-            );
-            if let Err(error) = prepare_tx(&mut radio).await {
-                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-                Timer::after_millis(10).await;
-                continue 'transaction;
-            }
-            let range_at = RadioInstant::new(range_at_value)
-                .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
-            let mut sending = match radio
-                .send_raw(range.as_bytes(), SendTime::Delayed(range_at), &config)
-                .await
-            {
-                Ok(sending) => sending,
-                Err(error) => reset_after_radio_failure(diagnostic(&error)),
-            };
-            let range_tx = match wait_send(&mut sending, &mut wait).await {
-                Ok(timestamp) => timestamp,
-                Err(error) => {
-                    recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-                    radio = finish_sending(sending, &mut wait).await;
-                    Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
-                    continue 'transaction;
-                }
-            };
-            radio = finish_sending(sending, &mut wait).await;
-
-            if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
-                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-                Timer::after_millis(10).await;
-                continue 'transaction;
-            }
-            let mut receiving = match radio.receive(config).await {
-                Ok(receiving) => receiving,
-                Err(error) => reset_after_radio_failure(diagnostic(&error)),
-            };
-            let (length, _) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
-                Ok(message) => message,
-                Err(error) if recoverable_receive_error(error) => {
-                    warn!("restarting exchange after RANGE_REPORT receive error");
-                    publish_error(error);
-                    wait.recovered();
-                    radio = finish_receiving(receiving, &mut wait).await;
-                    Timer::after_millis(10).await;
-                    continue 'transaction;
-                }
-                Err(error) => {
-                    reset_after_radio_failure(error);
-                }
-            };
-            radio = finish_receiving(receiving, &mut wait).await;
-            if length < FRAME_LEN {
-                publish_error(Diagnostic::ShortRangeReport);
-                continue;
-            }
-            let report = match Frame::decode(&rx_buf[..FRAME_LEN]) {
-                Ok(frame) => frame,
-                Err(_) => {
-                    publish_error(Diagnostic::FrameDecode);
-                    continue;
-                }
-            };
-            publish(RadioToHost::Rx {
-                kind: report.kind() as u8,
-            });
-            if report.kind() == MessageKind::RangeReport && report.source() == PEER_ADDRESS {
-                if let Some(millimetres) = report.distance_mm() {
-                    publish(RadioToHost::Range {
-                        peer: PEER_INDEX as u16,
-                        exchange_id: 0,
-                        range_event_time_dtu: range_tx.value(),
-                        millimetres,
-                        rssi_cdbm: i16::MIN,
-                        quality_flags: 0,
-                    });
-                    publish_health(&wait, &mut range_count);
-                    spi_errors_since_range = 0;
-                }
-            }
-            Timer::after_millis(INITIATOR_INTER_EXCHANGE_GUARD_MS).await;
         }
-    }
-
-    'responder: loop {
-        if let Err(error) = prepare_rx(&mut radio, None).await {
-            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-            Timer::after_millis(10).await;
-            continue 'responder;
-        }
-        let mut receiving = match radio.receive(config).await {
-            Ok(receiving) => receiving,
-            Err(error) => reset_after_radio_failure(diagnostic(&error)),
-        };
-        let (length, poll_rx) = loop {
-            match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
-                Ok(message) => break message,
-                Err(error) if recoverable_receive_error(error) => {
-                    warn!("recovering DW3000 receive error");
-                    publish_error(error);
-                    wait.recovered();
-                    if receiving.fast_cmd(FastCommand::CMD_CLR_IRQS).await.is_err()
-                        || receiving.fast_cmd(FastCommand::CMD_RX).await.is_err()
-                    {
-                        reset_after_radio_failure(Diagnostic::Spi);
-                    }
-                }
-                Err(error) => {
-                    reset_after_radio_failure(error);
-                }
-            }
-        };
-        radio = finish_receiving(receiving, &mut wait).await;
-        if length < FRAME_LEN {
-            publish_error(Diagnostic::ShortPoll);
-            continue;
-        }
-        let poll = match Frame::decode(&rx_buf[..FRAME_LEN]) {
-            Ok(frame) => frame,
-            Err(_) => {
-                publish_error(Diagnostic::FrameDecode);
-                continue;
-            }
-        };
-        publish(RadioToHost::Rx {
-            kind: poll.kind() as u8,
-        });
-        if poll.kind() != MessageKind::Poll || poll.source() != PEER_ADDRESS {
-            continue;
-        }
-
-        let ack_at = delayed_tx_time(poll_rx.value(), REPLY_DELAY_US);
-        let ack_at = RadioInstant::new(ack_at)
-            .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
-        if let Err(error) = prepare_tx(&mut radio).await {
-            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-            Timer::after_millis(10).await;
-            continue 'responder;
-        }
-        let ack = Frame::poll_ack(OWN_ADDRESS);
-        let mut sending = match radio
-            .send_raw(ack.as_bytes(), SendTime::Delayed(ack_at), &config)
-            .await
-        {
-            Ok(sending) => sending,
-            Err(error) => reset_after_radio_failure(diagnostic(&error)),
-        };
-        let poll_ack_tx = match wait_send(&mut sending, &mut wait).await {
-            Ok(timestamp) => timestamp,
-            Err(error) => {
-                recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-                radio = finish_sending(sending, &mut wait).await;
-                continue 'responder;
-            }
-        };
-        radio = finish_sending(sending, &mut wait).await;
-
-        if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
-            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-            Timer::after_millis(10).await;
-            continue 'responder;
-        }
-        let mut receiving = match radio.receive(config).await {
-            Ok(receiving) => receiving,
-            Err(error) => reset_after_radio_failure(diagnostic(&error)),
-        };
-        let (length, range_rx) = match wait_receive(&mut receiving, &mut rx_buf, &mut wait).await {
-            Ok(message) => message,
-            Err(error) if recoverable_receive_error(error) => {
-                warn!("restarting exchange after RANGE receive error");
-                publish_error(error);
-                wait.recovered();
-                radio = finish_receiving(receiving, &mut wait).await;
-                continue 'responder;
-            }
-            Err(error) => {
-                reset_after_radio_failure(error);
-            }
-        };
-        radio = finish_receiving(receiving, &mut wait).await;
-        if length < FRAME_LEN {
-            publish_error(Diagnostic::ShortRange);
-            continue;
-        }
-        let range = match Frame::decode(&rx_buf[..FRAME_LEN]) {
-            Ok(frame) => frame,
-            Err(_) => {
-                publish_error(Diagnostic::FrameDecode);
-                continue;
-            }
-        };
-        publish(RadioToHost::Rx {
-            kind: range.kind() as u8,
-        });
-        if range.kind() != MessageKind::Range || range.source() != PEER_ADDRESS {
-            continue;
-        }
-        let Some(initiator_timestamps) = range.timestamps() else {
-            continue;
-        };
-        let Some(distance) = distance_metres(
-            initiator_timestamps,
-            ResponderTimestamps {
-                poll_rx: poll_rx.value(),
-                poll_ack_tx: poll_ack_tx.value(),
-                range_rx: range_rx.value(),
-            },
-        ) else {
-            publish_error(Diagnostic::InvalidDistance);
-            continue;
-        };
-        let millimetres = (distance * 1_000.0 + 0.5) as u32;
-        if let Err(error) = prepare_tx(&mut radio).await {
-            recover_exchange(error, &mut wait, &mut spi_errors_since_range);
-            Timer::after_millis(10).await;
-            continue 'responder;
-        }
-        let report = Frame::range_report(OWN_ADDRESS, millimetres);
-        let mut sending = match radio
-            .send_raw(report.as_bytes(), SendTime::Now, &config)
-            .await
-        {
-            Ok(sending) => sending,
-            Err(error) => reset_after_radio_failure(diagnostic(&error)),
-        };
-        if let Err(error) = wait_send(&mut sending, &mut wait).await {
-            reset_after_radio_failure(error);
-        }
-        radio = finish_sending(sending, &mut wait).await;
-        publish(RadioToHost::Range {
-            peer: PEER_INDEX as u16,
-            exchange_id: 0,
-            range_event_time_dtu: range_rx.value(),
-            millimetres,
-            rssi_cdbm: i16::MIN,
-            quality_flags: 0,
-        });
-        publish_health(&wait, &mut range_count);
-        spi_errors_since_range = 0;
+        runtime.active_pair = None;
+        synchronize_health(&wait, runtime.health);
     }
 }
 
-fn recover_exchange(
-    diagnostic: Diagnostic,
+struct ExchangeOutcome {
+    exchange: CompletedExchange,
+    close: bool,
+}
+
+struct Runtime {
+    configuration: RadioConfiguration,
+    local: NodeAddress,
+    pair_states: [PairMacState; MAX_PAIRS],
+    clock: ClockCorrelator<32>,
+    next_clock_probe: Instant,
+    clock_request_id: u16,
+    clock_generation: Option<u32>,
+    pending_clock_probe: Option<crate::host::ClockProbeSent>,
+    mapping_was_unavailable: bool,
+    active_pair: Option<Pair>,
+    next_exchange_id: u16,
+    last_received_exchange: [Option<(ExchangeId, u64)>; mission10_uwb_protocol::host::MAX_PEERS],
+    mac_sequence: u8,
+    peer_missed_cycles: [u8; mission10_uwb_protocol::host::MAX_PEERS],
+    peer_stale: [bool; mission10_uwb_protocol::host::MAX_PEERS],
+    spi_errors_since_range: u8,
+    health: HealthCounters,
+    rx_buf: [u8; AIR_FRAME_MAX_NO_FCS + PHY_FCS_LEN],
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            configuration: RadioConfiguration::default(),
+            local: NodeAddress::default(),
+            pair_states: [PairMacState::new(0); MAX_PAIRS],
+            clock: ClockCorrelator::new(q32_rate(1)),
+            next_clock_probe: Instant::from_micros(0),
+            clock_request_id: 0,
+            clock_generation: None,
+            pending_clock_probe: None,
+            mapping_was_unavailable: true,
+            active_pair: None,
+            next_exchange_id: 0,
+            last_received_exchange: [None; mission10_uwb_protocol::host::MAX_PEERS],
+            mac_sequence: 0,
+            peer_missed_cycles: [0; mission10_uwb_protocol::host::MAX_PEERS],
+            peer_stale: [false; mission10_uwb_protocol::host::MAX_PEERS],
+            spi_errors_since_range: 0,
+            health: HealthCounters::default(),
+            rx_buf: [0; AIR_FRAME_MAX_NO_FCS + PHY_FCS_LEN],
+        }
+    }
+}
+
+impl Runtime {
+    fn reconfigure(&mut self, configuration: RadioConfiguration) {
+        self.configuration = configuration;
+        self.local = configuration.node_address;
+        let boot_nonce = Instant::now().as_ticks() as u32 ^ u32::from(self.local.get());
+        self.pair_states = [PairMacState::new(boot_nonce); MAX_PAIRS];
+        let now_us = Instant::now().as_micros();
+        for (index, pair) in self.roster().pairs().enumerate() {
+            self.pair_states[index].initialize(now_us, pair);
+        }
+        self.clock.clear();
+        self.next_clock_probe = Instant::from_micros(0);
+        self.clock_generation = None;
+        self.pending_clock_probe = None;
+        self.mapping_was_unavailable = true;
+        self.active_pair = None;
+        self.next_exchange_id = 0;
+        self.last_received_exchange = [None; mission10_uwb_protocol::host::MAX_PEERS];
+        self.peer_missed_cycles = [0; mission10_uwb_protocol::host::MAX_PEERS];
+        self.peer_stale = [false; mission10_uwb_protocol::host::MAX_PEERS];
+        self.spi_errors_since_range = 0;
+    }
+
+    fn roster(&self) -> FlightRoster {
+        self.configuration
+            .roster()
+            .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration))
+    }
+
+    fn next_exchange_id(&mut self) -> ExchangeId {
+        let exchange_id = ExchangeId::new(self.next_exchange_id);
+        self.next_exchange_id = self.next_exchange_id.wrapping_add(1);
+        exchange_id
+    }
+
+    fn finish_attempt(&mut self, pair: Pair, outcome: Option<ExchangeOutcome>) {
+        let index = pair_index(self.roster(), pair)
+            .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration));
+        let peer = if pair.initiator == self.local {
+            pair.responder
+        } else {
+            pair.initiator
+        };
+        let peer_index = self
+            .configuration
+            .peers()
+            .and_then(|peers| peers.iter().position(|candidate| *candidate == peer))
+            .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration));
+        let now_us = Instant::now().as_micros();
+        if let Some(outcome) = outcome {
+            self.peer_missed_cycles[peer_index] = 0;
+            self.peer_stale[peer_index] = false;
+            self.pair_states[index].record_success(now_us, outcome.close);
+            self.health.exchange_completions = self.health.exchange_completions.wrapping_add(1);
+            publish(RadioToHost::CompletedExchange {
+                exchange: outcome.exchange,
+            });
+        } else {
+            self.health.exchange_timeouts = self.health.exchange_timeouts.wrapping_add(1);
+            self.health.contention_backoffs = self.health.contention_backoffs.wrapping_add(1);
+            self.pair_states[index].record_failure(now_us);
+            self.peer_missed_cycles[peer_index] =
+                self.peer_missed_cycles[peer_index].saturating_add(1);
+            if self.peer_missed_cycles[peer_index] >= 3 && !self.peer_stale[peer_index] {
+                self.peer_stale[peer_index] = true;
+                self.health.peer_stale_transitions =
+                    self.health.peer_stale_transitions.wrapping_add(1);
+            }
+        }
+    }
+}
+
+fn refresh_clock(runtime: &mut Runtime) {
+    if !host_connected() {
+        return;
+    }
+    let now = Instant::now();
+    while let Some(sent) = try_clock_probe_sent() {
+        runtime.pending_clock_probe = Some(sent);
+    }
+    while let Some(reply) = try_clock_reply() {
+        let local_rx_us = reply.local_rx_us;
+        let Some(sent) = runtime
+            .pending_clock_probe
+            .filter(|sent| sent.request_id == reply.request_id)
+        else {
+            runtime.health.clock_samples_rejected =
+                runtime.health.clock_samples_rejected.wrapping_add(1);
+            continue;
+        };
+        runtime.pending_clock_probe = None;
+        let Some(host_elapsed) = reply.mission_tx_us.checked_sub(reply.mission_rx_us) else {
+            runtime.health.clock_samples_rejected =
+                runtime.health.clock_samples_rejected.wrapping_add(1);
+            continue;
+        };
+        let local_elapsed = local_rx_us.saturating_sub(sent.local_tx_us);
+        let Some(residual) = local_elapsed.checked_sub(host_elapsed) else {
+            runtime.health.clock_samples_rejected =
+                runtime.health.clock_samples_rejected.wrapping_add(1);
+            continue;
+        };
+        let error_us = reply
+            .source_error_us
+            .saturating_add(u32::try_from(residual / 2).unwrap_or(u32::MAX));
+        if runtime.clock_generation != Some(reply.mission_generation) {
+            if runtime.clock_generation.is_some() {
+                runtime.health.clock_generation_changes =
+                    runtime.health.clock_generation_changes.wrapping_add(1);
+            }
+            runtime.clock_generation = Some(reply.mission_generation);
+        }
+        let sample = CorrelationSample {
+            source: sent.local_tx_us + local_elapsed / 2,
+            target: reply.mission_rx_us + host_elapsed / 2,
+            error_us,
+            generation: reply.mission_generation,
+        };
+        if runtime.clock.push(sample).is_ok() {
+            runtime.health.clock_samples_accepted =
+                runtime.health.clock_samples_accepted.wrapping_add(1);
+        } else {
+            runtime.health.clock_samples_rejected =
+                runtime.health.clock_samples_rejected.wrapping_add(1);
+        }
+        let model = runtime.clock.model();
+        publish(RadioToHost::ClockStatus {
+            generation: reply.mission_generation,
+            error_us: model.map_or(error_us, |value| value.error_at(local_rx_us)),
+            age_us: model.map_or(0, |value| {
+                u32::try_from(local_rx_us.saturating_sub(value.anchor_source())).unwrap_or(u32::MAX)
+            }),
+            mapped: model.is_some_and(|value| value.maps_at_source(local_rx_us)),
+        });
+    }
+    if now >= runtime.next_clock_probe {
+        runtime.next_clock_probe = now + Duration::from_millis(CLOCK_PROBE_INTERVAL_MS);
+        let request_id = runtime.clock_request_id;
+        runtime.clock_request_id = runtime.clock_request_id.wrapping_add(1);
+        publish(RadioToHost::ClockProbe { request_id });
+    }
+}
+
+async fn wait_for_configuration(wait: &mut RadioWait<'_>) -> RadioConfiguration {
+    loop {
+        if let Some(configuration) = try_configuration() {
+            return configuration;
+        }
+        wait.pet_watchdog();
+        Timer::after_millis(CONFIGURATION_POLL_MS).await;
+    }
+}
+
+async fn apply_configuration<SPI>(
+    radio: &mut DW3000<SPI, dw3000_ng::Ready>,
+    configuration: RadioConfiguration,
+) where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+{
+    if configuration.roster().is_none() {
+        reset_after_radio_failure(Diagnostic::InvalidConfiguration);
+    }
+    if radio
+        .ll()
+        .panadr()
+        .write(|w| {
+            w.pan_id(PAN_ID)
+                .short_addr(configuration.node_address.get())
+        })
+        .await
+        .is_err()
+    {
+        reset_after_radio_failure(Diagnostic::Spi);
+    }
+}
+
+async fn initiate_exchange<SPI>(
+    mut radio: DW3000<SPI, dw3000_ng::Ready>,
     wait: &mut RadioWait<'_>,
-    spi_errors_since_range: &mut u8,
-) {
-    publish_error(diagnostic);
+    runtime: &mut Runtime,
+    peer: NodeAddress,
+    exchange_id: ExchangeId,
+    tx_delay: u16,
+) -> (DW3000<SPI, dw3000_ng::Ready>, Option<ExchangeOutcome>)
+where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+{
+    if let Err(error) = prepare_tx(&mut radio).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let poll = encode_air(
+        runtime.local,
+        &mut runtime.mac_sequence,
+        Destination::Node(peer),
+        AirEnvelope::new(
+            exchange_id,
+            AirMessage::Poll {
+                state: latest_ego_state(),
+            },
+        ),
+    )
+    .unwrap_or_else(|error| reset_after_radio_failure(error));
+    let now = radio
+        .sys_time()
+        .await
+        .unwrap_or_else(|_| reset_after_radio_failure(Diagnostic::Spi));
+    let poll_at_value = delayed_tx_time(u64::from(now) << 8, POLL_PROGRAM_LEAD_US as u32);
+    let predicted_poll_tx = poll_at_value.wrapping_add(u64::from(tx_delay)) & TIMESTAMP_MASK;
+    let poll_at = RadioInstant::new(poll_at_value)
+        .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
+    let mut sending = radio
+        .send_raw(poll.bytes(), SendTime::Delayed(poll_at), &radio_config())
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let poll_tx = wait_send(&mut sending, wait)
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(error));
+    radio = finish_sending(sending, wait).await;
+    if !scheduled_tx_matches(predicted_poll_tx, poll_tx.value()) {
+        recover_exchange(Diagnostic::DelayedSendTooLate, wait, runtime);
+        return (radio, None);
+    }
+    runtime.health.polls_sent = runtime.health.polls_sent.wrapping_add(1);
+
+    if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let mut receiving = radio
+        .receive(radio_config())
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let response = wait_receive(&mut receiving, &mut runtime.rx_buf, wait).await;
+    radio = finish_receiving(receiving, wait).await;
+    let (length, response_rx) = match response {
+        Ok(response) => response,
+        Err(error) if recoverable_receive_error(error) => {
+            recover_exchange(error, wait, runtime);
+            return (radio, None);
+        }
+        Err(error) => reset_after_radio_failure(error),
+    };
+    let response = match decode_air(&runtime.rx_buf, length, runtime.local) {
+        Ok(frame) => frame,
+        Err(error) => {
+            recover_exchange(error, wait, runtime);
+            runtime.health.malformed_air_frames =
+                runtime.health.malformed_air_frames.wrapping_add(1);
+            return (radio, None);
+        }
+    };
+    let (poll_rx, response_tx, peer_state) = match response.envelope.message {
+        AirMessage::Response {
+            poll_rx,
+            response_tx,
+            state,
+        } if response.source == peer && response.envelope.exchange_id == exchange_id => {
+            runtime.health.responses_received = runtime.health.responses_received.wrapping_add(1);
+            (poll_rx, response_tx, state)
+        }
+        _ => {
+            unexpected(runtime);
+            return (radio, None);
+        }
+    };
+
+    let final_at_value = delayed_tx_time(response_rx.value(), REPLY_DELAY_US);
+    let predicted_final_tx = final_at_value.wrapping_add(u64::from(tx_delay)) & TIMESTAMP_MASK;
+    let final_frame = encode_air(
+        runtime.local,
+        &mut runtime.mac_sequence,
+        Destination::Node(peer),
+        AirEnvelope::new(
+            exchange_id,
+            AirMessage::Final {
+                poll_tx: poll_tx.value(),
+                response_rx: response_rx.value(),
+                final_tx: predicted_final_tx,
+            },
+        ),
+    )
+    .unwrap_or_else(|error| reset_after_radio_failure(error));
+    if let Err(error) = prepare_tx(&mut radio).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let final_at = RadioInstant::new(final_at_value)
+        .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
+    let mut sending = radio
+        .send_raw(
+            final_frame.bytes(),
+            SendTime::Delayed(final_at),
+            &radio_config(),
+        )
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let actual_final_tx = match wait_send(&mut sending, wait).await {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            recover_exchange(error, wait, runtime);
+            let radio = finish_sending(sending, wait).await;
+            return (radio, None);
+        }
+    };
+    radio = finish_sending(sending, wait).await;
+    if !scheduled_tx_matches(predicted_final_tx, actual_final_tx.value()) {
+        recover_exchange(Diagnostic::DelayedSendTooLate, wait, runtime);
+        return (radio, None);
+    }
+    runtime.health.finals_sent = runtime.health.finals_sent.wrapping_add(1);
+
+    if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let mut receiving = radio
+        .receive(radio_config())
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let report = wait_receive(&mut receiving, &mut runtime.rx_buf, wait).await;
+    radio = finish_receiving(receiving, wait).await;
+    let (length, _) = match report {
+        Ok(report) => report,
+        Err(error) if recoverable_receive_error(error) => {
+            recover_exchange(error, wait, runtime);
+            return (radio, None);
+        }
+        Err(error) => reset_after_radio_failure(error),
+    };
+    let report = match decode_air(&runtime.rx_buf, length, runtime.local) {
+        Ok(frame) => frame,
+        Err(error) => {
+            recover_exchange(error, wait, runtime);
+            runtime.health.malformed_air_frames =
+                runtime.health.malformed_air_frames.wrapping_add(1);
+            return (radio, None);
+        }
+    };
+    let (final_rx, close) = match report.envelope.message {
+        AirMessage::Report { final_rx, status }
+            if report.source == peer && report.envelope.exchange_id == exchange_id =>
+        {
+            runtime.health.reports_received = runtime.health.reports_received.wrapping_add(1);
+            (final_rx, status & REPORT_STATUS_CLOSE != 0)
+        }
+        _ => {
+            unexpected(runtime);
+            return (radio, None);
+        }
+    };
+    let Some(distance) = distance_metres(
+        [poll_tx.value(), response_rx.value(), predicted_final_tx],
+        ResponderTimestamps {
+            poll_rx,
+            response_tx,
+            final_rx,
+        },
+    ) else {
+        recover_exchange(Diagnostic::InvalidDistance, wait, runtime);
+        return (radio, None);
+    };
+    let mission_event_time = map_event_time(&mut radio, runtime, actual_final_tx.value()).await;
+    runtime.spi_errors_since_range = 0;
+    (
+        radio,
+        Some(ExchangeOutcome {
+            exchange: CompletedExchange {
+                peer,
+                exchange_id,
+                range_event_time_dtu: actual_final_tx.value(),
+                mission_event_time,
+                millimetres: millimetres(distance),
+                rssi_cdbm: i16::MIN,
+                quality_flags: 0,
+                state: peer_state,
+            },
+            close,
+        }),
+    )
+}
+
+async fn respond_exchange<SPI>(
+    mut radio: DW3000<SPI, dw3000_ng::Ready>,
+    wait: &mut RadioWait<'_>,
+    runtime: &mut Runtime,
+    listen_timeout_us: u32,
+    tx_delay: u16,
+) -> (DW3000<SPI, dw3000_ng::Ready>, Option<ExchangeOutcome>)
+where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+{
+    if let Err(error) = prepare_rx(&mut radio, Some(listen_timeout_us)).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let mut receiving = radio
+        .receive(radio_config())
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let poll = wait_receive(&mut receiving, &mut runtime.rx_buf, wait).await;
+    radio = finish_receiving(receiving, wait).await;
+    let (length, poll_rx) = match poll {
+        Ok(poll) => poll,
+        Err(error) if recoverable_receive_error(error) => {
+            if error == Diagnostic::RxFrameWaitTimeout {
+                wait.completed();
+            } else {
+                recover_exchange(error, wait, runtime);
+            }
+            return (radio, None);
+        }
+        Err(error) => reset_after_radio_failure(error),
+    };
+    let poll = match decode_air(&runtime.rx_buf, length, runtime.local) {
+        Ok(frame) => frame,
+        Err(error) => {
+            recover_exchange(error, wait, runtime);
+            runtime.health.malformed_air_frames =
+                runtime.health.malformed_air_frames.wrapping_add(1);
+            return (radio, None);
+        }
+    };
+    let peer = poll.source;
+    let exchange_id = poll.envelope.exchange_id;
+    let pair = Pair::new(runtime.local, peer)
+        .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration));
+    let peer_index = runtime
+        .configuration
+        .peers()
+        .and_then(|peers| peers.iter().position(|candidate| *candidate == peer));
+    let received_now_us = Instant::now().as_micros();
+    let duplicate = peer_index.is_some_and(|index| {
+        runtime.last_received_exchange[index].is_some_and(|(previous, received_at)| {
+            previous == exchange_id && received_now_us.saturating_sub(received_at) < 20_000
+        })
+    });
+    let allowed = pair.initiator == peer && runtime.roster().contains(peer) && !duplicate;
+    let peer_state = match poll.envelope.message {
+        AirMessage::Poll { state } if allowed => {
+            if let Some(index) = peer_index {
+                runtime.last_received_exchange[index] = Some((exchange_id, received_now_us));
+            }
+            runtime.health.polls_received = runtime.health.polls_received.wrapping_add(1);
+            runtime.active_pair = Some(pair);
+            state
+        }
+        AirMessage::Poll { .. } => {
+            unexpected(runtime);
+            return (radio, None);
+        }
+        _ => {
+            unexpected(runtime);
+            return (radio, None);
+        }
+    };
+    let response_at_value = delayed_tx_time(poll_rx.value(), REPLY_DELAY_US);
+    let predicted_response_tx =
+        response_at_value.wrapping_add(u64::from(tx_delay)) & TIMESTAMP_MASK;
+    if let Err(error) = prepare_tx(&mut radio).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let response = encode_air(
+        runtime.local,
+        &mut runtime.mac_sequence,
+        Destination::Node(peer),
+        AirEnvelope::new(
+            exchange_id,
+            AirMessage::Response {
+                poll_rx: poll_rx.value(),
+                response_tx: predicted_response_tx,
+                state: latest_ego_state(),
+            },
+        ),
+    )
+    .unwrap_or_else(|error| reset_after_radio_failure(error));
+    let response_at = RadioInstant::new(response_at_value)
+        .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
+    let mut sending = radio
+        .send_raw(
+            response.bytes(),
+            SendTime::Delayed(response_at),
+            &radio_config(),
+        )
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let actual_response_tx = match wait_send(&mut sending, wait).await {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            recover_exchange(error, wait, runtime);
+            let radio = finish_sending(sending, wait).await;
+            return (radio, None);
+        }
+    };
+    radio = finish_sending(sending, wait).await;
+    if !scheduled_tx_matches(predicted_response_tx, actual_response_tx.value()) {
+        recover_exchange(Diagnostic::DelayedSendTooLate, wait, runtime);
+        return (radio, None);
+    }
+    runtime.health.responses_sent = runtime.health.responses_sent.wrapping_add(1);
+
+    if let Err(error) = prepare_rx(&mut radio, Some(RESPONSE_TIMEOUT_US)).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let mut receiving = radio
+        .receive(radio_config())
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    let final_message = wait_receive(&mut receiving, &mut runtime.rx_buf, wait).await;
+    radio = finish_receiving(receiving, wait).await;
+    let (length, final_rx) = match final_message {
+        Ok(final_message) => final_message,
+        Err(error) if recoverable_receive_error(error) => {
+            recover_exchange(error, wait, runtime);
+            return (radio, None);
+        }
+        Err(error) => reset_after_radio_failure(error),
+    };
+    let final_frame = match decode_air(&runtime.rx_buf, length, runtime.local) {
+        Ok(frame) => frame,
+        Err(error) => {
+            recover_exchange(error, wait, runtime);
+            runtime.health.malformed_air_frames =
+                runtime.health.malformed_air_frames.wrapping_add(1);
+            return (radio, None);
+        }
+    };
+    let (poll_tx, response_rx, final_tx) = match final_frame.envelope.message {
+        AirMessage::Final {
+            poll_tx,
+            response_rx,
+            final_tx,
+        } if final_frame.source == peer && final_frame.envelope.exchange_id == exchange_id => {
+            runtime.health.finals_received = runtime.health.finals_received.wrapping_add(1);
+            (poll_tx, response_rx, final_tx)
+        }
+        _ => {
+            unexpected(runtime);
+            return (radio, None);
+        }
+    };
+    let Some(distance) = distance_metres(
+        [poll_tx, response_rx, final_tx],
+        ResponderTimestamps {
+            poll_rx: poll_rx.value(),
+            response_tx: predicted_response_tx,
+            final_rx: final_rx.value(),
+        },
+    ) else {
+        recover_exchange(Diagnostic::InvalidDistance, wait, runtime);
+        return (radio, None);
+    };
+    let millimetres = millimetres(distance);
+    let index = pair_index(runtime.roster(), pair)
+        .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidConfiguration));
+    let close = classify_range(
+        runtime.pair_states[index].is_close(Instant::now().as_micros()),
+        millimetres,
+    );
+    if let Err(error) = prepare_tx(&mut radio).await {
+        recover_exchange(error, wait, runtime);
+        return (radio, None);
+    }
+    let report = encode_air(
+        runtime.local,
+        &mut runtime.mac_sequence,
+        Destination::Node(peer),
+        AirEnvelope::new(
+            exchange_id,
+            AirMessage::Report {
+                final_rx: final_rx.value(),
+                status: if close { REPORT_STATUS_CLOSE } else { 0 },
+            },
+        ),
+    )
+    .unwrap_or_else(|error| reset_after_radio_failure(error));
+    let report_at_value = delayed_tx_time(final_rx.value(), REPORT_TURNAROUND_US);
+    let report_at = RadioInstant::new(report_at_value)
+        .unwrap_or_else(|| reset_after_radio_failure(Diagnostic::InvalidTimestamp));
+    let mut sending = radio
+        .send_raw(
+            report.bytes(),
+            SendTime::Delayed(report_at),
+            &radio_config(),
+        )
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    if let Err(error) = wait_send(&mut sending, wait).await {
+        recover_exchange(error, wait, runtime);
+        let radio = finish_sending(sending, wait).await;
+        return (radio, None);
+    }
+    radio = finish_sending(sending, wait).await;
+    runtime.health.reports_sent = runtime.health.reports_sent.wrapping_add(1);
+    let mission_event_time = map_event_time(&mut radio, runtime, final_rx.value()).await;
+    runtime.spi_errors_since_range = 0;
+    (
+        radio,
+        Some(ExchangeOutcome {
+            exchange: CompletedExchange {
+                peer,
+                exchange_id,
+                range_event_time_dtu: final_rx.value(),
+                mission_event_time,
+                millimetres,
+                rssi_cdbm: i16::MIN,
+                quality_flags: 0,
+                state: peer_state,
+            },
+            close,
+        }),
+    )
+}
+
+fn encode_air(
+    local: NodeAddress,
+    mac_sequence: &mut u8,
+    destination: Destination,
+    envelope: AirEnvelope,
+) -> Result<air::EncodedAirFrame, Diagnostic> {
+    let sequence = *mac_sequence;
+    *mac_sequence = (*mac_sequence).wrapping_add(1);
+    air::encode(local, destination, sequence, &envelope).map_err(|_| Diagnostic::MalformedAir)
+}
+
+async fn map_event_time<SPI>(
+    radio: &mut DW3000<SPI, dw3000_ng::Ready>,
+    runtime: &mut Runtime,
+    event_dtu: u64,
+) -> MissionEventTime
+where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+{
+    let local_before_us = Instant::now().as_micros();
+    let Ok(radio_now) = radio.sys_time().await else {
+        runtime.health.clock_samples_rejected =
+            runtime.health.clock_samples_rejected.wrapping_add(1);
+        return MissionEventTime::Unavailable;
+    };
+    let local_after_us = Instant::now().as_micros();
+    let local_now_us = local_before_us + local_after_us.saturating_sub(local_before_us) / 2;
+    let radio_now_dtu = (u64::from(radio_now) << 8) & TIMESTAMP_MASK;
+    let age_us = wrapping_delta(radio_now_dtu, event_dtu).div_ceil(DTU_PER_US);
+    let local_event_us = local_now_us.saturating_sub(age_us);
+    let bracket_error_us =
+        u32::try_from(local_after_us.saturating_sub(local_before_us).div_ceil(2))
+            .unwrap_or(u32::MAX);
+    let Some(model) = runtime.clock.model() else {
+        mark_mapping_unavailable(runtime);
+        return MissionEventTime::Unavailable;
+    };
+    let error_us = model
+        .error_at(local_event_us)
+        .saturating_add(bracket_error_us);
+    let Some(mission_time_us) = model.target_at(local_event_us) else {
+        mark_mapping_unavailable(runtime);
+        return MissionEventTime::Unavailable;
+    };
+    if error_us > MAPPING_MAX_ERROR_US {
+        mark_mapping_unavailable(runtime);
+        return MissionEventTime::Unavailable;
+    }
+    runtime.mapping_was_unavailable = false;
+    MissionEventTime::Mapped {
+        mission_time_us,
+        generation: model.generation(),
+        error_us,
+    }
+}
+
+fn mark_mapping_unavailable(runtime: &mut Runtime) {
+    if !runtime.mapping_was_unavailable {
+        runtime.health.time_mapping_unavailable =
+            runtime.health.time_mapping_unavailable.wrapping_add(1);
+    }
+    runtime.mapping_was_unavailable = true;
+}
+
+fn decode_air(
+    buffer: &[u8],
+    received_length: usize,
+    local: NodeAddress,
+) -> Result<DecodedAirFrame, Diagnostic> {
+    let bytes = air_bytes(buffer, received_length)?;
+    air::decode(bytes, local).map_err(|_| Diagnostic::MalformedAir)
+}
+
+fn air_bytes(buffer: &[u8], received_length: usize) -> Result<&[u8], Diagnostic> {
+    let Some(frame_length) = received_length.checked_sub(PHY_FCS_LEN) else {
+        return Err(Diagnostic::MalformedAir);
+    };
+    if frame_length > AIR_FRAME_MAX_NO_FCS || frame_length > buffer.len() {
+        return Err(Diagnostic::MalformedAir);
+    }
+    Ok(&buffer[..frame_length])
+}
+
+fn millimetres(distance: f64) -> u32 {
+    (distance * 1_000.0 + 0.5).clamp(0.0, u32::MAX as f64) as u32
+}
+
+fn unexpected(runtime: &mut Runtime) {
+    runtime.health.unexpected_air_frames = runtime.health.unexpected_air_frames.wrapping_add(1);
+    publish_error(Diagnostic::UnexpectedAir);
+}
+
+fn recover_exchange(diagnostic: Diagnostic, wait: &mut RadioWait<'_>, runtime: &mut Runtime) {
+    // A missing peer normally expires the receive window. Pair timeout and
+    // peer-stale counters own that expected fleet condition.
+    if diagnostic != Diagnostic::RxFrameWaitTimeout {
+        publish_error(diagnostic);
+    }
+    if matches!(
+        diagnostic,
+        Diagnostic::DelayedSendTooLate | Diagnostic::DelayedSendPowerUpWarning
+    ) {
+        runtime.health.late_delayed_transmits =
+            runtime.health.late_delayed_transmits.wrapping_add(1);
+    }
     wait.recovered();
     if diagnostic == Diagnostic::Spi {
-        *spi_errors_since_range = (*spi_errors_since_range).saturating_add(1);
-        if *spi_errors_since_range >= 3 {
+        runtime.spi_errors_since_range = runtime.spi_errors_since_range.saturating_add(1);
+        if runtime.spi_errors_since_range >= 3 {
             reset_after_radio_failure(diagnostic);
         }
     } else {
-        *spi_errors_since_range = 0;
+        runtime.spi_errors_since_range = 0;
     }
+}
+
+fn synchronize_health(wait: &RadioWait<'_>, runtime: HealthCounters) {
+    let mut counters = runtime;
+    let waits = wait.counters().health_counters();
+    counters.irq_wakes = waits.irq_wakes;
+    counters.spurious_irq_wakes = waits.spurious_irq_wakes;
+    counters.wait_timeouts = waits.wait_timeouts;
+    counters.recoveries = waits.recoveries;
+    counters.merge_transport(transport_counters());
+    update_radio_counters(counters);
 }

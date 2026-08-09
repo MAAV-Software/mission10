@@ -34,6 +34,7 @@ impl StateValidity {
 pub struct EgoState {
     pub sample_time_us: u64,
     pub sequence: u32,
+    pub frame_epoch: u16,
     pub phase_mrad: i16,
     pub phase_rate_mrad_s: i16,
     pub yaw_mrad: i16,
@@ -48,6 +49,7 @@ impl Default for EgoState {
         Self {
             sample_time_us: 0,
             sequence: 0,
+            frame_epoch: 0,
             phase_mrad: 0,
             phase_rate_mrad_s: 0,
             yaw_mrad: 0,

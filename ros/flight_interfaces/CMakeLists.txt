@@ -8,6 +8,8 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/UwbState.msg"
   "msg/UwbRange.msg"
+  "msg/RelativePeerState.msg"
+  "msg/AvoidanceDecision.msg"
   DEPENDENCIES builtin_interfaces
 )
 

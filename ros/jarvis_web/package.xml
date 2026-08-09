@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>jarvis_web</name>
+  <version>0.0.0</version>
+  <description>Operator webapp: push-to-talk voice in, mission gates out, result map served. Publish-only; holds no mission state.</description>
+  <maintainer email="131201352+calgary-kirisame@users.noreply.github.com">calgary-kirisame</maintainer>
+  <license>MPL-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>px4_offboard</depend>
+
+  <!-- flask, vosk and piper-tts are not in rosdep or nixpkgs; they come from the
+       per-package uv venv (see requirements.txt and the package README). -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

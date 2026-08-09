@@ -55,13 +55,24 @@ def _setup(context, *args, **kwargs):
     num = int(LaunchConfiguration("num_vehicles").perform(context))
     px4_dir = LaunchConfiguration("px4_dir").perform(context).strip()
     config_file = LaunchConfiguration("fleet_config").perform(context).strip()
+    random_spawn = LaunchConfiguration("random_spawn").perform(context).lower() in (
+        "1", "true", "yes", "on")
+    rough_line_spawn = LaunchConfiguration("rough_line_spawn").perform(context).lower() in (
+        "1", "true", "yes", "on")
+    spawn_seed_raw = LaunchConfiguration("spawn_seed").perform(context).strip()
+    spawn_seed = int(spawn_seed_raw) if spawn_seed_raw else None
 
     if not px4_dir:
         raise RuntimeError("px4_dir/PX4_DIR is unset; point it at the PX4 fork checkout.")
     if not config_file:
         config_file = os.path.join(get_package_share_directory("bringup"), "config", "fleet.yaml")
 
-    fleet = load_fleet(config_file)
+    fleet = load_fleet(
+        config_file,
+        random_spawn=random_spawn,
+        rough_line_spawn=rough_line_spawn,
+        spawn_seed=spawn_seed,
+    )
 
     vehicles = fleet["vehicles"]
     if num > len(vehicles):
@@ -102,5 +113,8 @@ def generate_launch_description():
         DeclareLaunchArgument("fleet_config", default_value=""),
         DeclareLaunchArgument("world", default_value="",
                               description="gz world override (e.g. 'windy'); empty uses fleet.yaml."),
+        DeclareLaunchArgument("random_spawn", default_value="false"),
+        DeclareLaunchArgument("rough_line_spawn", default_value="false"),
+        DeclareLaunchArgument("spawn_seed", default_value=""),
         OpaqueFunction(function=_setup),
     ])
