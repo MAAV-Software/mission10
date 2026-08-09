@@ -23,6 +23,7 @@ from .evaluation import (
     find_empty_tiles,
 )
 from .labels import EVALUATION_ROLES, ROLES, validate_labels
+from .folds import load_fold_document, source_hashes
 
 
 MISSION_ENGINE_SRC = Path(__file__).resolve().parents[3] / "ros" / "mission_engine"
@@ -172,6 +173,7 @@ def evaluate_audit(
     *,
     threshold: float = DEFAULT_THRESHOLD,
     merge_overlap: float | None = None,
+    selected_source_hashes: set[str] | None = None,
 ) -> dict:
     """Evaluate retained candidates, returning a deterministic report payload."""
     validate_labels(labels, require_frozen=True, require_certified=True)
@@ -198,6 +200,15 @@ def evaluate_audit(
 
     all_labels = {record["source_sha256"]: record for record in labels["images"]}
     selected = [record for record in labels["images"] if record["role"] == role]
+    if selected_source_hashes is not None:
+        selected = [
+            record
+            for record in selected
+            if record["source_sha256"] in selected_source_hashes
+        ]
+        actual = {record["source_sha256"] for record in selected}
+        if actual != selected_source_hashes:
+            raise ValueError("fold selection is missing certified records")
     if not selected:
         raise ValueError(f"no labeled sources assigned to {role}")
     missing = [
@@ -313,6 +324,8 @@ def run(
     *,
     threshold: float = DEFAULT_THRESHOLD,
     merge_overlap: float | None = None,
+    fold_lock_path: Path | None = None,
+    held_out_fold: int | None = None,
 ) -> dict:
     """Load immutable inputs, evaluate them, and write one new JSON report."""
     if out.exists():
@@ -321,12 +334,29 @@ def run(
     audit_bytes = audit_path.read_bytes()
     labels = json.loads(labels_bytes)
     audit = json.loads(audit_bytes)
+    if (fold_lock_path is None) != (held_out_fold is None):
+        raise ValueError("fold lock and held-out fold must be provided together")
+    selected_hashes = None
+    selection = None
+    if fold_lock_path is not None:
+        fold_lock_path = Path(fold_lock_path)
+        fold_document = load_fold_document(fold_lock_path, labels_path)
+        selected_hashes = source_hashes(fold_document, held_out_fold)
+        selection = {
+            "fold_lock": str(fold_lock_path.resolve()),
+            "fold_lock_sha256": hashlib.sha256(
+                fold_lock_path.read_bytes()
+            ).hexdigest(),
+            "held_out_fold": held_out_fold,
+            "source_sha256": sorted(selected_hashes),
+        }
     report = evaluate_audit(
         audit,
         labels,
         role,
         threshold=threshold,
         merge_overlap=merge_overlap,
+        selected_source_hashes=selected_hashes,
     )
     report.update(
         {
@@ -334,6 +364,7 @@ def run(
             "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(),
             "labels": str(labels_path.resolve()),
             "labels_sha256": hashlib.sha256(labels_bytes).hexdigest(),
+            "selection": selection,
         }
     )
     out.parent.mkdir(parents=True, exist_ok=True)

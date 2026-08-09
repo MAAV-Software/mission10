@@ -24,6 +24,8 @@ def main(argv=None) -> None:
     parser.add_argument("--role", choices=sorted(ROLES), required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--fold-lock", type=Path)
+    parser.add_argument("--held-out-fold", type=int)
     parser.add_argument(
         "--merge-overlap",
         type=float,
@@ -38,6 +40,8 @@ def main(argv=None) -> None:
             args.out,
             threshold=args.threshold,
             merge_overlap=args.merge_overlap,
+            fold_lock_path=args.fold_lock,
+            held_out_fold=args.held_out_fold,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         parser.error(str(error))

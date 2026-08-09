@@ -12,7 +12,7 @@ def _sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _prepared(root, name, train_count, full_dataset=False):
+def _prepared(root, name, train_count, full_dataset=False, source_hash=None):
     prepared = root / name
     splits = ("train", "val", "test") if full_dataset else ("train",)
     entries = {split: [] for split in splits}
@@ -28,15 +28,16 @@ def _prepared(root, name, train_count, full_dataset=False):
             label = label_dir / f"{tile}.txt"
             image.write_bytes(f"image:{tile}".encode())
             label.write_text("0 0.5 0.5 0.25 0.25\n")
-            entries[split].append(
-                {
+            entry = {
                     "scene": f"{name}_scene",
                     "tile": tile,
                     "boxes": 1,
                     "image_sha256": _sha256(image),
                     "label_sha256": _sha256(label),
                 }
-            )
+            if source_hash is not None:
+                entry["provenance"] = {"source_sha256": source_hash}
+            entries[split].append(entry)
     lock = {
         "schema": (
             "mission10-yolo-dataset/1"
@@ -73,9 +74,17 @@ class TestComposition(unittest.TestCase):
         self.assertEqual(
             COMPOSITION_PRESETS["real_positive"],
             {
+                "production": "0.75",
+                "hardneg": "0.15",
+                "real_positive": "0.10",
+            },
+        )
+        self.assertEqual(
+            COMPOSITION_PRESETS["real_positive_appearance"],
+            {
                 "production": "0.65",
-                "appearance": "0.15",
-                "hardneg": "0.10",
+                "appearance": "0.10",
+                "hardneg": "0.15",
                 "real_positive": "0.10",
             },
         )
@@ -165,6 +174,68 @@ class TestComposition(unittest.TestCase):
                 },
             )
         self.assertFalse(out.exists())
+
+    def test_real_positive_rejects_held_out_photo_provenance(self):
+        held_out = "a" * 64
+        assignments = [
+            {
+                "source": "held-out.png",
+                "source_sha256": held_out,
+                "fold": 0,
+                "stratum": "negative",
+                "objects": 0,
+            }
+        ]
+        fold = {
+            "schema": "mission10-yolo-real-folds/1",
+            "labels_sha256": "b" * 64,
+            "assignments_sha256": hashlib.sha256(
+                json.dumps(
+                    assignments, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            "role": "training_candidate",
+            "grouping": "exact_source_photo",
+            "seed": "test",
+            "fold_count": 2,
+            "assignments": assignments,
+            "counts": {
+                "0": {"photos": 1, "clear": 0, "partial": 0, "negative": 1},
+                "1": {"photos": 0, "clear": 0, "partial": 0, "negative": 0},
+            },
+        }
+        fold_path = self.root / "folds.json"
+        fold_path.write_text(json.dumps(fold))
+        components = {
+            "production": self.components["production"],
+            "hardneg": _prepared(
+                self.root, "leaking_hardneg", 1, source_hash=held_out
+            ),
+            "real_positive": _prepared(
+                self.root, "real_positive", 1, source_hash="c" * 64
+            ),
+        }
+
+        with self.assertRaisesRegex(ValueError, "held-out source"):
+            compose(
+                self.root / "leaking-composition",
+                "real_positive",
+                components,
+                fold_lock_path=fold_path,
+                held_out_fold=0,
+            )
+
+    def test_real_positive_appearance_requires_fold_lock(self):
+        components = {
+            **self.components,
+            "real_positive": _prepared(self.root, "real_positive", 1),
+        }
+        with self.assertRaisesRegex(ValueError, "requires a held-out fold lock"):
+            compose(
+                self.root / "appearance-replay-without-fold",
+                "real_positive_appearance",
+                components,
+            )
 
 
 if __name__ == "__main__":

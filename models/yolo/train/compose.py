@@ -20,9 +20,16 @@ import json
 import math
 import os
 import re
+import sys
 from fractions import Fraction
 from pathlib import Path
 from typing import Mapping
+
+YOLO_ROOT = Path(__file__).resolve().parents[1]
+if str(YOLO_ROOT) not in sys.path:
+    sys.path.insert(0, str(YOLO_ROOT))
+
+from audit.folds import load_fold_document, source_hashes  # noqa: E402
 
 
 LOCK_SCHEMA = "mission10-yolo-composition/1"
@@ -50,12 +57,18 @@ COMPOSITION_PRESETS = {
         "hardneg": "0.15",
     },
     "real_positive": {
+        "production": "0.75",
+        "hardneg": "0.15",
+        "real_positive": "0.10",
+    },
+    "real_positive_appearance": {
         "production": "0.65",
-        "appearance": "0.15",
-        "hardneg": "0.10",
+        "appearance": "0.10",
+        "hardneg": "0.15",
         "real_positive": "0.10",
     },
 }
+FOLD_SAFE_PRESETS = ("real_positive", "real_positive_appearance")
 
 
 def _sha256(path: Path) -> str:
@@ -171,6 +184,7 @@ def _load_component(name: str, prepared: Path) -> dict:
                     "image_sha256": image_hash,
                     "label_sha256": label_hash,
                     "boxes": boxes,
+                    "provenance": entry.get("provenance"),
                 }
             )
             split_tiles.add(tile)
@@ -232,11 +246,40 @@ def _link_record(record: dict, image_dest: Path, label_dest: Path, stem: str) ->
     os.link(record["label"], label_dest / f"{stem}.txt")
 
 
-def compose(out: Path, preset: str, components: Mapping[str, Path]) -> dict:
+def _provenance_source_hashes(value: object) -> set[str]:
+    hashes = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "source_sha256" and isinstance(child, str):
+                hashes.add(child)
+            else:
+                hashes.update(_provenance_source_hashes(child))
+    elif isinstance(value, list):
+        for child in value:
+            hashes.update(_provenance_source_hashes(child))
+    return hashes
+
+
+def compose(
+    out: Path,
+    preset: str,
+    components: Mapping[str, Path],
+    *,
+    fold_lock_path: Path | None = None,
+    held_out_fold: int | None = None,
+) -> dict:
     """Validate inputs, hard-link a composition, and return its lock."""
     if preset not in COMPOSITION_PRESETS:
         raise ValueError(f"unknown composition preset: {preset!r}")
     requested = COMPOSITION_PRESETS[preset]
+    if (fold_lock_path is None) != (held_out_fold is None):
+        raise ValueError("fold lock and held-out fold must be provided together")
+    if preset in FOLD_SAFE_PRESETS and fold_lock_path is None:
+        raise ValueError(f"{preset} composition requires a held-out fold lock")
+    if preset not in FOLD_SAFE_PRESETS and fold_lock_path is not None:
+        raise ValueError(
+            "fold selection is only valid for a real-positive composition"
+        )
     if set(components) != set(requested):
         raise ValueError(
             f"{preset} components must be exactly {tuple(requested)}, "
@@ -246,6 +289,28 @@ def compose(out: Path, preset: str, components: Mapping[str, Path]) -> dict:
         _safe_name(name): _load_component(name, Path(components[name]))
         for name in requested
     }
+    selection = None
+    if fold_lock_path is not None:
+        fold_lock_path = Path(fold_lock_path)
+        fold_document = load_fold_document(fold_lock_path)
+        held_out_hashes = source_hashes(fold_document, held_out_fold)
+        for name in ("hardneg", "real_positive"):
+            leaked = set()
+            for record in sources[name]["entries"]["train"]:
+                leaked.update(
+                    _provenance_source_hashes(record.get("provenance"))
+                    & held_out_hashes
+                )
+            if leaked:
+                raise ValueError(
+                    f"{name} contains {len(leaked)} held-out source photo(s)"
+                )
+        selection = {
+            "fold_lock": str(fold_lock_path.resolve()),
+            "fold_lock_sha256": _sha256(fold_lock_path),
+            "held_out_fold": held_out_fold,
+            "held_out_source_sha256": sorted(held_out_hashes),
+        }
     fractions = {name: Fraction(value) for name, value in requested.items()}
     if sum(fractions.values()) != 1:
         raise AssertionError(f"{preset} fractions do not sum to one")
@@ -310,6 +375,7 @@ def compose(out: Path, preset: str, components: Mapping[str, Path]) -> dict:
         "boxes": linked_boxes,
         "train_repeat_range": repeat_ranges,
         "ordering": "component preset order; source tile order; round-robin repetition",
+        "selection": selection,
     }
     identity = {
         **content,
@@ -360,11 +426,19 @@ def main(argv=None) -> None:
         type=_component,
         metavar="NAME=PREPARED_PATH",
     )
+    parser.add_argument("--fold-lock", type=Path)
+    parser.add_argument("--held-out-fold", type=int)
     args = parser.parse_args(argv)
     components = dict(args.component)
     if len(components) != len(args.component):
         parser.error("component names must be unique")
-    lock = compose(args.out, args.preset, components)
+    lock = compose(
+        args.out,
+        args.preset,
+        components,
+        fold_lock_path=args.fold_lock,
+        held_out_fold=args.held_out_fold,
+    )
     print(f"dataset_sha256={lock['dataset_sha256']}")
     print(f"train: {sum(lock['counts']['train'].values())} tiles")
     print(f"val: {sum(lock['counts']['val'].values())} tiles")

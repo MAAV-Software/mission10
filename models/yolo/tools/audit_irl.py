@@ -21,6 +21,13 @@ if str(MISSION_ENGINE_SRC) not in sys.path:
 
 from mission_engine.core.tiles import tile_grid  # noqa: E402
 
+YOLO_ROOT = Path(__file__).resolve().parents[1]
+if str(YOLO_ROOT) not in sys.path:
+    sys.path.insert(0, str(YOLO_ROOT))
+
+from audit.folds import load_fold_document, select_records  # noqa: E402
+from audit.labels import load_labels, resolve_source  # noqa: E402
+
 
 SCHEMA = "mission10-yolo-irl-audit/1"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
@@ -197,6 +204,7 @@ def run(
     batch: int,
     merge_overlap: float,
     device: str | None = None,
+    selection: dict | None = None,
 ) -> dict:
     if out.exists() and any(out.iterdir()):
         raise ValueError(f"output directory is not empty: {out}")
@@ -255,6 +263,7 @@ def run(
         "tile_px": tile,
         "overlap_px": overlap,
         "merge_overlap": merge_overlap,
+        "selection": selection,
         "images": records,
     }
     (out / "audit.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -263,7 +272,7 @@ def run(
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("images", nargs="+", type=Path)
+    parser.add_argument("images", nargs="*", type=Path)
     parser.add_argument("--weights", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--threshold", type=float, default=0.37)
@@ -271,6 +280,9 @@ def main(argv=None) -> None:
     parser.add_argument("--overlap", type=int, default=192)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--merge-overlap", type=float, default=0.5)
+    parser.add_argument("--labels", type=Path)
+    parser.add_argument("--fold-lock", type=Path)
+    parser.add_argument("--held-out-fold", type=int)
     parser.add_argument(
         "--device",
         help="Ultralytics device (for example 0 or cpu); defaults to auto",
@@ -284,9 +296,37 @@ def main(argv=None) -> None:
         parser.error("batch must be positive")
     if not 0.0 <= args.merge_overlap <= 1.0:
         parser.error("merge overlap must be in [0, 1]")
+    fold_values = (args.labels, args.fold_lock, args.held_out_fold)
+    uses_fold = all(value is not None for value in fold_values)
+    if any(value is not None for value in fold_values) and not uses_fold:
+        parser.error("labels, fold lock, and held-out fold must be provided together")
+    if bool(args.images) == uses_fold:
+        parser.error("provide either image paths or one held-out fold")
+    selection = None
+    inputs = args.images
+    if uses_fold:
+        labels = load_labels(
+            args.labels, require_frozen=True, require_certified=True
+        )
+        fold_document = load_fold_document(args.fold_lock, args.labels)
+        candidates = [
+            record
+            for record in labels["images"]
+            if record["role"] == fold_document["role"]
+        ]
+        records = select_records(candidates, fold_document, args.held_out_fold)
+        inputs = [resolve_source(args.labels, record["source"]) for record in records]
+        selection = {
+            "fold_lock": str(args.fold_lock.resolve()),
+            "fold_lock_sha256": sha256(args.fold_lock),
+            "held_out_fold": args.held_out_fold,
+            "source_sha256": sorted(
+                record["source_sha256"] for record in records
+            ),
+        }
     run(
         args.weights,
-        args.images,
+        inputs,
         args.out,
         args.threshold,
         args.tile,
@@ -294,6 +334,7 @@ def main(argv=None) -> None:
         args.batch,
         args.merge_overlap,
         args.device,
+        selection,
     )
 
 

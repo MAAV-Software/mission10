@@ -39,6 +39,7 @@ from audit.labels import (  # noqa: E402
     sha256,
     validate_labels,
 )
+from audit.folds import load_fold_document, select_records  # noqa: E402
 
 
 SCHEMA = "mission10-yolo-certified-scale-probe/1"
@@ -195,6 +196,8 @@ def run(
     device: str | None = None,
     model=None,
     image_loader: Callable[[Path], object] = _load_rgb,
+    fold_lock_path: Path | None = None,
+    held_out_fold: int | None = None,
 ) -> dict:
     """Run and write an immutable certified-label scale-probe report."""
     weights = Path(weights)
@@ -206,11 +209,26 @@ def run(
         raise ValueError("role must be explicitly requested")
     if batch < 1:
         raise ValueError("batch must be positive")
+    if (fold_lock_path is None) != (held_out_fold is None):
+        raise ValueError("fold lock and held-out fold must be provided together")
 
     document = load_labels(
         labels_path, require_frozen=True, require_certified=True
     )
     records = select_certified_role(document, role)
+    selection = None
+    if fold_lock_path is not None:
+        fold_lock_path = Path(fold_lock_path)
+        fold_document = load_fold_document(fold_lock_path, labels_path)
+        records = select_records(records, fold_document, held_out_fold)
+        selection = {
+            "fold_lock": str(fold_lock_path.resolve()),
+            "fold_lock_sha256": sha256(fold_lock_path),
+            "held_out_fold": held_out_fold,
+            "source_sha256": sorted(
+                record["source_sha256"] for record in records
+            ),
+        }
 
     pending = []
     probe_images = []
@@ -299,6 +317,7 @@ def run(
         "weights": str(weights.resolve()),
         "weights_sha256": sha256(weights),
         "role": role,
+        "selection": selection,
         "purpose": "diagnostic",
         "automatic_training_promotion": False,
         "training_candidate_policy": (
@@ -326,6 +345,8 @@ def main(argv=None) -> None:
     parser.add_argument("--role", required=True, choices=sorted(ROLES))
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--fold-lock", type=Path)
+    parser.add_argument("--held-out-fold", type=int)
     parser.add_argument(
         "--device",
         help="Ultralytics device (for example 0 or cpu); defaults to auto",
@@ -341,6 +362,8 @@ def main(argv=None) -> None:
             args.out,
             batch=args.batch,
             device=args.device,
+            fold_lock_path=args.fold_lock,
+            held_out_fold=args.held_out_fold,
         )
     except ValueError as error:
         parser.error(str(error))
