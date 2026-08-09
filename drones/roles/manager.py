@@ -37,7 +37,7 @@ class ManagerDrone:
 
         self.host = host
         self.port = port
-        self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
+        # self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
         self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
         self.mission_node = None
         self.detected_mine_data = []
@@ -129,13 +129,17 @@ class ManagerDrone:
         rand_rotated_latlon = convert_from_spcs(rand_rotated, self.from_spcs)
 
         return (rand_rotated_latlon[0], rand_rotated_latlon[1])
+
+    
+    def primary_camera_func(self):
+        pass
     
     def backup_camera_func(self):
 
         with self.mine_data_cv:
             # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
             while self.mission_node is None:
-                print("Waiting for mission to start")
+                # print("Waiting for mission to start")
                 self.mine_data_cv.wait()
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
@@ -159,10 +163,8 @@ class ManagerDrone:
                 image_timestamp = self.mission_node.latest_timestamp
                 self.TMP_timestamp_queue.put(image_timestamp)
                 num_pictures_taken += 1
-                # if num_pictures_taken > 10:
-                #     self.shutdown_flag = True
 
-            print(f"Image taken at timestamp {image_timestamp}!")
+            # print(f"Image taken at timestamp {image_timestamp}!")
 
             img = cv2.resize(image, (256, 256))
             img = img.astype(np.float32) / 255.0
@@ -191,7 +193,8 @@ class ManagerDrone:
                     y_max = y + (h / 2)
                     detections.append((x_min, x_max, y_min, y_max))
 
-            self.timestamp_bounding_boxes[image_timestamp] = detections
+            with self.mine_data_lock:
+                self.timestamp_bounding_boxes[image_timestamp] = detections
 
             time.sleep(1) # have it take pictures at this interval, I guess try to do it one time a second I guess?
 
@@ -200,7 +203,7 @@ class ManagerDrone:
             try:
                 return self.timestamp_bounding_boxes[timestamp]
             except Exception as e:
-                print(f"There wasn't a photo taken here lol")
+                # print(f"There wasn't a photo taken here lol")
                 return [(-1, -1, -1, -1)]
 
     def find_mines(self):
@@ -218,16 +221,16 @@ class ManagerDrone:
             with self.mine_data_cv:
                 # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
                 while (self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0):
-                    print("Waiting for mission to start")
-                    print(self.TMP_timestamp_queue.qsize())
+                    # print("Waiting for mission to start")
+                    # print(self.TMP_timestamp_queue.qsize())
                     self.mine_data_cv.wait()
-                print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
+                # print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
             
             if self.shutdown_flag:
                 return
 
             with self.mine_data_lock:
-                print("Acquired the lock in find_mines")
+                # print("Acquired the lock in find_mines")
                 next_timestamp = self.TMP_timestamp_queue.get()
                 absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
                 pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
@@ -243,9 +246,9 @@ class ManagerDrone:
             # mine_x_min, mine_x_max, mine_y_min, mine_y_max = self.get_mine_loc_in_img(next_timestamp)
             bboxes = self.get_mine_loc_in_img(next_timestamp)
             for mine_x_min, mine_x_max, mine_y_min, mine_y_max in bboxes:
-                print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
+                # print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
                 if mine_x_min == -1:
-                    print("No boxes in img")
+                    # print("No boxes in img")
                     continue
 
                 pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
@@ -279,9 +282,9 @@ class ManagerDrone:
                 new_long = change_in_long + pt_longitude
 
                 with self.mine_data_lock:
-                    print("Acquired the lock in find_mines but lower")
+                    # print("Acquired the lock in find_mines but lower")
                     self.detected_mine_data.append((new_lat, new_long))
-                    print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
+                    # print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
 
 
     def tcp_server(self):
@@ -423,6 +426,13 @@ class ManagerDrone:
     #         time.sleep(0.1)
 
     def run_mission_node(self, mission_mode):
+
+        # self.detected_mine_data = []
+        # self.mission_node.timestamp_queue = queue.Queue()
+        # self.mission_node.gps_data = {}
+
+        # self.reset_data()
+
         rclpy.init()
 
         node = MissionNode(self.mine_data_lock, self.mine_data_cv, mission_mode)
@@ -430,7 +440,7 @@ class ManagerDrone:
 
         # while not self.shutdown_flag:
         # Start the mission
-        # self.mission_node.start_mission()
+        self.mission_node.start_mission()
 
         # Continue processing GPS messages
         print("Attempting to spin the node")
@@ -450,7 +460,7 @@ class ManagerDrone:
                 worker_host, worker_port = drone_id.strip().split("_")
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                     try:
-                        print(f"The worker host is {worker_host} and the port is {worker_port}")
+                        # print(f"The worker host is {worker_host} and the port is {worker_port}")
                         sock.connect((worker_host, int(worker_port))) 
                         message = json.dumps({
                             "message_type": "run_drones"
@@ -471,7 +481,7 @@ class ManagerDrone:
                 worker_host, worker_port = drone_id.strip().split("_")
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                     try:
-                        print(f"The worker host is {worker_host} and the port is {worker_port}")
+                        # print(f"The worker host is {worker_host} and the port is {worker_port}")
                         sock.connect((worker_host, int(worker_port))) 
                         message = json.dumps({
                             "message_type": "orbit_drones"
@@ -544,16 +554,15 @@ class ManagerDrone:
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
 
+        if self.camera_mode == "primary":
+            pass
+
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
         
         # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         # fake_gps_thread.start()
-
-        # time.sleep(1)
-        # self.shutdown_flag = True
-        # self.self_finished = True
 
         tcp_thread.join()
         udp_thread.join()

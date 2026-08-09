@@ -39,7 +39,7 @@ class ExploreDrone:
         self.host = host
         self.port = port
         self.coords = []
-        self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data
+        # self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data
         self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
         self.mission_node = None
         self.send_buffer = []
@@ -83,8 +83,6 @@ class ExploreDrone:
                 self.base_altitude = float(line_contents[0])
                 break
 
-        # print(self.manager_host)
-        # print("Finished registering!")
         self.run_drone()
 
     def rotate_coords(self, pt_latitude, pt_longitude):
@@ -120,11 +118,8 @@ class ExploreDrone:
 
         #calcu theta w top left and top right corners
         theta = calc_theta(tl_spcs, tr_spcs)
-        # print("theta: ", math.degrees(theta), " degrees"
 
         rand_spcs = convert_to_spcs(rand_latlon, self.to_spcs)
-
-        # print("orig point: ", rand_latlon)
 
         #rotate by theta
         rand_rotated = rotate_point(tl_spcs, rand_spcs, -1 * theta) # Use -1 to rotate against the over-rotation
@@ -161,10 +156,8 @@ class ExploreDrone:
                 image_timestamp = self.mission_node.latest_timestamp
                 self.TMP_timestamp_queue.put(image_timestamp)
                 num_pictures_taken += 1
-                if num_pictures_taken > 10:
-                    self.shutdown_flag = True
 
-            print(f"Image taken at timestamp {image_timestamp}!")
+            # print(f"Image taken at timestamp {image_timestamp}!")
 
             img = cv2.resize(image, (256, 256))
             img = img.astype(np.float32) / 255.0
@@ -201,6 +194,7 @@ class ExploreDrone:
         with self.coords_lock:
             try:
                 return self.timestamp_bounding_boxes[timestamp]
+                # return [(0.5, -1, -1, -1)]
             except Exception as e:
                 print(f"There wasn't a photo taken here lol")
                 return [(-1, -1, -1, -1)]
@@ -226,7 +220,7 @@ class ExploreDrone:
                 time.sleep(0.1)
 
             self.sending_state = True
-            print(f"There are {len(self.send_buffer)} coords in the send buffer!")
+            # print(f"There are {len(self.send_buffer)} coords in the send buffer!")
             for coord in self.send_buffer:
                 coord = [float(x) for x in coord]
                 message = json.dumps({
@@ -256,14 +250,14 @@ class ExploreDrone:
             with self.coords_cv:
                 # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
                 while self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0:
-                    print("Waiting for timestamp to fill up")
+                    # print("Waiting for timestamp to fill up")
                     self.coords_cv.wait()
             
             if self.shutdown_flag:
                 return
 
             with self.coords_lock:
-                print("Acquired the lock in find_mines")
+                # print("Acquired the lock in find_mines")
                 next_timestamp = self.TMP_timestamp_queue.get()
                 absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
                 pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
@@ -277,9 +271,9 @@ class ExploreDrone:
             # Get the location of the mines within the image (bounding box or smth I dunno)
             bboxes = self.get_mine_loc_in_img(next_timestamp)
             for mine_x_min, mine_x_max, mine_y_min, mine_y_max in bboxes:
-                print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
+                # print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
                 if mine_x_min == -1:
-                    print("No boxes in img")
+                    # print("No boxes in img")
                     continue
 
                 pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
@@ -313,13 +307,13 @@ class ExploreDrone:
                 new_long = change_in_long + pt_longitude
 
                 with self.coords_lock:
-                    print("Acquired the lock in find_mines but lower")
+                    # print("Acquired the lock in find_mines but lower")
                     self.coords.append((new_lat, new_long))
                     self.send_buffer.append((new_lat, new_long))
-                    print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.coords)}")
+                    # print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.coords)}")
 
                 if len(self.send_buffer) >= 10:
-                    print("Should try to send soon")
+                    # print("Should try to send soon")
                     self.send_coords()
 
     def tcp_server(self):
@@ -414,6 +408,7 @@ class ExploreDrone:
     #         time.sleep(0.1)
 
     def run_mission_node(self, mission_mode):
+
         rclpy.init()
 
         node = MissionNode(self.coords_lock, self.coords_cv, mission_mode)
@@ -434,8 +429,6 @@ class ExploreDrone:
         print(f"Collected {len(node.gps_data)} GPS points")
 
     def handle_run_drones(self):
-        # subprocess.run("ros2", ...) # Run that ros2 command to publish to the start topic
-        # time.sleep(5)
 
         mission_node_thread = threading.Thread(target=self.run_mission_node, args=("survey",))
         mission_node_thread.start()
@@ -509,6 +502,9 @@ class ExploreDrone:
 
         find_mines_thread = threading.Thread(target=self.find_mines)
         find_mines_thread.start()
+
+        if self.camera_mode == "primary":
+            pass
 
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)

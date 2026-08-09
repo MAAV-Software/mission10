@@ -10,12 +10,7 @@ def main():
     # closed when an exception is raised or control flow returns.
     hostname = socket.gethostname()
     print(hostname)
-    ManagerDrone("localhost", 8000, "backup")
-
-    args = []
-    args.append("python3")
-    args.append("iarc_pathfinder.py")
-    subprocess.run(args)
+    ManagerDrone("localhost", 8000, "primary")
 
 if __name__ == "__main__":
     main()
