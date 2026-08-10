@@ -1,6 +1,7 @@
 import rclpy
 import queue
 import time
+import os
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from px4_msgs.msg import SensorGps
@@ -80,33 +81,23 @@ class MissionNode(Node):
             with self.mission_node_cv:
                 self.mission_node_cv.notify()
 
-    # def start_mission(self):
-    #     msg = Bool()
-    #     msg.data = True
-
-    #     while self.count_publishers("/px4_4/fmu/out/vehicle_gps_position") == 0:
-    #         print("Stuck here")
-    #         rclpy.spin_once(self, timeout_sec=0.1)
-
-    #     self.start_publisher.publish(msg)
-    #     print("published start_mission")
-    #     time.sleep(15)
-    #     if self.mission_mode == "orbit":
-    #         print("Published orbit")
-    #         self.orbit_publisher.publish(msg)
-    #     elif self.mission_mode == "survey":
-    #         print("Published survey")
-    #         self.survey_publisher.publish(msg)
-    #     self.get_logger().info("Mission started!")
-
     def start_mission(self):
-        self.get_logger().info("Waiting for GPS publisher...")
+        msg = Bool()
+        msg.data = True
 
-        while self.count_publishers("/px4_4/fmu/out/vehicle_gps_position") == 0:
+        px4_path = os.getenv("PX4_NAMESPACE")
+
+        while self.count_publishers(f"{px4_path}/fmu/out/vehicle_gps_position") == 0:
+            print("Stuck here")
             rclpy.spin_once(self, timeout_sec=0.1)
-            print(f"Number of publishers is {self.count_publishers('/fmu/out/vehicle_gps_position')}")
 
-        print("SUBSCRIBERS:", self.count_subscribers("/fmu/out/vehicle_gps_position"))
-        print("PUBLISHERS:", self.count_publishers("/fmu/out/vehicle_gps_position"))
-        self.get_logger().info("GPS publisher found!")
+        self.start_publisher.publish(msg)
+        print("published start_mission")
+        time.sleep(15)
+        if self.mission_mode == "orbit":
+            print("Published orbit")
+            self.orbit_publisher.publish(msg)
+        elif self.mission_mode == "survey":
+            print("Published survey")
+            self.survey_publisher.publish(msg)
         self.get_logger().info("Mission started!")
