@@ -7,6 +7,7 @@ from std_msgs.msg import Bool
 from px4_msgs.msg import SensorGps
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
+px4_path = os.getenv("PX4_NAMESPACE")
 
 class MissionNode(Node):
     def __init__(self, mission_node_lock, mission_node_cv, mission_mode):
@@ -54,7 +55,7 @@ class MissionNode(Node):
 
         self.gps_subscription = self.create_subscription(
             SensorGps,
-            "/px4_4/fmu/out/vehicle_gps_position",
+            f"{px4_path}/fmu/out/vehicle_gps_position",
             self.gps_callback,
             qos_profile
         )
