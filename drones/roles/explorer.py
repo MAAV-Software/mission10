@@ -19,14 +19,14 @@ import random
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from roles.MissionNode import MissionNode
+from drones.roles.MissionNode import MissionNode
 from ros.sensing.sensing.mine_detector import get_hailo_bounding_boxes
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
 camera_specs_path = Path(__file__).parent.parent.parent / "constants/camera_specs.txt"
 base_altitude_path = Path(__file__).parent.parent.parent / "constants/altitude.txt"
-weights_path = Path(__file__).parent.parent / "1-2-26.onnx" # Also this model weight sucks ass
+weights_path = Path(__file__).parent.parent / "realpositive-appearance-fold1-epoch9-yolo11m-640.onnx" # Also this model weight sucks ass
 
 class ExploreDrone:
     "Construct an instance of an explorer Drone"
@@ -37,8 +37,8 @@ class ExploreDrone:
         self.host = host
         self.port = port
         self.coords = []
-        # self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data
-        # self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
+        self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data
+        self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
         self.mission_node = None
         self.send_buffer = []
         self.startup = True
@@ -49,6 +49,7 @@ class ExploreDrone:
         self.registered = False
         self.camera_mode = camera_mode
         self.timestamp_bounding_boxes = queue.Queue()
+        self.start_time = time.time()
 
         self.coords_lock = threading.Lock()
         self.coords_cv = threading.Condition()
@@ -136,7 +137,7 @@ class ExploreDrone:
                 self.coords_cv.wait()
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
-        cam = Picamera2(1)
+        cam = Picamera2(0)
         config = cam.create_still_configuration()
         cam.configure(config)
         cam.start()
@@ -153,7 +154,7 @@ class ExploreDrone:
             with self.coords_lock:
                 image_timestamp = self.mission_node.latest_timestamp
 
-            # print(f"Image taken at timestamp {image_timestamp}!")
+            print(f"Image taken at timestamp {image_timestamp}!")
 
             img = cv2.resize(image, (256, 256))
             img = img.astype(np.float32) / 255.0
@@ -178,8 +179,9 @@ class ExploreDrone:
                 if conf > confidence_threshold:
                     detections.append((image_timestamp, x, y, w, h))
 
-            for detection in detections:
-                self.timestamp_bounding_boxes.put(detection)
+            with self.coords_lock:
+                for detection in detections:
+                    self.timestamp_bounding_boxes.put(detection)
 
             time.sleep(1) # have it take pictures at this interval, I guess try to do it one time a second I guess?
 
@@ -226,6 +228,11 @@ class ExploreDrone:
         while not self.shutdown_flag:
             # If there are detections, append that to self.coords
 
+            if time.time() - self.start_time >= 10:
+                with self.coords_lock:
+                    self.shutdown_flag = True
+                continue
+            
             next_timestamp = 0
             absolute_height = 0
             pt_latitude = 0
@@ -236,8 +243,11 @@ class ExploreDrone:
 
             with self.coords_cv:
                 # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
-                while self.mission_node is None or self.timestamp_bounding_boxes.qsize() == 0:
-                    # print("Waiting for timestamp to fill up")
+               while (self.mission_node is None or self.timestamp_bounding_boxes.qsize() == 0):
+                    if self.mission_node is None:
+                        print("Mission node is none")
+                    else:
+                        print("timestamp size is 0")
                     self.coords_cv.wait()
             
             if self.shutdown_flag:
@@ -324,7 +334,7 @@ class ExploreDrone:
             sock.settimeout(1)
 
             while not self.shutdown_flag:
-
+                
                 # Wait for a connection for 1s.  The socket library avoids consuming
                 # CPU while waiting for a connection.
                 try:
@@ -406,7 +416,7 @@ class ExploreDrone:
 
         # while not self.shutdown_flag:
         # Start the mission
-        # self.mission_node.start_mission()
+        self.mission_node.start_mission()
 
         # Continue processing GPS messages
         print("Attempting to spin the node")
@@ -500,11 +510,11 @@ class ExploreDrone:
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
 
-        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        # fake_gps_thread.start()
-
-        fake_gps_thread = threading.Thread(target=self.fake_gps_coords_generation)
+        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
         fake_gps_thread.start()
+
+        # fake_gps_thread = threading.Thread(target=self.fake_gps_coords_generation)
+        # fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()

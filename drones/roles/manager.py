@@ -17,15 +17,15 @@ import random
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
-from roles.MissionNode import MissionNode
+from drones.roles.MissionNode import MissionNode
 from ros.sensing.sensing.mine_detector import get_hailo_bounding_boxes
-import iarc_pathfinder
+import drones.iarc_pathfinder
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
 camera_specs_path = Path(__file__).parent.parent.parent / "constants/camera_specs.txt"
 base_altitude_path = Path(__file__).parent.parent.parent / "constants/altitude.txt"
-weights_path = Path(__file__).parent.parent / "1-2-26.onnx" # Also this model weight sucks ass
+weights_path = Path(__file__).parent.parent / "realpositive-appearance-fold1-epoch9-yolo11m-640.onnx" # Also this model weight sucks ass
 
 class ManagerDrone:
     "Construct an instance of the main drone"
@@ -35,8 +35,8 @@ class ManagerDrone:
 
         self.host = host
         self.port = port
-        # self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
-        # self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
+        self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
+        self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
         self.mission_node = None
         self.detected_mine_data = []
         self.exp_drones = {}
@@ -49,6 +49,7 @@ class ManagerDrone:
         self.next_action = "scout"
         self.camera_mode = camera_mode
         self.timestamp_bounding_boxes = queue.Queue()
+        self.start_time = time.time()
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -141,7 +142,7 @@ class ManagerDrone:
 
         with self.mine_data_cv:
             while self.mission_node is None:
-                print("Waiting for mission to start")
+                # print("Waiting for mission to start")
                 self.mine_data_cv.wait()
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
@@ -161,7 +162,7 @@ class ManagerDrone:
             with self.mine_data_lock:
                 image_timestamp = self.mission_node.latest_timestamp
 
-            # print(f"Image taken at timestamp {image_timestamp}!")
+            print(f"Image taken at timestamp {image_timestamp}!")
 
             img = cv2.resize(image, (256, 256))
             img = img.astype(np.float32) / 255.0
@@ -199,6 +200,11 @@ class ManagerDrone:
         while not self.shutdown_flag:
             # If there are detections, append that to self.detected_mine_data
 
+            if time.time() - self.start_time >= 15:
+                with self.mine_data_lock:
+                    self.shutdown_flag = True
+                continue
+
             next_timestamp = 0
             absolute_height = 0
             pt_latitude = 0
@@ -209,7 +215,7 @@ class ManagerDrone:
 
             with self.mine_data_cv:
                 while (self.mission_node is None or self.timestamp_bounding_boxes.qsize() == 0):
-                    print("Waiting for mission to start")
+                    # print("Waiting for mission to start")
                     self.mine_data_cv.wait()
             
             if self.shutdown_flag:
@@ -406,7 +412,6 @@ class ManagerDrone:
                     "longitude": fake_lon,
                     "altitude": fake_alt
                 }
-                self.TMP_timestamp_queue.put(fake_timestamp)
             fake_timestamp += 1
 
             print(f"{fake_lat}, {fake_lon}, {fake_alt}")
@@ -461,6 +466,8 @@ class ManagerDrone:
         
         mission_node_thread = threading.Thread(target=self.run_mission_node, args=("survey",))
         mission_node_thread.start()
+
+        # self.fake_gps_coords_generation()
     
     def handle_orbit(self):
         self.mission_status = "in_mission"
@@ -550,15 +557,15 @@ class ManagerDrone:
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
         
-        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        # fake_gps_thread.start()
+        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
+        fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()
 
         self.detected_mine_data.append((0, 0))
 
-        iarc_pathfinder.run_iarc_pathfinder(self.detected_mine_data)
+        drones.iarc_pathfinder.run_iarc_pathfinder(self.detected_mine_data)
 
         print("Finished Pathfinding")
 

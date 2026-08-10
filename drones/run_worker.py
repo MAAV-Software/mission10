@@ -1,6 +1,6 @@
 """Example TCP socket client."""
 import socket
-from roles.explorer import ExploreDrone
+from drones.roles.explorer import ExploreDrone
 
 def main():
 

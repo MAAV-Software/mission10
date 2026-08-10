@@ -1,7 +1,7 @@
 """Example TCP socket server."""
 import socket
 import subprocess
-from roles.manager import ManagerDrone
+from drones.roles.manager import ManagerDrone
 
 def main():
     """Test TCP Socket Server and git access from RPi"""
