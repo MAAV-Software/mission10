@@ -50,6 +50,7 @@ class ManagerDrone:
         self.camera_mode = camera_mode
         self.timestamp_bounding_boxes = queue.Queue()
         self.start_time = time.time()
+        self.manager_shutoff_time = 10
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -136,7 +137,7 @@ class ManagerDrone:
                 print("Waiting for mission to start")
                 self.mine_data_cv.wait()
 
-        get_hailo_bounding_boxes(self.timestamp_bounding_boxes)
+        get_hailo_bounding_boxes(self.timestamp_bounding_boxes, self.mine_data_lock)
     
     def backup_camera_func(self):
 
@@ -164,7 +165,7 @@ class ManagerDrone:
 
             print(f"Image taken at timestamp {image_timestamp}!")
 
-            img = cv2.resize(image, (256, 256))
+            img = cv2.resize(image, (640, 640))
             img = img.astype(np.float32) / 255.0
             img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
             img = np.expand_dims(img, axis=0)   # CHW -> NCHW
@@ -200,11 +201,6 @@ class ManagerDrone:
         while not self.shutdown_flag:
             # If there are detections, append that to self.detected_mine_data
 
-            if time.time() - self.start_time >= 15:
-                with self.mine_data_lock:
-                    self.shutdown_flag = True
-                continue
-
             next_timestamp = 0
             absolute_height = 0
             pt_latitude = 0
@@ -225,6 +221,8 @@ class ManagerDrone:
                 # print("Acquired the lock in find_mines")
 
                 next_timestamp, mine_x_center, mine_y_center, x_width, y_width = self.timestamp_bounding_boxes.get()
+                if next_timestamp == -1:
+                    continue
                 absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
                 pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
                 pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
@@ -295,6 +293,12 @@ class ManagerDrone:
             sock.settimeout(1)
 
             while not self.self_finished:
+
+                if time.time() - self.start_time >= self.manager_shutoff_time:
+                    with self.mine_data_lock:
+                        self.shutdown_flag = True
+                    continue
+
                 # Wait for a connection for 1s.  The socket library avoids consuming
                 # CPU while waiting for a connection.
                 try:
@@ -533,9 +537,9 @@ class ManagerDrone:
         if self.exp_drones[drone_key]["status"] == "working":
             self.exp_drones[drone_key]["status"] = "finished"
             self.finished_drones += 1
-            print(self.finished_drones, len(self.exp_drones))
             if self.finished_drones == len(self.exp_drones):
                 self.self_finished = True
+                self.shutdown_flag = True
         else:
             print("Error: Received a 'finished' message from a finished worker")
             exit(1)
@@ -551,7 +555,7 @@ class ManagerDrone:
         find_mines_thread.start()
 
         if self.camera_mode == "primary":
-            take_pictures_thread = threading.Thread(target=get_hailo_bounding_boxes, args=(self.timestamp_bounding_boxes, ))
+            take_pictures_thread = threading.Thread(target=primary_camera_func)
             take_pictures_thread.start()        
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
@@ -569,9 +573,7 @@ class ManagerDrone:
 
         print("Finished Pathfinding")
 
-        self.timestamp_bounding_boxes.put(-1, -1, -1, -1, -1) # Putting a -1, lets the teimstamp queue know that we should be done
-
+        self.timestamp_bounding_boxes.put((-1, -1, -1, -1, -1)) # Putting a -1, lets the teimstamp queue know that we should be done
+        
         with self.mine_data_cv:
             self.mine_data_cv.notify_all()
-    
-            

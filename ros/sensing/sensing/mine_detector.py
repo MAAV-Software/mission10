@@ -225,6 +225,7 @@ def detect_frame(
 
 def poll_once(
     pool: SharedFramePool,
+    timestamp_lock: threading.Lock,
     backend,
     results: queue.Queue,
     last_sequence: int,
@@ -240,7 +241,8 @@ def poll_once(
     for x, y, w, h, _score in detect_frame(backend, frame_rgb):
         while True:
             try:
-                results.put_nowait((metadata.realtime_ns, x, y, w, h))
+                with timestamp_lock:
+                    results.put_nowait((metadata.realtime_ns, x, y, w, h))
                 break
             except queue.Full:
                 try:
@@ -252,6 +254,7 @@ def poll_once(
 
 def run_mine_detection(
     results: queue.Queue,
+    timestamp_lock: threading.Lock,
     backend,
     *,
     stop: threading.Event | None = None,
@@ -278,7 +281,7 @@ def run_mine_detection(
                 last_sequence = 0
                 last_progress = time.monotonic()
                 log(f"mine_detector: attached to pool '{pool_name}'")
-            metadata = poll_once(pool, backend, results, last_sequence)
+            metadata = poll_once(pool, timestamp_lock, backend, results, last_sequence)
             if metadata is not None:
                 last_sequence = metadata.sequence
                 last_progress = time.monotonic()
@@ -305,6 +308,6 @@ def run_mine_detection(
         pool.close()
 
 
-def get_hailo_bounding_boxes(results: queue.Queue, **kwargs) -> None:
+def get_hailo_bounding_boxes(results: queue.Queue, timestamp_lock: threading.Lock, **kwargs) -> None:
     """Mission-runner entry point; blocks, so run it in a dedicated thread."""
-    run_mine_detection(results, HailoYoloBackend(), **kwargs)
+    run_mine_detection(results, timestamp_lock, HailoYoloBackend(), **kwargs)

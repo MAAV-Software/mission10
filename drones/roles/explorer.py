@@ -50,6 +50,7 @@ class ExploreDrone:
         self.camera_mode = camera_mode
         self.timestamp_bounding_boxes = queue.Queue()
         self.start_time = time.time()
+        self.worker_shutoff_time = 15
 
         self.coords_lock = threading.Lock()
         self.coords_cv = threading.Condition()
@@ -127,7 +128,12 @@ class ExploreDrone:
         return (rand_rotated_latlon[0], rand_rotated_latlon[1])
 
     def primary_camera_func(self):
-        get_hailo_bounding_boxes(self.timestamp_bounding_boxes)
+        with self.coords_cv:
+            while self.mission_node is None:
+                print("Waiting for mission to start")
+                self.coords_cv.wait()
+
+        get_hailo_bounding_boxes(self.timestamp_bounding_boxes, self.coords_lock)
 
     def backup_camera_func(self):
 
@@ -135,6 +141,9 @@ class ExploreDrone:
             while self.mission_node is None:
                 print("Waiting for mission to start")
                 self.coords_cv.wait()
+
+                if self.shutdown_flag:
+                    return
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
         cam = Picamera2(0)
@@ -227,11 +236,6 @@ class ExploreDrone:
         # Start the CV detection pipelien
         while not self.shutdown_flag:
             # If there are detections, append that to self.coords
-
-            if time.time() - self.start_time >= 10:
-                with self.coords_lock:
-                    self.shutdown_flag = True
-                continue
             
             next_timestamp = 0
             absolute_height = 0
@@ -244,14 +248,10 @@ class ExploreDrone:
             with self.coords_cv:
                 # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
                while (self.mission_node is None or self.timestamp_bounding_boxes.qsize() == 0):
-                    if self.mission_node is None:
-                        print("Mission node is none")
-                    else:
-                        print("timestamp size is 0")
                     self.coords_cv.wait()
-            
-            if self.shutdown_flag:
-                return
+
+                    if self.shutdown_flag:
+                        return
 
             with self.coords_lock:
                 # print("Acquired the lock in find_mines")
@@ -334,6 +334,11 @@ class ExploreDrone:
             sock.settimeout(1)
 
             while not self.shutdown_flag:
+
+                if time.time() - self.start_time >= self.worker_shutoff_time:
+                    with self.coords_lock:
+                        self.shutdown_flag = True
+                    continue
                 
                 # Wait for a connection for 1s.  The socket library avoids consuming
                 # CPU while waiting for a connection.
@@ -504,7 +509,8 @@ class ExploreDrone:
         find_mines_thread.start()
 
         if self.camera_mode == "primary":
-            pass
+            take_pictures_thread = threading.Thread(target=self.primary_camera_func)
+            take_pictures_thread.start()
 
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)

@@ -92,13 +92,13 @@ class MissionNode(Node):
             print("Stuck here")
             rclpy.spin_once(self, timeout_sec=0.1)
 
-        self.start_publisher.publish(msg)
-        print("published start_mission")
-        time.sleep(15)
-        if self.mission_mode == "orbit":
-            print("Published orbit")
-            self.orbit_publisher.publish(msg)
-        elif self.mission_mode == "survey":
-            print("Published survey")
-            self.survey_publisher.publish(msg)
-        self.get_logger().info("Mission started!")
+        # self.start_publisher.publish(msg)
+        # print("published start_mission")
+        # time.sleep(15)
+        # if self.mission_mode == "orbit":
+        #     print("Published orbit")
+        #     self.orbit_publisher.publish(msg)
+        # elif self.mission_mode == "survey":
+        #     print("Published survey")
+        #     self.survey_publisher.publish(msg)
+        # self.get_logger().info("Mission started!")
