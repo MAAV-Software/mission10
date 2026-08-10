@@ -11,6 +11,7 @@ readonly TEST_CONFIG="$TEST_ROOT/fleet-network.conf"
 readonly TEST_MODE="$TEST_ROOT/fleet-mode"
 readonly NMCLI_LOG="$TEST_ROOT/nmcli.log"
 readonly SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log"
+readonly TEST_DDS="$TEST_ROOT/cyclonedds"
 readonly MWIRELESS_UUID="00000000-0000-0000-0000-000000000001"
 readonly HOTSPOT_UUID="00000000-0000-0000-0000-000000000002"
 export NMCLI_LOG SYSTEMCTL_LOG MWIRELESS_UUID HOTSPOT_UUID
@@ -20,6 +21,8 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$TEST_BIN"
+mkdir -p "$TEST_DDS"
+touch "$TEST_DDS/internet.xml" "$TEST_DDS/field.xml"
 
 cat >"$TEST_BIN/nmcli" <<'EOF'
 #!/usr/bin/env bash
@@ -74,6 +77,7 @@ run_controller() {
     PATH="$TEST_BIN:$PATH" \
         FLEET_CONFIG_FILE="$TEST_CONFIG" \
         FLEET_MODE_FILE="$TEST_MODE" \
+        FLEET_DDS_CONFIG_DIR="$TEST_DDS" \
         bash "$CONTROLLER" "$@"
 }
 
@@ -106,6 +110,7 @@ assert_log 'connection modify field-ap connection.autoconnect no'
 assert_log "--wait 15 connection up $MWIRELESS_UUID ifname wlan0"
 assert_log 'con-name usb-mwireless-wlan1'
 assert_systemctl 'stop jarvis-web.service'
+[[ "$(readlink "$TEST_DDS/active.xml")" == internet.xml ]]
 
 : >"$NMCLI_LOG"
 : >"$SYSTEMCTL_LOG"
@@ -117,6 +122,7 @@ assert_log '802-11-wireless.mode ap'
 assert_log 'connection up field-ap ifname wlan0'
 assert_systemctl 'start --no-block fleet-dhcp.service'
 assert_systemctl 'stop jarvis-web.service'
+[[ "$(readlink "$TEST_DDS/active.xml")" == field.xml ]]
 reject_log 'con-name usb-mwireless-wlan1'
 
 : >"$SYSTEMCTL_LOG"
@@ -130,6 +136,7 @@ assert_log 'con-name field-client'
 assert_log 'connection up field-client ifname wlan0'
 assert_log 'ipv4.addresses 10.77.0.12/24'
 assert_systemctl 'stop fleet-dhcp.service'
+[[ "$(readlink "$TEST_DDS/active.xml")" == field.xml ]]
 
 : >"$NMCLI_LOG"
 : >"$SYSTEMCTL_LOG"
@@ -143,6 +150,7 @@ reject_log 'connection up field-ap ifname wlan0'
 reject_log 'connection.autoconnect-priority'
 assert_systemctl 'stop jarvis-web.service'
 assert_systemctl 'stop fleet-dhcp.service'
+[[ "$(readlink "$TEST_DDS/active.xml")" == internet.xml ]]
 if run_controller is-field-master; then
     echo "Internet mode was reported as a field master" >&2
     exit 1
