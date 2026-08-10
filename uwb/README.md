@@ -95,12 +95,12 @@ nix develop ..#uwb
 
 cargo fmt --all --check
 cargo test --target x86_64-unknown-linux-gnu -p mission10-uwb-protocol
-cargo test --target x86_64-unknown-linux-gnu -p dw1000-rs -p mission10-dw1000
+cargo test --target x86_64-unknown-linux-gnu -p dw1000-rs -p dw1000-radio
 cargo check -p mission10-dwm3001
 cargo check -p mission10-dwm3001 --features engineering-sample
 cargo build --release -p mission10-dwm3001
 # Run this native release build on bigrpi5.
-cargo build --release --target aarch64-unknown-linux-gnu -p mission10-dw1000
+cargo build --release --target aarch64-unknown-linux-gnu -p dw1000-radio
 uv run --with pytest pytest -q protocol/python/test_protocol.py
 ```
 
@@ -158,12 +158,12 @@ Known CM5 wiring uses `/dev/spidev0.0`, active-high IRQ on GPIO24, and
 open-drain reset on GPIO25.
 
 ```sh
-scp target/aarch64-unknown-linux-gnu/release/mission10-dw1000 drone2:/tmp/
-ssh drone2 'chmod 755 /tmp/mission10-dw1000'
+scp target/aarch64-unknown-linux-gnu/release/dw1000-radio drone2:/tmp/
+ssh drone2 'chmod 755 /tmp/dw1000-radio'
 
-ssh drone2 '/tmp/mission10-dw1000 probe --address 2'
+ssh drone2 '/tmp/dw1000-radio probe --address 2'
 ssh drone2 \
-  'sudo /tmp/mission10-dw1000 range --rt-priority 80 \
+  'sudo /tmp/dw1000-radio range --rt-priority 80 \
    --address 2 --peer 0 --peer 1 --peer 3 \
    --host-socket /run/uwb/host.sock --duration 60 --quiet'
 ```

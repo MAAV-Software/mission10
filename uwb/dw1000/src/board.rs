@@ -115,7 +115,7 @@ impl IrqPin {
         let request = Arc::new(
             Request::builder()
                 .on_chip(chip)
-                .with_consumer("mission10-dw1000-irq")
+                .with_consumer("dw1000-radio-irq")
                 .with_line(offset)
                 .as_input()
                 .with_bias(Bias::Disabled)
@@ -204,7 +204,7 @@ impl ResetLine for LinuxResetLine {
         self.request = Some(
             Request::builder()
                 .on_chip(&self.chip)
-                .with_consumer("mission10-dw1000-reset")
+                .with_consumer("dw1000-radio-reset")
                 .with_line(self.offset)
                 .as_output(Value::Inactive)
                 .request()?,
@@ -217,7 +217,7 @@ impl ResetLine for LinuxResetLine {
         self.request = Some(
             Request::builder()
                 .on_chip(&self.chip)
-                .with_consumer("mission10-dw1000-reset")
+                .with_consumer("dw1000-radio-reset")
                 .with_line(self.offset)
                 .as_input()
                 .with_bias(Bias::PullUp)

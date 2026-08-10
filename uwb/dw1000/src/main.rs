@@ -5,14 +5,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
-use mission10_dw1000::NodeAddress;
-use mission10_dw1000::board::{
+use dw1000_radio::NodeAddress;
+use dw1000_radio::board::{
     DEFAULT_GPIO_CHIP, DEFAULT_IRQ_GPIO, DEFAULT_RESET_GPIO, DEFAULT_RUN_SPI_HZ, DEFAULT_SPI_PATH,
     HardwareConfig, PhyProfile, open_and_initialize,
 };
-use mission10_dw1000::host_service;
-use mission10_dw1000::oracle::run_rx_oracle;
-use mission10_dw1000::ranging::{RadioEvent, Ranger, RangingConfig, RangingStats};
+use dw1000_radio::host_service;
+use dw1000_radio::oracle::run_rx_oracle;
+use dw1000_radio::ranging::{RadioEvent, Ranger, RangingConfig, RangingStats};
 
 #[derive(Debug, Parser)]
 #[command(about = "Mission 10 DW1000 Linux bring-up and DS-TWR tool")]
