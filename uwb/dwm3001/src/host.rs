@@ -16,7 +16,7 @@ use mission10_uwb_protocol::host::{
     LatestExchanges, RadioConfiguration, RadioToHost, RadioToHostEnvelope, decode_host_to_radio,
     encode_radio_to_host,
 };
-use mission10_uwb_protocol::{EgoState, StateValidity};
+use mission10_uwb_protocol::{EgoState, FleetMode, StateValidity};
 
 const USB_PACKET_SIZE: usize = 64;
 
@@ -26,6 +26,7 @@ static MEASUREMENT_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CONTROL: Channel<CriticalSectionRawMutex, RadioToHost, 8> = Channel::new();
 static DIAGNOSTICS: Channel<CriticalSectionRawMutex, RadioToHost, 8> = Channel::new();
 static CONFIGURATIONS: Channel<CriticalSectionRawMutex, RadioConfiguration, 2> = Channel::new();
+static FLEET_MODES: Channel<CriticalSectionRawMutex, FleetMode, 2> = Channel::new();
 
 #[derive(Clone, Copy)]
 pub struct ClockReply {
@@ -82,7 +83,8 @@ pub fn publish(event: RadioToHost) {
         | RadioToHost::Configured { .. }
         | RadioToHost::ClockProbe { .. }
         | RadioToHost::ClockStatus { .. }
-        | RadioToHost::Health { .. } => {
+        | RadioToHost::Health { .. }
+        | RadioToHost::FleetModeReceived { .. } => {
             if CONTROL.try_send(event).is_err() {
                 CONTROL_DROPS.fetch_add(1, Ordering::Relaxed);
             }
@@ -121,6 +123,10 @@ pub fn latest_ego_state() -> EgoState {
         HOST_STALE_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
     }
     state
+}
+
+pub fn try_fleet_mode() -> Option<FleetMode> {
+    FLEET_MODES.try_receive().ok()
 }
 
 pub fn try_configuration() -> Option<RadioConfiguration> {
@@ -425,6 +431,11 @@ fn route_command(command: HostToRadio) {
                 local_rx_us: Instant::now().as_micros(),
             };
             if CLOCK_REPLIES.try_send(reply).is_err() {
+                HOST_COMMAND_DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        HostToRadio::BroadcastFleetMode { mode } => {
+            if !mode.is_valid() || FLEET_MODES.try_send(mode).is_err() {
                 HOST_COMMAND_DROPS.fetch_add(1, Ordering::Relaxed);
             }
         }

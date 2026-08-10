@@ -22,9 +22,10 @@ peers per node. The competition roster contains four aircraft.
 
 ## Pair-local medium access
 
-Air protocol version 4 uses PAN `0x4d10` and IEEE 802.15.4 short addresses.
+Air protocol version 6 uses PAN `0x4d10` and IEEE 802.15.4 short addresses.
 Aircraft use addresses `0..3`. Development nodes use `0x8000..0x80ff`.
-Poll, Response, Final, and Report are unicast.
+Poll, Response, Final, and Report are unicast. `FleetMode` is broadcast and
+contains the selected aircraft master and `field` or `internet` network.
 
 For each configured pair:
 
@@ -70,17 +71,17 @@ samples and prints the mapped value when the bracket meets the same bound.
 
 ## Host protocol
 
-Host protocol version 7 uses:
+Host protocol version 9 uses:
 
 ```text
 COBS(Hubpack(HostToRadioEnvelope | RadioToHostEnvelope) ||
      CRC-32/ISO-HDLC) || 0x00
 ```
 
-It carries configuration, ego state, passive clock correlation, health
-requests, completed exchanges, diagnostics, and counters. The host sender
-retains the latest unsent exchange for each peer. USB packet boundaries are
-not protocol boundaries.
+It carries configuration, ego state, `FleetMode`, passive clock correlation,
+health requests, completed exchanges, diagnostics, and counters. The host
+sender retains the latest unsent exchange for each peer. USB packet boundaries
+are not protocol boundaries.
 
 The same byte stream can use USB CDC or UART. Host ego state becomes stale
 after 100 ms without an update. The radio keeps ranging and sets `HOST_STALE`.
@@ -98,15 +99,15 @@ cargo test --target x86_64-unknown-linux-gnu -p dw1000-rs -p mission10-dw1000
 cargo check -p mission10-dwm3001
 cargo check -p mission10-dwm3001 --features engineering-sample
 cargo build --release -p mission10-dwm3001
-cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 \
-  -p mission10-dw1000
+# Run this native release build on bigrpi5.
+cargo build --release --target aarch64-unknown-linux-gnu -p mission10-dw1000
 uv run --with pytest pytest -q protocol/python/test_protocol.py
 ```
 
 The Rust encoders generate:
 
-- `protocol/testdata/air_protocol_v5.frames`;
-- `protocol/testdata/host_protocol_v8.frames`.
+- `protocol/testdata/air_protocol_v6.frames`;
+- `protocol/testdata/host_protocol_v9.frames`.
 
 The Python tests decode the host fixture independently. Do not hand-edit these
 files. Regenerate an intentional format change with:
@@ -140,6 +141,13 @@ python3 uwb/protocol/python/mission10_uwb_protocol.py \
   --request-health
 ```
 
+Broadcast a fleet selection from a DWM3001 host without ROS:
+
+```sh
+python3 uwb/protocol/python/mission10_uwb_protocol.py /dev/ttyACM0 \
+  --fleet-master 2 --network field
+```
+
 The application initializes the DW3110 at 4 MHz, raises SPI to 32 MHz, reports
 OTP and antenna delays, checks actual delayed timestamps, retains reset causes,
 and uses a four-second hardware watchdog.
@@ -155,13 +163,13 @@ ssh drone2 'chmod 755 /tmp/mission10-dw1000'
 
 ssh drone2 '/tmp/mission10-dw1000 probe --address 2'
 ssh drone2 \
-  'sudo chrt -f 80 taskset -c 3 /tmp/mission10-dw1000 range \
+  'sudo /tmp/mission10-dw1000 range --rt-priority 80 \
    --address 2 --peer 0 --peer 1 --peer 3 \
-   --duration 60 --quiet'
+   --host-socket /run/uwb/host.sock --duration 60 --quiet'
 ```
 
 The process reports its scheduler policy, priority, and current CPU at startup.
-Qualification runs use `SCHED_FIFO` and a reserved CPU. The policy improves
+Qualification runs use `SCHED_FIFO` without CPU affinity. The policy improves
 Linux service latency; it does not change DS-TWR timestamp arithmetic.
 
 `--low-tx-power` reduces TX gain by 8.5 dB for close-range diagnosis. The

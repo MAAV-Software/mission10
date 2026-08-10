@@ -8,6 +8,7 @@ from mission10_uwb_protocol import (
     Diagnostic,
     Envelope,
     FrameError,
+    FleetMode,
     MissionEventTime,
     RadioConfiguration,
     decode_frame,
@@ -15,6 +16,7 @@ from mission10_uwb_protocol import (
     encode_configuration,
     encode_ego_state,
     encode_health_request,
+    encode_fleet_mode,
     frames,
     is_node_address,
 )
@@ -34,7 +36,7 @@ GOLDEN_STATE = EgoState(
     validity=0x800D,
 )
 
-GOLDEN_FIXTURE = Path(__file__).resolve().parents[1] / "testdata/host_protocol_v8.frames"
+GOLDEN_FIXTURE = Path(__file__).resolve().parents[1] / "testdata/host_protocol_v9.frames"
 GOLDEN_FRAMES = dict(
     line.split("=", 1)
     for line in GOLDEN_FIXTURE.read_text().splitlines()
@@ -54,14 +56,14 @@ GOLDEN_HOST_FRAMES = {
 
 def test_decodes_every_rust_radio_variant():
     expected = [
-        Envelope(8, 0x10203040, "radio_id", (0xDECA, 3, 0, 2)),
-        Envelope(8, 0x10203041, "otp", (0x61616161, 0x3FF03FF0, 0x00BE0019, 0x00010201)),
-        Envelope(8, 0x10203042, "ready", (0x3FF0, 0x3FF1)),
-        Envelope(8, 0x10203043, "clock_probe", (0x5678,)),
-        Envelope(8, 0x10203044, "clock_status", (7, 125, 12_345, 1)),
-        Envelope(8, 0x10203045, "configured", (GOLDEN_CONFIGURATION,)),
+        Envelope(9, 0x10203040, "radio_id", (0xDECA, 3, 0, 2)),
+        Envelope(9, 0x10203041, "otp", (0x61616161, 0x3FF03FF0, 0x00BE0019, 0x00010201)),
+        Envelope(9, 0x10203042, "ready", (0x3FF0, 0x3FF1)),
+        Envelope(9, 0x10203043, "clock_probe", (0x5678,)),
+        Envelope(9, 0x10203044, "clock_status", (7, 125, 12_345, 1)),
+        Envelope(9, 0x10203045, "configured", (GOLDEN_CONFIGURATION,)),
         Envelope(
-            8,
+            9,
             0x10203046,
             "completed_exchange",
             (
@@ -75,8 +77,9 @@ def test_decodes_every_rust_radio_variant():
                 GOLDEN_STATE,
             ),
         ),
-        Envelope(8, 0x10203047, "error", (Diagnostic(21, "radio_reset"),)),
-        Envelope(8, 0x10203048, "health", (0x89ABCDEF, *range(1, 31))),
+        Envelope(9, 0x10203047, "error", (Diagnostic(21, "radio_reset"),)),
+        Envelope(9, 0x10203048, "health", (0x89ABCDEF, *range(1, 31))),
+        Envelope(9, 0x10203049, "fleet_mode_received", (0x8000, FleetMode(2, FleetMode.FIELD))),
     ]
     assert [decode_frame(bytes.fromhex(frame)) for frame in GOLDEN_RADIO_FRAMES.values()] == expected
 
@@ -94,6 +97,7 @@ def test_host_commands_have_valid_cobs_crc_and_bounds():
             7,
             125,
         ),
+        encode_fleet_mode(0x01020308, FleetMode(2, FleetMode.INTERNET)),
     )
     for frame in frames:
         assert frame.endswith(b"\0")
@@ -124,6 +128,14 @@ def test_configuration_validation():
         RadioConfiguration(2, (2,))
     with pytest.raises(ValueError, match="required"):
         RadioConfiguration(2, ())
+
+
+def test_fleet_mode_validation():
+    assert FleetMode(3, FleetMode.FIELD) == FleetMode(3, 0)
+    with pytest.raises(ValueError, match="0..3"):
+        FleetMode(4, FleetMode.FIELD)
+    with pytest.raises(ValueError, match="field or internet"):
+        FleetMode(0, 2)
 
 
 def test_node_address_namespace_is_exhaustive():

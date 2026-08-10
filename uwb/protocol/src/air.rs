@@ -10,9 +10,9 @@ use smoltcp::wire::{
 };
 
 use crate::scheduler::ExchangeId;
-use crate::{Destination, EgoState, NodeAddress, TIMESTAMP_MASK};
+use crate::{Destination, EgoState, FleetMode, NodeAddress, TIMESTAMP_MASK};
 
-pub const AIR_PROTOCOL_VERSION: u8 = 5;
+pub const AIR_PROTOCOL_VERSION: u8 = 6;
 pub const PAN_ID: u16 = 0x4d10;
 pub const BROADCAST_ADDRESS: u16 = 0xffff;
 pub const AIR_FRAME_MAX_NO_FCS: usize = 125;
@@ -36,6 +36,9 @@ pub enum AirMessage {
     Report {
         final_rx: u64,
         status: u16,
+    },
+    FleetMode {
+        mode: FleetMode,
     },
 }
 
@@ -63,6 +66,8 @@ const _: () = assert!(MAC_HEADER_SIZE + AIR_ENVELOPE_MAX_SIZE <= AIR_FRAME_MAX_N
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AirEncodeError {
     BroadcastRanging,
+    FleetModeUnicast,
+    InvalidFleetMode,
     InvalidTimestamp,
     Hubpack,
 }
@@ -77,6 +82,8 @@ pub enum AirDecodeError {
     Addressing,
     Destination,
     BroadcastRanging,
+    FleetModeUnicast,
+    InvalidFleetMode,
     Hubpack,
     TrailingData,
     ProtocolVersion(u8),
@@ -109,8 +116,18 @@ pub fn encode(
     mac_sequence: u8,
     envelope: &AirEnvelope,
 ) -> Result<EncodedAirFrame, AirEncodeError> {
-    if destination == Destination::Broadcast {
-        return Err(AirEncodeError::BroadcastRanging);
+    match (destination, envelope.message) {
+        (Destination::Broadcast, AirMessage::FleetMode { .. }) => {}
+        (Destination::Broadcast, _) => return Err(AirEncodeError::BroadcastRanging),
+        (Destination::Node(_), AirMessage::FleetMode { .. }) => {
+            return Err(AirEncodeError::FleetModeUnicast);
+        }
+        (Destination::Node(_), _) => {}
+    }
+    if let AirMessage::FleetMode { mode } = envelope.message
+        && !mode.is_valid()
+    {
+        return Err(AirEncodeError::InvalidFleetMode);
     }
     if !timestamps_valid(&envelope.message) {
         return Err(AirEncodeError::InvalidTimestamp);
@@ -173,9 +190,6 @@ pub fn decode(bytes: &[u8], local_address: NodeAddress) -> Result<DecodedAirFram
     } else {
         Destination::Node(NodeAddress::new(destination_raw).ok_or(AirDecodeError::Addressing)?)
     };
-    if destination == Destination::Broadcast {
-        return Err(AirDecodeError::BroadcastRanging);
-    }
     let mac_sequence = repr.sequence_number.ok_or(AirDecodeError::Addressing)?;
     let payload = frame.payload().ok_or(AirDecodeError::FrameType)?;
     let (envelope, rest) =
@@ -185,6 +199,19 @@ pub fn decode(bytes: &[u8], local_address: NodeAddress) -> Result<DecodedAirFram
     }
     if envelope.protocol_version != AIR_PROTOCOL_VERSION {
         return Err(AirDecodeError::ProtocolVersion(envelope.protocol_version));
+    }
+    match (destination, envelope.message) {
+        (Destination::Broadcast, AirMessage::FleetMode { .. }) => {}
+        (Destination::Broadcast, _) => return Err(AirDecodeError::BroadcastRanging),
+        (Destination::Node(_), AirMessage::FleetMode { .. }) => {
+            return Err(AirDecodeError::FleetModeUnicast);
+        }
+        (Destination::Node(_), _) => {}
+    }
+    if let AirMessage::FleetMode { mode } = envelope.message
+        && !mode.is_valid()
+    {
+        return Err(AirDecodeError::InvalidFleetMode);
     }
     if !timestamps_valid(&envelope.message) {
         return Err(AirDecodeError::InvalidTimestamp);
@@ -228,6 +255,7 @@ const fn timestamps_valid(message: &AirMessage) -> bool {
             timestamp_valid(*poll_tx) && timestamp_valid(*response_rx) && timestamp_valid(*final_tx)
         }
         AirMessage::Report { final_rx, .. } => timestamp_valid(*final_rx),
+        AirMessage::FleetMode { .. } => true,
     }
 }
 
@@ -259,7 +287,7 @@ mod tests {
         }
     }
 
-    fn golden_cases() -> [(&'static str, AirMessage); 4] {
+    fn golden_cases() -> [(&'static str, AirMessage); 5] {
         [
             ("poll", AirMessage::Poll { state: state() }),
             (
@@ -285,15 +313,26 @@ mod tests {
                     status: 0x1234,
                 },
             ),
+            (
+                "fleet_mode",
+                AirMessage::FleetMode {
+                    mode: FleetMode::new(2, crate::FleetNetwork::Field).unwrap(),
+                },
+            ),
         ]
     }
 
     fn golden_frames() -> String {
         let mut rendered = String::new();
         for (sequence, (name, message)) in golden_cases().into_iter().enumerate() {
+            let destination = if matches!(message, AirMessage::FleetMode { .. }) {
+                Destination::Broadcast
+            } else {
+                Destination::Node(node(3))
+            };
             let frame = encode(
                 node(2),
-                Destination::Node(node(3)),
+                destination,
                 sequence as u8,
                 &AirEnvelope::new(exchange_id(), message),
             )
@@ -317,19 +356,19 @@ mod tests {
         if std::env::var_os("UPDATE_AIR_GOLDEN").is_some() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/testdata/air_protocol_v5.frames"
+                "/testdata/air_protocol_v6.frames"
             );
             std::fs::write(path, &rendered).expect("write air fixture");
             return;
         }
-        assert_eq!(rendered, include_str!("../testdata/air_protocol_v5.frames"));
+        assert_eq!(rendered, include_str!("../testdata/air_protocol_v6.frames"));
     }
 
     #[test]
     fn committed_air_golden_bytes_decode_independently() {
         for (sequence, ((expected_name, expected_message), line)) in golden_cases()
             .into_iter()
-            .zip(include_str!("../testdata/air_protocol_v5.frames").lines())
+            .zip(include_str!("../testdata/air_protocol_v6.frames").lines())
             .enumerate()
         {
             let (name, encoded) = line.split_once('=').unwrap();
@@ -344,7 +383,12 @@ mod tests {
                 .collect::<Vec<_>>();
             let decoded = decode(&bytes, node(3)).unwrap();
             assert_eq!(decoded.source, node(2));
-            assert_eq!(decoded.destination, Destination::Node(node(3)));
+            let expected_destination = if matches!(expected_message, AirMessage::FleetMode { .. }) {
+                Destination::Broadcast
+            } else {
+                Destination::Node(node(3))
+            };
+            assert_eq!(decoded.destination, expected_destination);
             assert_eq!(decoded.mac_sequence, sequence as u8);
             assert_eq!(decoded.envelope.exchange_id, exchange_id());
             assert_eq!(decoded.envelope.message, expected_message);
@@ -393,6 +437,20 @@ mod tests {
                 ),
             ),
             Err(AirEncodeError::InvalidTimestamp)
+        );
+    }
+
+    #[test]
+    fn fleet_mode_is_validated_and_broadcast_only() {
+        let mode = FleetMode::new(1, crate::FleetNetwork::Internet).unwrap();
+        let envelope = AirEnvelope::new(exchange_id(), AirMessage::FleetMode { mode });
+        let frame = encode(node(0x8000), Destination::Broadcast, 7, &envelope).unwrap();
+        let decoded = decode(frame.bytes(), node(2)).unwrap();
+        assert_eq!(decoded.destination, Destination::Broadcast);
+        assert_eq!(decoded.envelope.message, AirMessage::FleetMode { mode });
+        assert_eq!(
+            encode(node(0x8000), Destination::Node(node(2)), 7, &envelope),
+            Err(AirEncodeError::FleetModeUnicast)
         );
     }
 

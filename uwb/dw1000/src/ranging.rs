@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use dw1000_rs::registers::status;
-use dw1000_rs::{DelayedTransmit, DwTime, DxTimeDeadline, OnAirTimestamp, RxOptions, SysStatus};
+use dw1000_rs::{
+    DelayedTransmit, DwTime, DxTimeDeadline, OnAirTimestamp, RxOptions, SysStatus, TxOptions,
+};
 use mission10_uwb_protocol::air::{
     self, AIR_FRAME_MAX_NO_FCS, AirEnvelope, AirMessage, REPORT_STATUS_CLOSE,
 };
@@ -12,8 +15,9 @@ use mission10_uwb_protocol::scheduler::{
     next_due_us, pair_index,
 };
 use mission10_uwb_protocol::{
-    DTU_PER_US, Destination, EgoState, NodeAddress, REPORT_TURNAROUND_US, ResponderTimestamps,
-    TIMESTAMP_MASK, delayed_tx_time, distance_metres, scheduled_tx_matches, wrapping_delta,
+    DTU_PER_US, Destination, EgoState, FleetMode, NodeAddress, REPORT_TURNAROUND_US,
+    ResponderTimestamps, TIMESTAMP_MASK, delayed_tx_time, distance_metres, scheduled_tx_matches,
+    wrapping_delta,
 };
 
 use crate::DEFAULT_ANTENNA_DELAY;
@@ -25,6 +29,30 @@ const MAX_STATUS_DRAIN_PASSES: usize = 8;
 const POLL_PROGRAM_LEAD_US: u64 = 1_000;
 const RX_EVENT_BITS: u64 = status::RX_TERMINAL_EVENTS.0;
 const RX_ERROR_BITS: u64 = status::RX_ERROR_EVENTS.0;
+const FLEET_MODE_REPEATS: u8 = 8;
+const FLEET_MODE_INTERVAL: Duration = Duration::from_millis(125);
+
+#[derive(Debug, Clone, Copy)]
+pub enum RadioCommand {
+    SetEgoState(EgoState),
+    BroadcastFleetMode(FleetMode),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RadioEvent {
+    Range(RangeMeasurement),
+    FleetMode {
+        source: NodeAddress,
+        mode: FleetMode,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingFleetMode {
+    mode: FleetMode,
+    remaining: u8,
+    next_at: Instant,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecoveryAction {
@@ -105,6 +133,8 @@ pub struct RangeMeasurement {
     pub mission_event_time_us: Option<u64>,
     pub mission_generation: Option<u32>,
     pub mission_time_error_us: u32,
+    pub exchange_id: ExchangeId,
+    pub peer_state: EgoState,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -180,12 +210,14 @@ enum ExchangeState {
         exchange_id: ExchangeId,
         poll_rx: u64,
         response_tx: u64,
+        peer_state: EgoState,
     },
     AwaitFinal {
         peer: NodeAddress,
         exchange_id: ExchangeId,
         poll_rx: u64,
         response_tx: u64,
+        peer_state: EgoState,
     },
     SendingFinal {
         peer: NodeAddress,
@@ -195,6 +227,7 @@ enum ExchangeState {
         response_tx: u64,
         response_rx: u64,
         final_tx: u64,
+        peer_state: EgoState,
     },
     AwaitReport {
         peer: NodeAddress,
@@ -205,11 +238,13 @@ enum ExchangeState {
         response_rx: u64,
         final_tx: u64,
         final_event_time: u64,
+        peer_state: EgoState,
     },
     SendingReport {
         peer: NodeAddress,
         exchange_id: ExchangeId,
     },
+    SendingFleetMode,
 }
 
 impl ExchangeState {
@@ -234,6 +269,8 @@ pub struct Ranger {
     mac_sequence: u8,
     sequence: u64,
     stats: RangingStats,
+    ego_state: EgoState,
+    pending_fleet_mode: Option<PendingFleetMode>,
 }
 
 impl Ranger {
@@ -262,6 +299,8 @@ impl Ranger {
             mac_sequence: 0,
             sequence: 0,
             stats: RangingStats::default(),
+            ego_state: EgoState::default(),
+            pending_fleet_mode: None,
         }
     }
 
@@ -281,17 +320,23 @@ impl Ranger {
         &mut self,
         stop: &AtomicBool,
         duration: Option<Duration>,
-        mut on_range: impl FnMut(RangeMeasurement),
+        commands: Option<&Receiver<RadioCommand>>,
+        mut on_event: impl FnMut(RadioEvent),
     ) -> Result<RangingStats> {
         self.arm_receive(RecoveryAction::Rearm)?;
         let started = Instant::now();
         while !stop.load(Ordering::Relaxed)
             && duration.is_none_or(|duration| started.elapsed() < duration)
         {
+            if let Some(commands) = commands {
+                while let Ok(command) = commands.try_recv() {
+                    self.handle_command(command);
+                }
+            }
             let now = Instant::now();
             let status = self.read_status()?;
             if status.0 & (status::TX_FRAME_SENT.0 | RX_EVENT_BITS) != 0 {
-                self.service_status(status, &mut on_range)?;
+                self.service_status(status, &mut on_event)?;
                 continue;
             }
             if self.deadline.is_some_and(|deadline| now >= deadline) {
@@ -319,6 +364,13 @@ impl Ranger {
             return Ok(false);
         }
         let now_us = self.monotonic_us();
+        if self
+            .pending_fleet_mode
+            .is_some_and(|pending| pending.next_at <= Instant::now())
+        {
+            self.send_fleet_mode()?;
+            return Ok(true);
+        }
         for state in &mut self.pair_states {
             state.expire(now_us);
         }
@@ -333,6 +385,19 @@ impl Ranger {
         self.active_pair = Some(pair);
         self.send_poll(pair.responder, exchange_id)?;
         Ok(true)
+    }
+
+    fn handle_command(&mut self, command: RadioCommand) {
+        match command {
+            RadioCommand::SetEgoState(state) => self.ego_state = state,
+            RadioCommand::BroadcastFleetMode(mode) => {
+                self.pending_fleet_mode = Some(PendingFleetMode {
+                    mode,
+                    remaining: FLEET_MODE_REPEATS,
+                    next_at: Instant::now(),
+                });
+            }
+        }
     }
 
     fn next_wait(&self, now: Instant) -> Duration {
@@ -364,7 +429,7 @@ impl Ranger {
     fn service_status(
         &mut self,
         mut status_value: SysStatus,
-        on_range: &mut impl FnMut(RangeMeasurement),
+        on_event: &mut impl FnMut(RadioEvent),
     ) -> Result<()> {
         for _ in 0..MAX_STATUS_DRAIN_PASSES {
             if status_value.contains(status::TX_FRAME_SENT) {
@@ -390,7 +455,7 @@ impl Ranger {
                     match received {
                         Ok(frame) => {
                             let radio_time = ticks(frame.timestamp);
-                            self.handle_frame(frame.bytes, radio_time, on_range)?;
+                            self.handle_frame(frame.bytes, radio_time, on_event)?;
                         }
                         Err(_) => {
                             self.stats.rx_errors += 1;
@@ -433,6 +498,7 @@ impl Ranger {
                 exchange_id,
                 poll_rx,
                 response_tx,
+                peer_state,
             } => {
                 let actual_response_tx = self.tx_timestamp()?;
                 if !scheduled_tx_matches(response_tx, actual_response_tx) {
@@ -446,6 +512,7 @@ impl Ranger {
                     exchange_id,
                     poll_rx,
                     response_tx,
+                    peer_state,
                 };
             }
             ExchangeState::SendingFinal {
@@ -456,6 +523,7 @@ impl Ranger {
                 response_tx,
                 response_rx,
                 final_tx,
+                peer_state,
             } => {
                 let actual_final_tx = self.tx_timestamp()?;
                 if !scheduled_tx_matches(final_tx, actual_final_tx) {
@@ -473,6 +541,7 @@ impl Ranger {
                     response_rx,
                     final_tx,
                     final_event_time: actual_final_tx,
+                    peer_state,
                 };
                 // Report has an explicit turnaround. Re-arm here so its RX
                 // attempt starts from cleared status and synchronized buffers.
@@ -483,6 +552,11 @@ impl Ranger {
                 self.state = ExchangeState::Idle;
                 self.deadline = None;
                 self.active_pair = None;
+                self.arm_receive(RecoveryAction::Rearm)?;
+            }
+            ExchangeState::SendingFleetMode => {
+                self.state = ExchangeState::Idle;
+                self.deadline = None;
                 self.arm_receive(RecoveryAction::Rearm)?;
             }
             ExchangeState::Idle
@@ -507,7 +581,7 @@ impl Ranger {
         &mut self,
         bytes: &[u8],
         rx_time: u64,
-        on_range: &mut impl FnMut(RangeMeasurement),
+        on_event: &mut impl FnMut(RadioEvent),
     ) -> Result<()> {
         let frame = match air::decode(bytes, self.config.address) {
             Ok(frame) => frame,
@@ -517,6 +591,14 @@ impl Ranger {
                 return Ok(());
             }
         };
+        if let AirMessage::FleetMode { mode } = frame.envelope.message {
+            on_event(RadioEvent::FleetMode {
+                source: frame.source,
+                mode,
+            });
+            self.recover_exchange(RecoveryAction::Rearm)?;
+            return Ok(());
+        }
         let Some(source) = self.peer_for_address(frame.source) else {
             self.stats.wrong_peer_frames += 1;
             self.arm_receive(RecoveryAction::Rearm)?;
@@ -524,12 +606,12 @@ impl Ranger {
         };
 
         match (self.state, frame.envelope.message) {
-            (ExchangeState::Idle, AirMessage::Poll { .. })
+            (ExchangeState::Idle, AirMessage::Poll { state })
                 if self.poll_is_valid(source, frame.envelope.exchange_id) =>
             {
                 self.stats.polls_received += 1;
                 self.active_pair = Pair::new(self.config.address, source);
-                self.send_response(source, frame.envelope.exchange_id, rx_time)?;
+                self.send_response(source, frame.envelope.exchange_id, rx_time, state)?;
             }
             (
                 ExchangeState::AwaitResponse {
@@ -540,11 +622,19 @@ impl Ranger {
                 AirMessage::Response {
                     poll_rx,
                     response_tx,
-                    ..
+                    state,
                 },
             ) if peer == source && exchange_id == frame.envelope.exchange_id => {
                 self.stats.responses_received += 1;
-                self.send_final(source, exchange_id, poll_tx, poll_rx, response_tx, rx_time)?;
+                self.send_final(
+                    source,
+                    exchange_id,
+                    poll_tx,
+                    poll_rx,
+                    response_tx,
+                    rx_time,
+                    state,
+                )?;
             }
             (
                 ExchangeState::AwaitFinal {
@@ -552,6 +642,7 @@ impl Ranger {
                     exchange_id,
                     poll_rx,
                     response_tx,
+                    peer_state,
                 },
                 AirMessage::Final {
                     poll_tx,
@@ -582,7 +673,7 @@ impl Ranger {
                 );
                 self.pair_states[index].record_success(self.monotonic_us(), close);
                 self.send_report(source, exchange_id, rx_time, close)?;
-                self.emit(source, distance, rx_time, on_range);
+                self.emit(source, exchange_id, peer_state, distance, rx_time, on_event);
             }
             (
                 ExchangeState::AwaitReport {
@@ -594,6 +685,7 @@ impl Ranger {
                     response_rx,
                     final_tx,
                     final_event_time,
+                    peer_state,
                 },
                 AirMessage::Report { final_rx, status },
             ) if peer == source && exchange_id == frame.envelope.exchange_id => {
@@ -613,7 +705,14 @@ impl Ranger {
                 self.state = ExchangeState::Idle;
                 self.deadline = None;
                 self.observe_range(source, status & REPORT_STATUS_CLOSE != 0);
-                self.emit(source, distance, final_event_time, on_range);
+                self.emit(
+                    source,
+                    exchange_id,
+                    peer_state,
+                    distance,
+                    final_event_time,
+                    on_event,
+                );
                 self.arm_receive(RecoveryAction::Rearm)?;
             }
             _ => {
@@ -667,7 +766,7 @@ impl Ranger {
             AirEnvelope::new(
                 exchange_id,
                 AirMessage::Poll {
-                    state: EgoState::default(),
+                    state: self.ego_state,
                 },
             ),
         )?;
@@ -690,6 +789,7 @@ impl Ranger {
         peer: NodeAddress,
         exchange_id: ExchangeId,
         poll_rx: u64,
+        peer_state: EgoState,
     ) -> Result<()> {
         let planned = self.planned_tx_after(poll_rx, self.config.reply_delay_us);
         let response_tx = ticks(planned.timestamp().value());
@@ -700,7 +800,7 @@ impl Ranger {
                 AirMessage::Response {
                     poll_rx,
                     response_tx,
-                    state: EgoState::default(),
+                    state: self.ego_state,
                 },
             ),
         )?;
@@ -713,6 +813,7 @@ impl Ranger {
             exchange_id,
             poll_rx,
             response_tx,
+            peer_state,
         };
         self.deadline = Some(Instant::now() + self.config.response_timeout);
         self.stats.responses_sent += 1;
@@ -727,6 +828,7 @@ impl Ranger {
         poll_rx: u64,
         response_tx: u64,
         response_rx: u64,
+        peer_state: EgoState,
     ) -> Result<()> {
         let planned = self.planned_tx_after(response_rx, self.config.reply_delay_us);
         let final_tx = ticks(planned.timestamp().value());
@@ -753,6 +855,7 @@ impl Ranger {
             response_tx,
             response_rx,
             final_tx,
+            peer_state,
         };
         self.deadline = Some(Instant::now() + self.config.response_timeout);
         self.stats.finals_sent += 1;
@@ -789,6 +892,34 @@ impl Ranger {
 
     fn encode(&mut self, peer: NodeAddress, envelope: AirEnvelope) -> Result<air::EncodedAirFrame> {
         self.encode_destination(Destination::Node(peer), envelope)
+    }
+
+    fn send_fleet_mode(&mut self) -> Result<()> {
+        let pending = self
+            .pending_fleet_mode
+            .expect("scheduled fleet mode exists");
+        let exchange_id = ExchangeId::new(self.next_exchange_id);
+        self.next_exchange_id = self.next_exchange_id.wrapping_add(1);
+        let frame = self.encode_destination(
+            Destination::Broadcast,
+            AirEnvelope::new(exchange_id, AirMessage::FleetMode { mode: pending.mode }),
+        )?;
+        self.hardware
+            .radio
+            .transmit(frame.bytes(), TxOptions::default())
+            .map_err(|error| anyhow::anyhow!("send FleetMode: {error:?}"))?;
+        self.state = ExchangeState::SendingFleetMode;
+        self.deadline = Some(Instant::now() + self.config.response_timeout);
+        self.pending_fleet_mode = if pending.remaining == 1 {
+            None
+        } else {
+            Some(PendingFleetMode {
+                remaining: pending.remaining - 1,
+                next_at: Instant::now() + FLEET_MODE_INTERVAL,
+                ..pending
+            })
+        };
+        Ok(())
     }
 
     fn encode_destination(
@@ -835,7 +966,8 @@ impl Ranger {
             ExchangeState::SendingPoll { .. }
             | ExchangeState::SendingResponse { .. }
             | ExchangeState::SendingFinal { .. }
-            | ExchangeState::SendingReport { .. } => {
+            | ExchangeState::SendingReport { .. }
+            | ExchangeState::SendingFleetMode => {
                 self.stats.tx_completion_timeouts += 1;
             }
             ExchangeState::AwaitResponse { .. }
@@ -888,9 +1020,11 @@ impl Ranger {
     fn emit(
         &mut self,
         source: NodeAddress,
+        exchange_id: ExchangeId,
+        peer_state: EgoState,
         distance: f64,
         range_event_time_dtu: u64,
-        on_range: &mut impl FnMut(RangeMeasurement),
+        on_event: &mut impl FnMut(RadioEvent),
     ) {
         let (mission_event_time_us, mission_time_error_us) = self
             .map_event_time(range_event_time_dtu)
@@ -904,11 +1038,13 @@ impl Ranger {
             mission_event_time_us,
             mission_generation: mission_event_time_us.map(|_| self.mission_generation),
             mission_time_error_us,
+            exchange_id,
+            peer_state,
         };
         self.sequence += 1;
         self.stats.ranges += 1;
         self.stats.exchange_completions += 1;
-        on_range(measurement);
+        on_event(RadioEvent::Range(measurement));
     }
 
     fn map_event_time(&mut self, event_dtu: u64) -> Option<(u64, u32)> {

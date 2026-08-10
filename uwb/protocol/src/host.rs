@@ -5,9 +5,9 @@ use hubpack::SerializedSize;
 use serde::{Deserialize, Serialize};
 
 use crate::scheduler::{ExchangeId, FlightRoster};
-use crate::{EgoState, NodeAddress};
+use crate::{EgoState, FleetMode, NodeAddress};
 
-pub const HOST_PROTOCOL_VERSION: u8 = 8;
+pub const HOST_PROTOCOL_VERSION: u8 = 9;
 /// The other five radios in the complete development inventory.
 pub const MAX_PEERS: usize = 5;
 
@@ -49,6 +49,9 @@ pub enum HostToRadio {
         mission_tx_us: u64,
         mission_generation: u32,
         source_error_us: u32,
+    },
+    BroadcastFleetMode {
+        mode: FleetMode,
     },
 }
 
@@ -272,6 +275,10 @@ pub enum RadioToHost {
     Health {
         request_id: u32,
         counters: HealthCounters,
+    },
+    FleetModeReceived {
+        source: NodeAddress,
+        mode: FleetMode,
     },
 }
 
@@ -710,6 +717,13 @@ mod tests {
                     },
                 },
             ),
+            (
+                "radio.fleet_mode_received",
+                RadioToHost::FleetModeReceived {
+                    source: node(0x8000),
+                    mode: FleetMode::new(2, crate::FleetNetwork::Field).unwrap(),
+                },
+            ),
         ];
 
         let mut frame = [0; HOST_FRAME_MAX_SIZE];
@@ -767,6 +781,15 @@ mod tests {
                     },
                 ),
             ),
+            (
+                "host.broadcast_fleet_mode",
+                HostToRadioEnvelope::new(
+                    0x0102_0308,
+                    HostToRadio::BroadcastFleetMode {
+                        mode: FleetMode::new(2, crate::FleetNetwork::Internet).unwrap(),
+                    },
+                ),
+            ),
         ];
         let mut frame = [0; HOST_FRAME_MAX_SIZE];
         cases
@@ -818,14 +841,14 @@ mod tests {
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/testdata/host_protocol_v8.frames"
+                "/testdata/host_protocol_v9.frames"
             );
             std::fs::write(path, &rendered).expect("write golden fixture");
             return;
         }
         assert_eq!(
             rendered,
-            include_str!("../testdata/host_protocol_v8.frames"),
+            include_str!("../testdata/host_protocol_v9.frames"),
             "golden fixture is stale; regenerate with \
              UPDATE_GOLDEN=1 cargo test --target x86_64-unknown-linux-gnu \
              -p mission10-uwb-protocol committed_fixture",

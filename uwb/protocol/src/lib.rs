@@ -12,11 +12,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod air;
 pub mod clock;
+pub mod fleet;
 pub mod host;
 pub mod ranging;
 pub mod scheduler;
 pub mod state;
 
+pub use fleet::{FleetMode, FleetNetwork};
 pub use ranging::{
     DTU_METRES, DTU_PER_US, MAX_SCHEDULED_TX_ERROR_DTU, REPORT_TURNAROUND_US, ResponderTimestamps,
     TIMESTAMP_MASK, delayed_tx_time, distance_metres, scheduled_tx_matches, wrapping_delta,

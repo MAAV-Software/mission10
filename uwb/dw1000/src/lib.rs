@@ -1,4 +1,5 @@
 pub mod board;
+pub mod host_service;
 pub mod oracle;
 pub mod ranging;
 

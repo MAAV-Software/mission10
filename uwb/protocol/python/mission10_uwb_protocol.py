@@ -13,7 +13,7 @@ import zlib
 from collections.abc import Iterator
 from typing import BinaryIO
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 MAX_PEERS = 5
 MAX_FRAME_SIZE = 192
 EGO_STATE_FORMAT = "<QIHhhh3i3hBH"
@@ -79,6 +79,21 @@ class RadioConfiguration:
             raise ValueError("peer address is outside the Mission 10 namespaces")
         if self.node_address in self.peers or len(set(self.peers)) != len(self.peers):
             raise ValueError("peers must be unique and distinct from the node")
+
+
+@dataclasses.dataclass(frozen=True)
+class FleetMode:
+    master: int
+    network: int
+
+    FIELD = 0
+    INTERNET = 1
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.master <= 3:
+            raise ValueError("fleet master must be aircraft 0..3")
+        if self.network not in (self.FIELD, self.INTERNET):
+            raise ValueError("fleet network must be field or internet")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -271,6 +286,15 @@ def decode_frame(frame: bytes) -> Envelope:
         code = body[0]
         name = DIAGNOSTIC_NAMES[code] if code < len(DIAGNOSTIC_NAMES) else "unrecognized"
         return Envelope(version, sequence, "error", (Diagnostic(code, name),))
+    if variant == 9:
+        if len(body) != 4:
+            raise FrameError("fleet mode has the wrong length")
+        source, master, network = struct.unpack("<HBB", body)
+        try:
+            mode = FleetMode(master, network)
+        except ValueError as error:
+            raise FrameError(str(error)) from error
+        return Envelope(version, sequence, "fleet_mode_received", (source, mode))
     try:
         kind, field_format = fixed_formats[variant]
     except KeyError as error:
@@ -323,6 +347,10 @@ def encode_clock_reply(
     )
 
 
+def encode_fleet_mode(sequence: int, mode: FleetMode) -> bytes:
+    return _encode_host_command(sequence, 4, struct.pack("<BB", mode.master, mode.network))
+
+
 def frames(stream: BinaryIO) -> Iterator[bytes]:
     frame = bytearray()
     discarding = False
@@ -363,6 +391,8 @@ def main() -> None:
     parser.add_argument(
         "--request-health", action="store_true", help="request an immediate health snapshot"
     )
+    parser.add_argument("--fleet-master", type=int, choices=range(4))
+    parser.add_argument("--network", choices=("field", "internet"))
     parser.add_argument(
         "--summary-interval",
         type=float,
@@ -384,6 +414,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.peer and args.configure_node is None:
         parser.error("--peer requires --configure-node")
+    if (args.fleet_master is None) != (args.network is None):
+        parser.error("--fleet-master and --network must be supplied together")
 
     started = time.monotonic()
     summary_started = started
@@ -392,7 +424,7 @@ def main() -> None:
         with open(args.device, "r+b", buffering=0) as stream:
             tty.setraw(stream.fileno())
             command_sequence = 0
-            if args.configure_node is not None or args.request_health:
+            if args.configure_node is not None or args.request_health or args.fleet_master is not None:
                 stream.write(b"\0")
             if args.configure_node is not None:
                 try:
@@ -403,6 +435,19 @@ def main() -> None:
                 command_sequence += 1
             if args.request_health:
                 stream.write(encode_health_request(command_sequence, int(time.time()) & 0xFFFFFFFF))
+                command_sequence += 1
+            if args.fleet_master is not None:
+                network = FleetMode.FIELD if args.network == "field" else FleetMode.INTERNET
+                stream.write(
+                    encode_fleet_mode(command_sequence, FleetMode(args.fleet_master, network))
+                )
+                command_sequence += 1
+                if not args.request_health:
+                    print(
+                        f"sent FleetMode master={args.fleet_master} network={args.network}",
+                        flush=True,
+                    )
+                    return
 
             for frame in frames(stream):
                 mission_rx_us = time.time_ns() // 1_000

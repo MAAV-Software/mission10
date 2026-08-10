@@ -3,51 +3,62 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 readonly REPO_ROOT
-readonly CONTROLLER="$REPO_ROOT/px4_ros_build/overlay/usr/local/sbin/maav-fleet-network"
+readonly CONTROLLER="$REPO_ROOT/px4_ros_build/overlay/usr/local/sbin/fleet-network"
 TEST_ROOT="$(mktemp -d)"
 readonly TEST_ROOT
 readonly TEST_BIN="$TEST_ROOT/bin"
 readonly TEST_CONFIG="$TEST_ROOT/fleet-network.conf"
-readonly TEST_ROLE="$TEST_ROOT/fleet-role"
+readonly TEST_MODE="$TEST_ROOT/fleet-mode"
 readonly NMCLI_LOG="$TEST_ROOT/nmcli.log"
-export NMCLI_LOG
+readonly SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log"
+readonly MWIRELESS_UUID="00000000-0000-0000-0000-000000000001"
+readonly HOTSPOT_UUID="00000000-0000-0000-0000-000000000002"
+export NMCLI_LOG SYSTEMCTL_LOG MWIRELESS_UUID HOTSPOT_UUID
 
 cleanup() {
     rm -rf -- "$TEST_ROOT"
 }
 trap cleanup EXIT
-
 mkdir -p "$TEST_BIN"
 
 cat >"$TEST_BIN/nmcli" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-
 printf '%q ' "$@" >>"$NMCLI_LOG"
 printf '\n' >>"$NMCLI_LOG"
-
-if [[ "$*" == "-g connection.id connection show ${NMCLI_EXISTING_PROFILE:-__none__}" ]]; then
-    exit 0
+if [[ "$*" == "-g connection.id connection show "* ]]; then
+    profile="${*: -1}"
+    case ",${NMCLI_EXISTING_PROFILES:-${NMCLI_EXISTING_PROFILE:-}}," in
+        *",$profile,"*) exit 0 ;;
+        *) exit 1 ;;
+    esac
 fi
-
 case "$*" in
-    "-g connection.id connection show "*)
-        exit 1
-        ;;
-    "-g UUID connection show")
-        exit 0
-        ;;
-    "--terse --fields DEVICE,TYPE device status")
-        printf 'wlan0:wifi\nwlan1:wifi\n'
-        ;;
-    "-g GENERAL.CONNECTION device show wlan0")
-        printf 'maav-field-client\n'
-        ;;
+    "-g UUID connection show") printf '%s\n%s\n' "$MWIRELESS_UUID" "$HOTSPOT_UUID" ;;
+    "-g connection.type connection show field-ap"|\
+    "-g connection.type connection show field-client") printf '802-11-wireless\n' ;;
+    "-g 802-11-wireless.ssid connection show $MWIRELESS_UUID") printf 'MWireless\n' ;;
+    "-g 802-11-wireless.ssid connection show $HOTSPOT_UUID") printf 'Test-Hotspot\n' ;;
+    "-g connection.interface-name connection show $MWIRELESS_UUID"|\
+    "-g connection.interface-name connection show $HOTSPOT_UUID") printf 'wlan0\n' ;;
+    "--terse --fields DEVICE,TYPE device status") printf 'wlan0:wifi\nwlan1:wifi\n' ;;
+    "-g GENERAL.CONNECTION device show wlan0") printf 'field-client\n' ;;
 esac
 EOF
 chmod 0755 "$TEST_BIN/nmcli"
 
+cat >"$TEST_BIN/systemctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+if [[ "$*" == "is-enabled --quiet jarvis-web.service" ]]; then
+    [[ "${JARVIS_ENABLED:-no}" == yes ]]
+fi
+EOF
+chmod 0755 "$TEST_BIN/systemctl"
+
 cat >"$TEST_CONFIG" <<'EOF'
+FLEET_INDEX=2
 FIELD_SSID=Test-Fleet
 FIELD_PSK=test-field-password
 FIELD_CHANNEL=6
@@ -61,8 +72,8 @@ EOF
 
 run_controller() {
     PATH="$TEST_BIN:$PATH" \
-        MAAV_FLEET_CONFIG_FILE="$TEST_CONFIG" \
-        MAAV_FLEET_ROLE_FILE="$TEST_ROLE" \
+        FLEET_CONFIG_FILE="$TEST_CONFIG" \
+        FLEET_MODE_FILE="$TEST_MODE" \
         bash "$CONTROLLER" "$@"
 }
 
@@ -73,29 +84,73 @@ assert_log() {
     }
 }
 
-printf 'client\n' >"$TEST_ROLE"
-run_controller check | grep -Fq 'role=client fleet_ip=10.77.0.12 field_ssid=Test-Fleet'
-: >"$NMCLI_LOG"
-NMCLI_EXISTING_PROFILE=maav-field-ap run_controller apply
-assert_log 'con-name maav-field-client'
-assert_log 'connection modify maav-field-ap connection.autoconnect no'
-assert_log 'connection.autoconnect-priority 100'
-assert_log 'ipv4.addresses 10.77.0.12/24'
+reject_log() {
+    if grep -Fq -- "$1" "$NMCLI_LOG"; then
+        echo "Unexpected nmcli call: $1" >&2
+        exit 1
+    fi
+}
 
-printf 'master\n' >"$TEST_ROLE"
+assert_systemctl() {
+    grep -Fq -- "$1" "$SYSTEMCTL_LOG" || {
+        echo "Missing systemctl call: $1" >&2
+        exit 1
+    }
+}
+
+run_controller check | grep -Fq 'fleet_index=2 master=none network=internet'
+: >"$NMCLI_LOG"
+: >"$SYSTEMCTL_LOG"
+NMCLI_EXISTING_PROFILE=field-ap run_controller apply
+assert_log 'connection modify field-ap connection.autoconnect no'
+assert_log "--wait 15 connection up $MWIRELESS_UUID ifname wlan0"
+assert_log 'con-name usb-mwireless-wlan1'
+assert_systemctl 'stop jarvis-web.service'
+
+: >"$NMCLI_LOG"
+: >"$SYSTEMCTL_LOG"
+NMCLI_EXISTING_PROFILE=field-client run_controller set-mode 2 field
 run_controller is-master
-: >"$NMCLI_LOG"
-NMCLI_EXISTING_PROFILE=maav-field-client run_controller apply
-assert_log 'con-name maav-field-ap'
-assert_log 'connection modify maav-field-client connection.autoconnect no'
+assert_log 'con-name field-ap'
+assert_log 'connection modify field-client connection.autoconnect no'
 assert_log '802-11-wireless.mode ap'
-assert_log 'connection up maav-field-ap ifname wlan0'
-assert_log 'con-name maav-usb-mwireless-wlan1'
-assert_log 'con-name maav-usb-hotspot-wlan1'
+assert_log 'connection up field-ap ifname wlan0'
+assert_systemctl 'start --no-block fleet-dhcp.service'
+assert_systemctl 'stop jarvis-web.service'
+reject_log 'con-name usb-mwireless-wlan1'
 
-printf 'invalid\n' >"$TEST_ROLE"
+: >"$SYSTEMCTL_LOG"
+JARVIS_ENABLED=yes NMCLI_EXISTING_PROFILE=field-client run_controller set-mode 2 field
+assert_systemctl 'start --no-block jarvis-web.service'
+
+: >"$NMCLI_LOG"
+: >"$SYSTEMCTL_LOG"
+run_controller set-mode 1 field
+assert_log 'con-name field-client'
+assert_log 'connection up field-client ifname wlan0'
+assert_log 'ipv4.addresses 10.77.0.12/24'
+assert_systemctl 'stop fleet-dhcp.service'
+
+: >"$NMCLI_LOG"
+: >"$SYSTEMCTL_LOG"
+NMCLI_EXISTING_PROFILES=field-ap,field-client run_controller set-mode 2 internet
+assert_log 'connection modify field-client connection.autoconnect no'
+assert_log 'connection down field-client'
+assert_log 'connection modify field-ap connection.autoconnect no'
+assert_log 'connection down field-ap'
+assert_log "--wait 15 connection up $MWIRELESS_UUID ifname wlan0"
+reject_log 'connection up field-ap ifname wlan0'
+reject_log 'connection.autoconnect-priority'
+assert_systemctl 'stop jarvis-web.service'
+assert_systemctl 'stop fleet-dhcp.service'
+if run_controller is-field-master; then
+    echo "Internet mode was reported as a field master" >&2
+    exit 1
+fi
+
+printf 'MASTER=9\nNETWORK=field\n' >"$TEST_MODE"
 if run_controller check >/dev/null 2>&1; then
-    echo "An invalid role passed validation" >&2
+    echo "An invalid FleetMode passed validation" >&2
     exit 1
 fi
 

@@ -10,8 +10,9 @@ use mission10_dw1000::board::{
     DEFAULT_GPIO_CHIP, DEFAULT_IRQ_GPIO, DEFAULT_RESET_GPIO, DEFAULT_RUN_SPI_HZ, DEFAULT_SPI_PATH,
     HardwareConfig, PhyProfile, open_and_initialize,
 };
+use mission10_dw1000::host_service;
 use mission10_dw1000::oracle::run_rx_oracle;
-use mission10_dw1000::ranging::{Ranger, RangingConfig, RangingStats};
+use mission10_dw1000::ranging::{RadioEvent, Ranger, RangingConfig, RangingStats};
 
 #[derive(Debug, Parser)]
 #[command(about = "Mission 10 DW1000 Linux bring-up and DS-TWR tool")]
@@ -88,6 +89,12 @@ struct RangeArgs {
     duration: Option<f64>,
     #[arg(long)]
     quiet: bool,
+    /// Expose the typed host stream for the ROS gateway.
+    #[arg(long)]
+    host_socket: Option<PathBuf>,
+    /// SCHED_FIFO priority for the radio loop; zero keeps normal scheduling.
+    #[arg(long, default_value_t = 0)]
+    rt_priority: i32,
 }
 
 fn main() -> Result<()> {
@@ -179,6 +186,12 @@ fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
     )?;
     let duration = args.duration.map(Duration::from_secs_f64);
     let quiet = args.quiet;
+    let host = args
+        .host_socket
+        .as_deref()
+        .map(host_service::start)
+        .transpose()?;
+    set_radio_priority(args.rt_priority)?;
     report_runtime_scheduling();
     let profile = if args.low_tx_power {
         PhyProfile::CloseRangeDiagnostic
@@ -217,8 +230,17 @@ fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
             device_id = ranger.device_id(),
         );
         let remaining = duration.map(|duration| duration.saturating_sub(started.elapsed()));
-        match ranger.run(&stop, remaining, |measurement| {
-            if !quiet {
+        match ranger.run(
+            &stop,
+            remaining,
+            host.as_ref().map(|host| &host.commands),
+            |event| {
+                if let Some(host) = &host {
+                    let _ = host.events.try_send(event);
+                }
+            if let RadioEvent::Range(measurement) = event
+                && !quiet
+            {
                 println!(
                     "range recv={} src={} metres={:.3} seq={} range_event_time_dtu={} mission_event_time_us={:?} mission_generation={:?} mission_time_error_us={}",
                     measurement.receiver,
@@ -230,8 +252,9 @@ fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
                     measurement.mission_generation,
                     measurement.mission_time_error_us,
                 );
-            }
-        }) {
+                }
+            },
+        ) {
             Ok(run_stats) => {
                 stats.merge(run_stats);
                 break;
@@ -279,6 +302,21 @@ fn range(hardware: &HardwareConfig, args: RangeArgs) -> Result<()> {
     Ok(())
 }
 
+fn set_radio_priority(priority: i32) -> Result<()> {
+    ensure!((0..=99).contains(&priority), "rt-priority must be 0..99");
+    if priority == 0 {
+        return Ok(());
+    }
+    let mut parameters = libc::sched_param {
+        sched_priority: priority,
+    };
+    let result = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &mut parameters) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("set radio SCHED_FIFO priority");
+    }
+    Ok(())
+}
+
 fn report_runtime_scheduling() {
     let mut parameters = libc::sched_param { sched_priority: 0 };
     // These queries do not change process state.
@@ -299,7 +337,7 @@ fn report_runtime_scheduling() {
     }
     if policy != libc::SCHED_FIFO {
         eprintln!(
-            "warning: direct DW1000 service is not running with SCHED_FIFO; use chrt and taskset for qualification"
+            "warning: direct DW1000 service is not running with SCHED_FIFO; set --rt-priority for qualification"
         );
     }
 }

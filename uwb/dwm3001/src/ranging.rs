@@ -8,7 +8,7 @@ use embassy_nrf::spim;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use mission10_uwb_protocol::air::{
-    self, AIR_FRAME_MAX_NO_FCS, AirEnvelope, AirMessage, DecodedAirFrame, PAN_ID,
+    self, AIR_FRAME_MAX_NO_FCS, AirDecodeError, AirEnvelope, AirMessage, DecodedAirFrame, PAN_ID,
     REPORT_STATUS_CLOSE,
 };
 use mission10_uwb_protocol::clock::{
@@ -23,7 +23,7 @@ use mission10_uwb_protocol::scheduler::{
     pair_index,
 };
 use mission10_uwb_protocol::{
-    DTU_PER_US, Destination, NodeAddress, REPORT_TURNAROUND_US, ResponderTimestamps,
+    DTU_PER_US, Destination, FleetMode, NodeAddress, REPORT_TURNAROUND_US, ResponderTimestamps,
     TIMESTAMP_MASK, delayed_tx_time, distance_metres, scheduled_tx_matches, wrapping_delta,
 };
 
@@ -35,7 +35,8 @@ use crate::board::{
 };
 use crate::host::{
     clear_measurements, host_connected, latest_ego_state, publish, transport_counters,
-    try_clock_probe_sent, try_clock_reply, try_configuration, update_radio_counters,
+    try_clock_probe_sent, try_clock_reply, try_configuration, try_fleet_mode,
+    update_radio_counters,
 };
 
 const PHY_FCS_LEN: usize = 2;
@@ -44,6 +45,8 @@ const POLL_PROGRAM_LEAD_US: u64 = 1_000;
 const RX_RELEASE_LEAD_US: u64 = 1_000;
 const CLOCK_PROBE_INTERVAL_MS: u64 = 250;
 const MAX_IDLE_LISTEN_US: u64 = 100_000;
+const FLEET_MODE_REPEATS: u8 = 8;
+const FLEET_MODE_INTERVAL_US: u64 = 125_000;
 
 fn publish_error(diagnostic: Diagnostic) {
     warn!("radio diagnostic={=u8}", diagnostic as u8);
@@ -220,12 +223,24 @@ pub async fn run(hw: RadioHardware) {
             publish(RadioToHost::Configured { configuration });
             runtime.reconfigure(configuration);
         }
+        if let Some(mode) = try_fleet_mode() {
+            runtime.pending_fleet_mode = Some(PendingFleetMode {
+                mode,
+                remaining: FLEET_MODE_REPEATS,
+                next_at_us: 0,
+            });
+        }
         refresh_clock(&mut runtime);
         let now_us = Instant::now().as_micros();
         for state in &mut runtime.pair_states {
             state.expire(now_us);
         }
-        if let Some(pair) = due_pair(
+        if runtime
+            .pending_fleet_mode
+            .is_some_and(|pending| pending.next_at_us <= now_us)
+        {
+            radio = broadcast_fleet_mode(radio, &mut wait, &mut runtime).await;
+        } else if let Some(pair) = due_pair(
             runtime.roster(),
             runtime.local,
             now_us,
@@ -284,6 +299,13 @@ struct ExchangeOutcome {
     close: bool,
 }
 
+#[derive(Clone, Copy)]
+struct PendingFleetMode {
+    mode: FleetMode,
+    remaining: u8,
+    next_at_us: u64,
+}
+
 struct Runtime {
     configuration: RadioConfiguration,
     local: NodeAddress,
@@ -301,6 +323,7 @@ struct Runtime {
     peer_missed_cycles: [u8; mission10_uwb_protocol::host::MAX_PEERS],
     peer_stale: [bool; mission10_uwb_protocol::host::MAX_PEERS],
     spi_errors_since_range: u8,
+    pending_fleet_mode: Option<PendingFleetMode>,
     health: HealthCounters,
     rx_buf: [u8; AIR_FRAME_MAX_NO_FCS + PHY_FCS_LEN],
 }
@@ -324,6 +347,7 @@ impl Default for Runtime {
             peer_missed_cycles: [0; mission10_uwb_protocol::host::MAX_PEERS],
             peer_stale: [false; mission10_uwb_protocol::host::MAX_PEERS],
             spi_errors_since_range: 0,
+            pending_fleet_mode: None,
             health: HealthCounters::default(),
             rx_buf: [0; AIR_FRAME_MAX_NO_FCS + PHY_FCS_LEN],
         }
@@ -351,6 +375,7 @@ impl Runtime {
         self.peer_missed_cycles = [0; mission10_uwb_protocol::host::MAX_PEERS];
         self.peer_stale = [false; mission10_uwb_protocol::host::MAX_PEERS];
         self.spi_errors_since_range = 0;
+        self.pending_fleet_mode = None;
     }
 
     fn roster(&self) -> FlightRoster {
@@ -506,6 +531,46 @@ async fn apply_configuration<SPI>(
     }
 }
 
+async fn broadcast_fleet_mode<SPI>(
+    mut radio: DW3000<SPI, dw3000_ng::Ready>,
+    wait: &mut RadioWait<'_>,
+    runtime: &mut Runtime,
+) -> DW3000<SPI, dw3000_ng::Ready>
+where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+{
+    let pending = runtime.pending_fleet_mode.unwrap();
+    prepare_tx(&mut radio)
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(error));
+    let exchange_id = runtime.next_exchange_id();
+    let frame = encode_air(
+        runtime.local,
+        &mut runtime.mac_sequence,
+        Destination::Broadcast,
+        AirEnvelope::new(exchange_id, AirMessage::FleetMode { mode: pending.mode }),
+    )
+    .unwrap_or_else(|error| reset_after_radio_failure(error));
+    let mut sending = radio
+        .send_raw(frame.bytes(), SendTime::Now, &radio_config())
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(diagnostic(&error)));
+    wait_send(&mut sending, wait)
+        .await
+        .unwrap_or_else(|error| reset_after_radio_failure(error));
+    radio = finish_sending(sending, wait).await;
+    runtime.pending_fleet_mode = if pending.remaining == 1 {
+        None
+    } else {
+        Some(PendingFleetMode {
+            remaining: pending.remaining - 1,
+            next_at_us: Instant::now().as_micros() + FLEET_MODE_INTERVAL_US,
+            ..pending
+        })
+    };
+    radio
+}
+
 async fn initiate_exchange<SPI>(
     mut radio: DW3000<SPI, dw3000_ng::Ready>,
     wait: &mut RadioWait<'_>,
@@ -574,7 +639,8 @@ where
         Err(error) => reset_after_radio_failure(error),
     };
     let response = match decode_air(&runtime.rx_buf, length, runtime.local) {
-        Ok(frame) => frame,
+        Ok(Some(frame)) => frame,
+        Ok(None) => return (radio, None),
         Err(error) => {
             recover_exchange(error, wait, runtime);
             runtime.health.malformed_air_frames =
@@ -582,6 +648,9 @@ where
             return (radio, None);
         }
     };
+    if publish_fleet_mode(response) {
+        return (radio, None);
+    }
     let (poll_rx, response_tx, peer_state) = match response.envelope.message {
         AirMessage::Response {
             poll_rx,
@@ -661,7 +730,8 @@ where
         Err(error) => reset_after_radio_failure(error),
     };
     let report = match decode_air(&runtime.rx_buf, length, runtime.local) {
-        Ok(frame) => frame,
+        Ok(Some(frame)) => frame,
+        Ok(None) => return (radio, None),
         Err(error) => {
             recover_exchange(error, wait, runtime);
             runtime.health.malformed_air_frames =
@@ -669,6 +739,9 @@ where
             return (radio, None);
         }
     };
+    if publish_fleet_mode(report) {
+        return (radio, None);
+    }
     let (final_rx, close) = match report.envelope.message {
         AirMessage::Report { final_rx, status }
             if report.source == peer && report.envelope.exchange_id == exchange_id =>
@@ -745,7 +818,8 @@ where
         Err(error) => reset_after_radio_failure(error),
     };
     let poll = match decode_air(&runtime.rx_buf, length, runtime.local) {
-        Ok(frame) => frame,
+        Ok(Some(frame)) => frame,
+        Ok(None) => return (radio, None),
         Err(error) => {
             recover_exchange(error, wait, runtime);
             runtime.health.malformed_air_frames =
@@ -753,6 +827,10 @@ where
             return (radio, None);
         }
     };
+    if publish_fleet_mode(poll) {
+        wait.completed();
+        return (radio, None);
+    }
     let peer = poll.source;
     let exchange_id = poll.envelope.exchange_id;
     let pair = Pair::new(runtime.local, peer)
@@ -851,7 +929,8 @@ where
         Err(error) => reset_after_radio_failure(error),
     };
     let final_frame = match decode_air(&runtime.rx_buf, length, runtime.local) {
-        Ok(frame) => frame,
+        Ok(Some(frame)) => frame,
+        Ok(None) => return (radio, None),
         Err(error) => {
             recover_exchange(error, wait, runtime);
             runtime.health.malformed_air_frames =
@@ -859,6 +938,9 @@ where
             return (radio, None);
         }
     };
+    if publish_fleet_mode(final_frame) {
+        return (radio, None);
+    }
     let (poll_tx, response_rx, final_tx) = match final_frame.envelope.message {
         AirMessage::Final {
             poll_tx,
@@ -1014,9 +1096,24 @@ fn decode_air(
     buffer: &[u8],
     received_length: usize,
     local: NodeAddress,
-) -> Result<DecodedAirFrame, Diagnostic> {
+) -> Result<Option<DecodedAirFrame>, Diagnostic> {
     let bytes = air_bytes(buffer, received_length)?;
-    air::decode(bytes, local).map_err(|_| Diagnostic::MalformedAir)
+    match air::decode(bytes, local) {
+        Ok(frame) => Ok(Some(frame)),
+        Err(AirDecodeError::Destination) => Ok(None),
+        Err(_) => Err(Diagnostic::MalformedAir),
+    }
+}
+
+fn publish_fleet_mode(frame: DecodedAirFrame) -> bool {
+    let AirMessage::FleetMode { mode } = frame.envelope.message else {
+        return false;
+    };
+    publish(RadioToHost::FleetModeReceived {
+        source: frame.source,
+        mode,
+    });
+    true
 }
 
 fn air_bytes(buffer: &[u8], received_length: usize) -> Result<&[u8], Diagnostic> {
