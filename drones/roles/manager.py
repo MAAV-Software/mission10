@@ -13,15 +13,13 @@ from picamera2 import Picamera2
 import os
 import matplotlib
 import onnxruntime as ort
-
+import random
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from roles.MissionNode import MissionNode
+from ros.sensing.sensing.mine_detector import get_hailo_bounding_boxes
 import iarc_pathfinder
-
-# Temp inclusions
-# import random
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
@@ -38,7 +36,7 @@ class ManagerDrone:
         self.host = host
         self.port = port
         # self.TMP_gps_data = {} # Replace instances of this wth self.mission_node.gps_data and delete afterwards
-        self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
+        # self.TMP_timestamp_queue = queue.Queue() # OK, ur in the show now cuz we need you
         self.mission_node = None
         self.detected_mine_data = []
         self.exp_drones = {}
@@ -50,7 +48,7 @@ class ManagerDrone:
         self.mission_status = "pre-mission"
         self.next_action = "scout"
         self.camera_mode = camera_mode
-        self.timestamp_bounding_boxes = {}
+        self.timestamp_bounding_boxes = queue.Queue()
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -132,14 +130,18 @@ class ManagerDrone:
 
     
     def primary_camera_func(self):
-        pass
+        with self.mine_data_cv:
+            while self.mission_node is None:
+                print("Waiting for mission to start")
+                self.mine_data_cv.wait()
+
+        get_hailo_bounding_boxes(self.timestamp_bounding_boxes)
     
     def backup_camera_func(self):
 
         with self.mine_data_cv:
-            # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
             while self.mission_node is None:
-                # print("Waiting for mission to start")
+                print("Waiting for mission to start")
                 self.mine_data_cv.wait()
 
         # Somehow interface the pi-camera module, lead the image into memory, run the yolo, and then save the timestamp for that photo
@@ -151,18 +153,13 @@ class ManagerDrone:
         session = ort.InferenceSession(weights_path)
         input_name = session.get_inputs()[0].name
 
-        num_pictures_taken = 0
-
         while not self.shutdown_flag:
             # Run Camera picture, and then run the YOLO, and then place those detection values to that timestamp value?
             image = cam.capture_array()
 
-            img_height, img_width, channels = image.shape
             image_timestamp = 0
             with self.mine_data_lock:
                 image_timestamp = self.mission_node.latest_timestamp
-                self.TMP_timestamp_queue.put(image_timestamp)
-                num_pictures_taken += 1
 
             # print(f"Image taken at timestamp {image_timestamp}!")
 
@@ -187,24 +184,13 @@ class ManagerDrone:
             # Going to have to do some more post-processing for these raw onnx output, but it's a start for sure
             for x, y, w, h, conf in pred:
                 if conf > confidence_threshold:
-                    x_min = x - (w / 2)
-                    x_max = x + (w / 2)
-                    y_min = y - (h / 2)
-                    y_max = y + (h / 2)
-                    detections.append((x_min, x_max, y_min, y_max))
+                    detections.append((image_timestamp, x, y, w, h))
 
             with self.mine_data_lock:
-                self.timestamp_bounding_boxes[image_timestamp] = detections
+                for detection in detections:
+                    self.timestamp_bounding_boxes.put(detection)
 
             time.sleep(1) # have it take pictures at this interval, I guess try to do it one time a second I guess?
-
-    def get_mine_loc_in_img(self, timestamp):
-        with self.mine_data_lock:
-            try:
-                return self.timestamp_bounding_boxes[timestamp]
-            except Exception as e:
-                # print(f"There wasn't a photo taken here lol")
-                return [(-1, -1, -1, -1)]
 
     def find_mines(self):
         # Initialize the camera interface
@@ -218,23 +204,30 @@ class ManagerDrone:
             pt_latitude = 0
             pt_longitude = 0
 
+            mine_x_min = mine_x_max = mine_y_min = mine_y_max = -1
+            mine_x_center = mine_y_center = x_width = y_width = -1
+
             with self.mine_data_cv:
-                # while self.mission_node is None or self.mission_node.timestamp_queue.qsize() == 0:
-                while (self.mission_node is None or self.TMP_timestamp_queue.qsize() == 0):
-                    # print("Waiting for mission to start")
-                    # print(self.TMP_timestamp_queue.qsize())
+                while (self.mission_node is None or self.timestamp_bounding_boxes.qsize() == 0):
+                    print("Waiting for mission to start")
                     self.mine_data_cv.wait()
-                # print(f"The size of the timestamp_queue is {self.TMP_timestamp_queue.qsize()}")
             
             if self.shutdown_flag:
                 return
 
             with self.mine_data_lock:
                 # print("Acquired the lock in find_mines")
-                next_timestamp = self.TMP_timestamp_queue.get()
+
+                next_timestamp, mine_x_center, mine_y_center, x_width, y_width = self.timestamp_bounding_boxes.get()
                 absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
                 pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
                 pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
+
+                mine_x_min = mine_x_center - (x_width / 2)
+                mine_x_max = mine_x_center + (x_width / 2)
+
+                mine_y_min = mine_y_center - (y_width / 2)
+                mine_y_max = mine_y_center + (y_width / 2)
 
                 # next_timestamp = self.TMP_timestamp_queue.get()
                 # absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
@@ -242,49 +235,45 @@ class ManagerDrone:
                 # pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
 
             # Get the location of the mines within the image (bounding box or smth I dunno)
+            # print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
+            if mine_x_min == -1:
+                # print("No boxes in img")
+                continue
+
+            pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
+
+            # Get the dimension of the camera frame
+            hor_rad = math.radians(self.camera_HFOV)
+            img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad) 
             
-            # mine_x_min, mine_x_max, mine_y_min, mine_y_max = self.get_mine_loc_in_img(next_timestamp)
-            bboxes = self.get_mine_loc_in_img(next_timestamp)
-            for mine_x_min, mine_x_max, mine_y_min, mine_y_max in bboxes:
-                # print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
-                if mine_x_min == -1:
-                    # print("No boxes in img")
-                    continue
+            vert_rad = math.radians(self.camera_VFOV)
+            img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad)
 
-                pt_latitude, pt_longitude = self.rotate_coords(pt_latitude, pt_longitude)
+            img_height_cm = (img_height_m) / 100 #convert to cm
+            img_width_cm = (img_width_m) / 100
+            
+            # mine_x_min, mine_y_min, mine_x_max, mine_y_max = (0.11155333116319445, 0.15966543579101564, 0.19914363606770832, 0.22527638753255208)
+            mine_x , mine_y = (mine_x_min + mine_x_max ) / 2, (mine_y_min + mine_y_max ) / 2
+            mine_x_relative = mine_x - 0.5
+            mine_y_relative = mine_y - 0.5
+            
+            scaled_x = mine_x_relative * img_width_cm
+            scaled_y = mine_y_relative * img_height_cm
 
-                # Get the dimension of the camera frame
-                hor_rad = math.radians(self.camera_HFOV)
-                img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad) 
-                
-                vert_rad = math.radians(self.camera_VFOV)
-                img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad)
+            #from 4/5 onwards
+            scaled_x_meters = scaled_x / 100 #convert to meters
+            scaled_y_meters = scaled_y / 100
 
-                img_height_cm = (img_height_m) / 100 #convert to cm
-                img_width_cm = (img_width_m) / 100
-                
-                # mine_x_min, mine_y_min, mine_x_max, mine_y_max = (0.11155333116319445, 0.15966543579101564, 0.19914363606770832, 0.22527638753255208)
-                mine_x , mine_y = (mine_x_min + mine_x_max ) / 2, (mine_y_min + mine_y_max ) / 2
-                mine_x_relative = mine_x - 0.5
-                mine_y_relative = mine_y - 0.5
-                
-                scaled_x = mine_x_relative * img_width_cm
-                scaled_y = mine_y_relative * img_height_cm
+            change_in_lat = scaled_y_meters/111320 #find change in latitude from center to point
+            change_in_long = scaled_x_meters/(111320*np.cos(math.radians(pt_latitude)))
 
-                #from 4/5 onwards
-                scaled_x_meters = scaled_x / 100 #convert to meters
-                scaled_y_meters = scaled_y / 100
+            new_lat = change_in_lat + pt_latitude #calculate new lat/long
+            new_long = change_in_long + pt_longitude
 
-                change_in_lat = scaled_y_meters/111320 #find change in latitude from center to point
-                change_in_long = scaled_x_meters/(111320*np.cos(math.radians(pt_latitude)))
-
-                new_lat = change_in_lat + pt_latitude #calculate new lat/long
-                new_long = change_in_long + pt_longitude
-
-                with self.mine_data_lock:
-                    # print("Acquired the lock in find_mines but lower")
-                    self.detected_mine_data.append((new_lat, new_long))
-                    # print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
+            with self.mine_data_lock:
+                # print("Acquired the lock in find_mines but lower")
+                self.detected_mine_data.append((new_lat, new_long))
+                print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
 
 
     def tcp_server(self):
@@ -401,29 +390,29 @@ class ManagerDrone:
         }
         self.drone_last_seen[drone_key] = time.monotonic()
     
-    # def fake_gps_coords_generation(self):
-    #     fake_timestamp = 0
-    #     print("Entered fake gps coords generation")
-    #     while fake_timestamp < 100:
-    #         print("Waiting fo the mine_data_lock")
-    #         with self.mine_data_lock:
-    #             print("Acquired the lock in fake_gps_coords_generation")
-    #             fake_lat = random.randint(1, 100)
-    #             fake_lon = random.randint(1, 100)
-    #             fake_alt = random.randint(1, 100)
-    #             fake_gps_point = {}
-    #             self.TMP_gps_data[fake_timestamp] = {
-    #                 "latitude": fake_lat,
-    #                 "longitude": fake_lon,
-    #                 "altitude": fake_alt
-    #             }
-    #             self.TMP_timestamp_queue.put(fake_timestamp)
-    #         fake_timestamp += 1
+    def fake_gps_coords_generation(self):
+        fake_timestamp = 0
+        print("Entered fake gps coords generation")
+        while fake_timestamp < 100:
+            print("Waiting fo the mine_data_lock")
+            with self.mine_data_lock:
+                print("Acquired the lock in fake_gps_coords_generation")
+                fake_lat = random.randint(1, 100)
+                fake_lon = random.randint(1, 100)
+                fake_alt = random.randint(1, 100)
+                fake_gps_point = {}
+                self.TMP_gps_data[fake_timestamp] = {
+                    "latitude": fake_lat,
+                    "longitude": fake_lon,
+                    "altitude": fake_alt
+                }
+                self.TMP_timestamp_queue.put(fake_timestamp)
+            fake_timestamp += 1
 
-    #         print(f"{fake_lat}, {fake_lon}, {fake_alt}")
-    #         with self.mine_data_cv:
-    #             self.mine_data_cv.notify()
-    #         time.sleep(0.1)
+            print(f"{fake_lat}, {fake_lon}, {fake_alt}")
+            with self.mine_data_cv:
+                self.mine_data_cv.notify()
+            time.sleep(0.1)
 
     def run_mission_node(self, mission_mode):
 
@@ -555,8 +544,8 @@ class ManagerDrone:
         find_mines_thread.start()
 
         if self.camera_mode == "primary":
-            pass
-
+            take_pictures_thread = threading.Thread(target=get_hailo_bounding_boxes, args=(self.timestamp_bounding_boxes, ))
+            take_pictures_thread.start()        
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
@@ -573,7 +562,7 @@ class ManagerDrone:
 
         print("Finished Pathfinding")
 
-        self.TMP_timestamp_queue.put(-1) # Putting a -1, lets the teimstamp queue know that we should be done
+        self.timestamp_bounding_boxes.put(-1, -1, -1, -1, -1) # Putting a -1, lets the teimstamp queue know that we should be done
 
         with self.mine_data_cv:
             self.mine_data_cv.notify_all()
