@@ -19,7 +19,7 @@ models/*/dataset/
 
 .DS_Store
 
-test*
+/test*
 !uwb/protocol/testdata/
 *.jpg
 *.png
