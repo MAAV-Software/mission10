@@ -435,7 +435,7 @@ fn route_command(command: HostToRadio) {
             }
         }
         HostToRadio::BroadcastFleetMode { mode } => {
-            if !mode.is_valid() || FLEET_MODES.try_send(mode).is_err() {
+            if FLEET_MODES.try_send(mode).is_err() {
                 HOST_COMMAND_DROPS.fetch_add(1, Ordering::Relaxed);
             }
         }

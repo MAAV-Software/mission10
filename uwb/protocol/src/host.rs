@@ -721,7 +721,7 @@ mod tests {
                 "radio.fleet_mode_received",
                 RadioToHost::FleetModeReceived {
                     source: node(0x8000),
-                    mode: FleetMode::new(2, crate::FleetNetwork::Field).unwrap(),
+                    mode: FleetMode::new(2, crate::FleetNetwork::Field),
                 },
             ),
         ];
@@ -786,7 +786,7 @@ mod tests {
                 HostToRadioEnvelope::new(
                     0x0102_0308,
                     HostToRadio::BroadcastFleetMode {
-                        mode: FleetMode::new(2, crate::FleetNetwork::Internet).unwrap(),
+                        mode: FleetMode::new(2, crate::FleetNetwork::Internet),
                     },
                 ),
             ),

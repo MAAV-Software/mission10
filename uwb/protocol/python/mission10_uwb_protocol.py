@@ -48,7 +48,7 @@ DIAGNOSTIC_NAMES = (
 
 
 def is_node_address(address: int) -> bool:
-    return 0 <= address <= 3 or 0x8000 <= address <= 0x80FF
+    return 0 <= address <= 0xFF or 0x8000 <= address <= 0x80FF
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,8 +90,6 @@ class FleetMode:
     INTERNET = 1
 
     def __post_init__(self) -> None:
-        if not 0 <= self.master <= 3:
-            raise ValueError("fleet master must be aircraft 0..3")
         if self.network not in (self.FIELD, self.INTERNET):
             raise ValueError("fleet network must be field or internet")
 
@@ -374,7 +372,7 @@ def _address(value: str) -> int:
     address = int(value, 0)
     if not is_node_address(address):
         raise argparse.ArgumentTypeError(
-            "address must be aircraft 0..3 or development 0x8000..0x80ff"
+            "address must be aircraft 0..255 or development 0x8000..0x80ff"
         )
     return address
 
@@ -391,7 +389,7 @@ def main() -> None:
     parser.add_argument(
         "--request-health", action="store_true", help="request an immediate health snapshot"
     )
-    parser.add_argument("--fleet-master", type=int, choices=range(4))
+    parser.add_argument("--fleet-master", type=int, choices=range(256))
     parser.add_argument("--network", choices=("field", "internet"))
     parser.add_argument(
         "--summary-interval",

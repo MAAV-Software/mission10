@@ -67,7 +67,6 @@ const _: () = assert!(MAC_HEADER_SIZE + AIR_ENVELOPE_MAX_SIZE <= AIR_FRAME_MAX_N
 pub enum AirEncodeError {
     BroadcastRanging,
     FleetModeUnicast,
-    InvalidFleetMode,
     InvalidTimestamp,
     Hubpack,
 }
@@ -83,7 +82,6 @@ pub enum AirDecodeError {
     Destination,
     BroadcastRanging,
     FleetModeUnicast,
-    InvalidFleetMode,
     Hubpack,
     TrailingData,
     ProtocolVersion(u8),
@@ -123,11 +121,6 @@ pub fn encode(
             return Err(AirEncodeError::FleetModeUnicast);
         }
         (Destination::Node(_), _) => {}
-    }
-    if let AirMessage::FleetMode { mode } = envelope.message
-        && !mode.is_valid()
-    {
-        return Err(AirEncodeError::InvalidFleetMode);
     }
     if !timestamps_valid(&envelope.message) {
         return Err(AirEncodeError::InvalidTimestamp);
@@ -207,11 +200,6 @@ pub fn decode(bytes: &[u8], local_address: NodeAddress) -> Result<DecodedAirFram
             return Err(AirDecodeError::FleetModeUnicast);
         }
         (Destination::Node(_), _) => {}
-    }
-    if let AirMessage::FleetMode { mode } = envelope.message
-        && !mode.is_valid()
-    {
-        return Err(AirDecodeError::InvalidFleetMode);
     }
     if !timestamps_valid(&envelope.message) {
         return Err(AirDecodeError::InvalidTimestamp);
@@ -316,7 +304,7 @@ mod tests {
             (
                 "fleet_mode",
                 AirMessage::FleetMode {
-                    mode: FleetMode::new(2, crate::FleetNetwork::Field).unwrap(),
+                    mode: FleetMode::new(2, crate::FleetNetwork::Field),
                 },
             ),
         ]
@@ -441,8 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn fleet_mode_is_validated_and_broadcast_only() {
-        let mode = FleetMode::new(1, crate::FleetNetwork::Internet).unwrap();
+    fn fleet_mode_is_broadcast_only() {
+        let mode = FleetMode::new(1, crate::FleetNetwork::Internet);
         let envelope = AirEnvelope::new(exchange_id(), AirMessage::FleetMode { mode });
         let frame = encode(node(0x8000), Destination::Broadcast, 7, &envelope).unwrap();
         let decoded = decode(frame.bytes(), node(2)).unwrap();

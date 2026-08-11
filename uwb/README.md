@@ -23,7 +23,7 @@ peers per node. The competition roster contains four aircraft.
 ## Pair-local medium access
 
 Air protocol version 6 uses PAN `0x4d10` and IEEE 802.15.4 short addresses.
-Aircraft use addresses `0..3`. Development nodes use `0x8000..0x80ff`.
+Aircraft use addresses `0..255`. Development nodes use `0x8000..0x80ff`.
 Poll, Response, Final, and Report are unicast. `FleetMode` is broadcast and
 contains the selected aircraft master and `field` or `internet` network.
 

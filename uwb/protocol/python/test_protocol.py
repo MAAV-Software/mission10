@@ -131,14 +131,12 @@ def test_configuration_validation():
 
 
 def test_fleet_mode_validation():
-    assert FleetMode(3, FleetMode.FIELD) == FleetMode(3, 0)
-    with pytest.raises(ValueError, match="0..3"):
-        FleetMode(4, FleetMode.FIELD)
+    assert FleetMode(255, FleetMode.FIELD) == FleetMode(255, 0)
     with pytest.raises(ValueError, match="field or internet"):
         FleetMode(0, 2)
 
 
 def test_node_address_namespace_is_exhaustive():
     for address in range(0x10000):
-        expected = address <= 3 or 0x8000 <= address <= 0x80FF
+        expected = address <= 0xFF or 0x8000 <= address <= 0x80FF
         assert is_node_address(address) is expected

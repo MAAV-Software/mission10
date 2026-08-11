@@ -353,7 +353,7 @@ fn parse_node_address(value: &str) -> Result<NodeAddress, String> {
     }
     .map_err(|_| format!("invalid 16-bit node address {value:?}"))?;
     NodeAddress::new(raw).ok_or_else(|| {
-        format!("node address {value:?} is outside aircraft 0..3 and development 0x8000..0x80ff")
+        format!("node address {value:?} is outside aircraft 0..255 and development 0x8000..0x80ff")
     })
 }
 
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn cli_address_parser_matches_the_mission_namespace() {
         for raw in 0_u32..=u32::from(u16::MAX) {
-            let expected = raw <= 3 || (0x8000..=0x80ff).contains(&raw);
+            let expected = raw <= u32::from(u8::MAX) || (0x8000..=0x80ff).contains(&raw);
             assert_eq!(
                 parse_node_address(&raw.to_string()).is_ok(),
                 expected,

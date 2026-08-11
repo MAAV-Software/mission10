@@ -16,15 +16,7 @@ pub struct FleetMode {
 }
 
 impl FleetMode {
-    pub const fn new(master: u8, network: FleetNetwork) -> Option<Self> {
-        if master <= 3 {
-            Some(Self { master, network })
-        } else {
-            None
-        }
-    }
-
-    pub const fn is_valid(self) -> bool {
-        self.master <= 3
+    pub const fn new(master: u8, network: FleetNetwork) -> Self {
+        Self { master, network }
     }
 }

@@ -33,9 +33,6 @@ class UwbGateway(Node):
         self.namespace = str(self.get_parameter("vehicle_namespace").value).strip("/")
         self.vehicle_id = int(self.get_parameter("vehicle_id").value)
         self.socket_path = str(self.get_parameter("socket").value)
-        if not 0 <= self.vehicle_id <= 3:
-            raise ValueError("vehicle_id must be 0..3")
-
         self.range_pub = self.create_publisher(UwbRange, f"/{self.namespace}/uwb/range", 50)
         mode_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.mode_pub = self.create_publisher(
