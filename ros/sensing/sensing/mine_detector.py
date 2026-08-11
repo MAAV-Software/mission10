@@ -29,7 +29,6 @@ importable on machines with neither runtime.
 from __future__ import annotations
 
 import math
-import os
 import queue
 import sys
 import threading
@@ -50,13 +49,9 @@ DEFAULT_DEDUP_IOU = 0.45
 DEFAULT_PERIOD_S = 0.0
 STALE_POOL_S = 5.0
 
-DEFAULT_HEF = Path(
-    os.environ.get(
-        "MAAV_MINE_HEF",
-        Path(__file__).resolve().parents[3]
-        / "models/yolo/dataset/runpod-a4500-pilot40/artifacts"
-        / "pilot40-yolo11m-640-hailo8.hef",
-    )
+DEFAULT_HEF = (
+    Path(__file__).resolve().parents[3]
+    / "models/yolo/assets/yolov11m-probably.hef"
 )
 
 
@@ -162,14 +157,19 @@ class HailoYoloBackend:
         self.vdevice = VDevice(params)
         self.infer_model = self.vdevice.create_infer_model(str(hef_path))
         self.infer_model.set_batch_size(1)
+        self.output_buffer = np.empty(
+            tuple(self.infer_model.output().shape), dtype=np.float32
+        )
         self.configured = self.infer_model.configure()
         self.configured.__enter__()
+        self.configured.activate()
 
     def infer(self, tile_rgb: np.ndarray) -> list[tuple[float, float, float, float, float]]:
         bindings = self.configured.create_bindings()
         bindings.input().set_buffer(np.ascontiguousarray(tile_rgb))
+        bindings.output().set_buffer(self.output_buffer)
         self.configured.run([bindings], timeout=2000)
-        return self._parse_nms(bindings.output().get_buffer())
+        return self._parse_nms(self.output_buffer)
 
     def _parse_nms(self, buffer) -> list[tuple[float, float, float, float, float]]:
         """Decode HailoRT NMS-by-class output into tile-pixel boxes.
@@ -199,6 +199,7 @@ class HailoYoloBackend:
         return boxes
 
     def close(self) -> None:
+        self.configured.deactivate()
         self.configured.__exit__(None, None, None)
         self.vdevice.release()
 
@@ -227,6 +228,7 @@ def poll_once(
     pool: SharedFramePool,
     timestamp_lock: threading.Lock,
     backend,
+    mission_node,
     results: queue.Queue,
     last_sequence: int,
 ) -> FrameMetadata | None:
@@ -242,7 +244,8 @@ def poll_once(
         while True:
             try:
                 with timestamp_lock:
-                    results.put_nowait((metadata.realtime_ns, x, y, w, h))
+                    image_timestamp = mission_node.latest_timestamp
+                    results.put_nowait((image_timestamp, x, y, w, h))
                 break
             except queue.Full:
                 try:
@@ -256,6 +259,7 @@ def run_mine_detection(
     results: queue.Queue,
     timestamp_lock: threading.Lock,
     backend,
+    mission_node,
     *,
     stop: threading.Event | None = None,
     pool_name: str = "cm2",
@@ -268,7 +272,7 @@ def run_mine_detection(
     Never raises out of the loop: pool loss and backend faults are logged and
     retried so the mission thread that runs this cannot die mid-flight.
     """
-    stop = stop or threading.Event()
+    stop = stop
     pool = None
     last_sequence = 0
     last_progress = time.monotonic()
@@ -281,7 +285,7 @@ def run_mine_detection(
                 last_sequence = 0
                 last_progress = time.monotonic()
                 log(f"mine_detector: attached to pool '{pool_name}'")
-            metadata = poll_once(pool, timestamp_lock, backend, results, last_sequence)
+            metadata = poll_once(pool, timestamp_lock, backend, mission_node, results, last_sequence)
             if metadata is not None:
                 last_sequence = metadata.sequence
                 last_progress = time.monotonic()
@@ -308,6 +312,6 @@ def run_mine_detection(
         pool.close()
 
 
-def get_hailo_bounding_boxes(results: queue.Queue, timestamp_lock: threading.Lock, **kwargs) -> None:
+def get_hailo_bounding_boxes(results: queue.Queue, timestamp_lock: threading.Lock, stop_event: threading.Event, mission_node, **kwargs) -> None:
     """Mission-runner entry point; blocks, so run it in a dedicated thread."""
-    run_mine_detection(results, timestamp_lock, HailoYoloBackend(), **kwargs)
+    run_mine_detection(results, timestamp_lock, HailoYoloBackend(), mission_node, stop=stop_event, **kwargs)

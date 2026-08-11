@@ -51,6 +51,7 @@ class ManagerDrone:
         self.timestamp_bounding_boxes = queue.Queue()
         self.start_time = time.time()
         self.manager_shutoff_time = 10
+        self.stop_event = threading.Event()
 
         self.to_spcs = Transformer.from_crs("EPSG:4326", "EPSG:6498", always_xy=True)
         self.from_spcs = Transformer.from_crs("EPSG:6498", "EPSG:4326", always_xy=True) # If we are in Michigan
@@ -137,7 +138,7 @@ class ManagerDrone:
                 print("Waiting for mission to start")
                 self.mine_data_cv.wait()
 
-        get_hailo_bounding_boxes(self.timestamp_bounding_boxes, self.mine_data_lock)
+        get_hailo_bounding_boxes(self.timestamp_bounding_boxes, self.mine_data_lock, self.stop_event, self.mission_node)
     
     def backup_camera_func(self):
 
@@ -211,6 +212,7 @@ class ManagerDrone:
 
             with self.mine_data_cv:
                 while (self.mission_node is None or self.timestamp_bounding_boxes.qsize() == 0):
+                # while (self.timestamp_bounding_boxes.qsize() == 0):
                     # print("Waiting for mission to start")
                     self.mine_data_cv.wait()
             
@@ -221,22 +223,22 @@ class ManagerDrone:
                 # print("Acquired the lock in find_mines")
 
                 next_timestamp, mine_x_center, mine_y_center, x_width, y_width = self.timestamp_bounding_boxes.get()
+                print(f"The top of timestamp_bounding_boxes is {next_timestamp}, {mine_x_center}, {mine_y_center}, {x_width}, {y_width}")
                 if next_timestamp == -1:
                     continue
+
                 absolute_height = self.mission_node.gps_data[next_timestamp]["altitude"]
                 pt_latitude = self.mission_node.gps_data[next_timestamp]["latitude"]
                 pt_longitude = self.mission_node.gps_data[next_timestamp]["longitude"]
 
-                mine_x_min = mine_x_center - (x_width / 2)
-                mine_x_max = mine_x_center + (x_width / 2)
+                # absolute_height = random.randint(1, 100)
+                # pt_latitude = random.randint(1, 100)
+                # pt_longitude = random.randint(1, 100)
 
-                mine_y_min = mine_y_center - (y_width / 2)
-                mine_y_max = mine_y_center + (y_width / 2)
-
-                # next_timestamp = self.TMP_timestamp_queue.get()
-                # absolute_height = self.TMP_gps_data[next_timestamp]["altitude"]
-                # pt_latitude = self.TMP_gps_data[next_timestamp]["latitude"]
-                # pt_longitude = self.TMP_gps_data[next_timestamp]["longitude"]
+                mine_x_min = mine_x_center - (x_width / 2) / 640
+                mine_x_max = mine_x_center + (x_width / 2) / 640
+                mine_y_min = mine_y_center - (y_width / 2) / 640
+                mine_y_max = mine_y_center + (y_width / 2) / 640
 
             # Get the location of the mines within the image (bounding box or smth I dunno)
             # print(f"The bounding boxes gotten is: {mine_x_min}, {mine_x_max}, {mine_y_min}, {mine_y_max} for timestamp {next_timestamp}")
@@ -248,25 +250,18 @@ class ManagerDrone:
 
             # Get the dimension of the camera frame
             hor_rad = math.radians(self.camera_HFOV)
-            img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad) 
+            img_width_m = 2 * (absolute_height - self.base_altitude) * math.tan(hor_rad / 2) 
             
             vert_rad = math.radians(self.camera_VFOV)
-            img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad)
-
-            img_height_cm = (img_height_m) / 100 #convert to cm
-            img_width_cm = (img_width_m) / 100
+            img_height_m = 2 * (absolute_height - self.base_altitude) * math.tan(vert_rad / 2)
             
             # mine_x_min, mine_y_min, mine_x_max, mine_y_max = (0.11155333116319445, 0.15966543579101564, 0.19914363606770832, 0.22527638753255208)
             mine_x , mine_y = (mine_x_min + mine_x_max ) / 2, (mine_y_min + mine_y_max ) / 2
             mine_x_relative = mine_x - 0.5
             mine_y_relative = mine_y - 0.5
             
-            scaled_x = mine_x_relative * img_width_cm
-            scaled_y = mine_y_relative * img_height_cm
-
-            #from 4/5 onwards
-            scaled_x_meters = scaled_x / 100 #convert to meters
-            scaled_y_meters = scaled_y / 100
+            scaled_x_meters = mine_x_relative * img_width_m
+            scaled_y_meters = -mine_y_relative * img_height_m
 
             change_in_lat = scaled_y_meters/111320 #find change in latitude from center to point
             change_in_long = scaled_x_meters/(111320*np.cos(math.radians(pt_latitude)))
@@ -276,6 +271,8 @@ class ManagerDrone:
 
             with self.mine_data_lock:
                 # print("Acquired the lock in find_mines but lower")
+                if math.isnan(new_lat) or math.isnan(new_long):
+                    continue
                 self.detected_mine_data.append((new_lat, new_long))
                 print(f"The new point is {new_lat}, {new_long} and the number of detected_mines is {len(self.detected_mine_data)}")
 
@@ -402,11 +399,11 @@ class ManagerDrone:
     
     def fake_gps_coords_generation(self):
         fake_timestamp = 0
-        print("Entered fake gps coords generation")
+        # print("Entered fake gps coords generation")
         while fake_timestamp < 100:
-            print("Waiting fo the mine_data_lock")
+            # print("Waiting fo the mine_data_lock")
             with self.mine_data_lock:
-                print("Acquired the lock in fake_gps_coords_generation")
+                # print("Acquired the lock in fake_gps_coords_generation")
                 fake_lat = random.randint(1, 100)
                 fake_lon = random.randint(1, 100)
                 fake_alt = random.randint(1, 100)
@@ -418,7 +415,7 @@ class ManagerDrone:
                 }
             fake_timestamp += 1
 
-            print(f"{fake_lat}, {fake_lon}, {fake_alt}")
+            # print(f"{fake_lat}, {fake_lon}, {fake_alt}")
             with self.mine_data_cv:
                 self.mine_data_cv.notify()
             time.sleep(0.1)
@@ -471,7 +468,8 @@ class ManagerDrone:
         mission_node_thread = threading.Thread(target=self.run_mission_node, args=("survey",))
         mission_node_thread.start()
 
-        # self.fake_gps_coords_generation()
+        # mission_node_thread = threading.Thread(target=self.fake_gps_coords_generation)
+        # mission_node_thread.start()
     
     def handle_orbit(self):
         self.mission_status = "in_mission"
@@ -555,19 +553,23 @@ class ManagerDrone:
         find_mines_thread.start()
 
         if self.camera_mode == "primary":
-            take_pictures_thread = threading.Thread(target=primary_camera_func)
+            take_pictures_thread = threading.Thread(target=self.primary_camera_func)
             take_pictures_thread.start()        
         if self.camera_mode == "backup":
             take_pictures_thread = threading.Thread(target=self.backup_camera_func)
             take_pictures_thread.start()
         
-        fake_gps_thread = threading.Thread(target=self.handle_run_drones)
-        fake_gps_thread.start()
+        # fake_gps_thread = threading.Thread(target=self.handle_run_drones)
+        # fake_gps_thread.start()
 
         tcp_thread.join()
         udp_thread.join()
 
+        self.stop_event.set()
+
         self.detected_mine_data.append((0, 0))
+
+        print(self.detected_mine_data)
 
         drones.iarc_pathfinder.run_iarc_pathfinder(self.detected_mine_data)
 
