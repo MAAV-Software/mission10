@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .geometry import Lane, Vec3, distance_to_polygon, point_in_polygon, polygon_serpentine, serpentine
+from .geometry import Lane, Vec3, distance_to_polygon, inset_convex_polygon, point_in_polygon, polygon_serpentine, serpentine
 from .minelog import CONFIRMED, DIPPED, Cluster, MineLog
 
 # phases
@@ -80,6 +80,7 @@ class MissionConfig:
     # NED vertices in perimeter order. When present this is both the survey
     # geometry and the horizontal command/estimate fence.
     fence_polygon_ne: Tuple[Tuple[float, float], ...] = ()
+    fence_margin_m: float = 0.0
     # Wall clock from takeoff; 0 disables. A survey that cannot finish must
     # come home rather than hold its setpoint indefinitely.
     mission_timeout_s: float = 0.0
@@ -101,8 +102,8 @@ class MissionConfig:
             raise ValueError("reach_tol_m must be positive")
         if self.land_settle_s <= 0.0 or self.land_speed_tol_mps <= 0.0:
             raise ValueError("landing settle time and speed tolerance must be positive")
-        if self.fence_radius_m < 0.0 or self.mission_timeout_s < 0.0:
-            raise ValueError("fence_radius_m and mission_timeout_s must not be negative")
+        if self.fence_radius_m < 0.0 or self.fence_margin_m < 0.0 or self.mission_timeout_s < 0.0:
+            raise ValueError("fence radius, margin, and mission timeout must not be negative")
         if self.fence_polygon_ne and len(self.fence_polygon_ne) < 3:
             raise ValueError("fence_polygon_ne needs at least three vertices")
 
@@ -127,9 +128,13 @@ class MissionEngine:
     ) -> None:
         self.cfg = cfg
         self.log = log if log is not None else MineLog()
+        self.fence_polygon = (
+            inset_convex_polygon(cfg.fence_polygon_ne, cfg.fence_margin_m)
+            if cfg.fence_polygon_ne else ()
+        )
         self.lanes: List[Lane] = (
-            polygon_serpentine(cfg.fence_polygon_ne, cfg.lane_spacing)
-            if cfg.fence_polygon_ne and cfg.pattern == "serpentine"
+            polygon_serpentine(self.fence_polygon, cfg.lane_spacing)
+            if self.fence_polygon and cfg.pattern == "serpentine"
             else serpentine(
                 cfg.lanes_origin, cfg.lane_length, cfg.n_lanes,
                 cfg.lane_spacing, math.radians(cfg.lane_heading_deg),
@@ -253,7 +258,7 @@ class MissionEngine:
         return r if r > self.cfg.fence_radius_m else None
 
     def _fence_violation(self, n: float, e: float) -> Optional[str]:
-        polygon = self.cfg.fence_polygon_ne
+        polygon = self.fence_polygon
         if polygon:
             if not point_in_polygon((n, e), polygon):
                 distance = distance_to_polygon((n, e), polygon)

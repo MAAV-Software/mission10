@@ -124,6 +124,54 @@ def distance_to_polygon(point: Point2, polygon: Sequence[Point2]) -> float:
     return best
 
 
+def inset_convex_polygon(
+    polygon: Sequence[Point2], margin_m: float
+) -> Tuple[Point2, ...]:
+    """Offset every edge of a convex perimeter inward by ``margin_m``."""
+    if len(polygon) < 3:
+        raise ValueError("polygon needs at least three corners")
+    if margin_m < 0.0:
+        raise ValueError("polygon margin must not be negative")
+    if margin_m == 0.0:
+        return tuple(polygon)
+    area2 = sum(
+        p1[0] * p2[1] - p1[1] * p2[0]
+        for p1, p2 in zip(polygon, polygon[1:] + polygon[:1])
+    )
+    if abs(area2) <= 1e-9:
+        raise ValueError("polygon area is too small")
+    side = 1.0 if area2 > 0.0 else -1.0
+    shifted = []
+    for p1, p2 in zip(polygon, polygon[1:] + polygon[:1]):
+        dn, de = p2[0] - p1[0], p2[1] - p1[1]
+        length = math.hypot(dn, de)
+        if length <= 1e-9:
+            raise ValueError("polygon has duplicate adjacent corners")
+        inward = (-side * de / length, side * dn / length)
+        shifted.append((
+            (p1[0] + margin_m * inward[0], p1[1] + margin_m * inward[1]),
+            (dn, de),
+        ))
+    result = []
+    # Vertex i is the intersection of the edges before and after original
+    # corner i. Preserve that indexing because corner 0 -> 1 selects the lane
+    # direction.
+    for i, (p2, d2) in enumerate(shifted):
+        p1, d1 = shifted[i - 1]
+        det = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(det) <= 1e-9:
+            raise ValueError("polygon has parallel adjacent edges")
+        delta = (p2[0] - p1[0], p2[1] - p1[1])
+        t = (delta[0] * d2[1] - delta[1] * d2[0]) / det
+        result.append((p1[0] + t * d1[0], p1[1] + t * d1[1]))
+    if abs(sum(
+        p1[0] * p2[1] - p1[1] * p2[0]
+        for p1, p2 in zip(result, result[1:] + result[:1])
+    )) <= 1e-6:
+        raise ValueError("polygon margin collapses the field")
+    return tuple(result)
+
+
 def polygon_serpentine(polygon: Sequence[Point2], spacing: float) -> List[Lane]:
     """Clip parallel survey lanes to a convex polygon.
 

@@ -34,11 +34,14 @@
       34.6250926, -86.8092602,
     ]
     require_field_polygon: true
+    # Keep the vehicle center and every commanded lane at least this far from
+    # the surveyed boundary.
+    field_polygon_margin_m: 3.0
 
     # The polygon is authoritative when configured. Retain a disabled radial
     # fence so it cannot reject valid corners of a long field.
     fence_radius_m: 0.0
-    mission_timeout_s: 300.0
+    mission_timeout_s: 0.0
     max_dips: 4
     detector_silence_s: 5.0
 

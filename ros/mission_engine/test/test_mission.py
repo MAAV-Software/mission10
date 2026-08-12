@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from mission_engine.core.config import CameraModel
 from mission_engine.core.dumpproto import build_payload, decode_frame, encode_frame
-from mission_engine.core.geometry import point_in_polygon, polygon_serpentine, quat_from_yaw
+from mission_engine.core.geometry import inset_convex_polygon, point_in_polygon, polygon_serpentine, quat_from_yaw
 from mission_engine.core.ingest import PoseHistory, PoseSnapshot, make_observation
 from mission_engine.core.minelog import DIPPED, MineLog
 from mission_engine.core.mission import (
@@ -186,6 +186,39 @@ class TestEnvelope(unittest.TestCase):
 
 
 class TestPolygonGeometry(unittest.TestCase):
+    def test_inset_is_a_constant_margin_for_both_windings(self):
+        for polygon in (
+            ((0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)),
+            ((0.0, 6.0), (10.0, 6.0), (10.0, 0.0), (0.0, 0.0)),
+        ):
+            inset = inset_convex_polygon(polygon, 1.0)
+            self.assertEqual(
+                {(round(n, 6), round(e, 6)) for n, e in inset},
+                {(1.0, 1.0), (9.0, 1.0), (9.0, 5.0), (1.0, 5.0)},
+            )
+            original_heading = math.atan2(
+                polygon[1][1] - polygon[0][1], polygon[1][0] - polygon[0][0]
+            )
+            inset_heading = math.atan2(
+                inset[1][1] - inset[0][1], inset[1][0] - inset[0][0]
+            )
+            self.assertAlmostEqual(
+                math.sin(original_heading), math.sin(inset_heading), places=6
+            )
+            self.assertAlmostEqual(
+                math.cos(original_heading), math.cos(inset_heading), places=6
+            )
+
+    def test_margin_drives_lanes_and_fence(self):
+        polygon = ((0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0))
+        cfg = replace(CFG, fence_polygon_ne=polygon, fence_margin_m=2.0)
+        eng = MissionEngine(cfg)
+        self.assertIsNotNone(eng._fence_violation(1.0, 5.0))
+        self.assertIsNone(eng._fence_violation(2.0, 5.0))
+        for lane in eng.lanes:
+            self.assertTrue(point_in_polygon(lane.start, eng.fence_polygon))
+            self.assertTrue(point_in_polygon(lane.point_at(lane.length), eng.fence_polygon))
+
     def test_non_cardinal_quadrilateral_produces_clipped_lanes(self):
         polygon = ((0.0, 0.0), (12.0, 5.0), (9.0, 13.0), (-3.0, 8.0))
         lanes = polygon_serpentine(polygon, 2.0)

@@ -100,6 +100,7 @@ class EngineNode(OffboardController):
         # perimeter. Corner 0 -> corner 1 selects the survey-lane direction.
         self.declare_parameter("field_polygon_gps", Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter("require_field_polygon", False)
+        self.declare_parameter("field_polygon_margin_m", 0.0)
         self.declare_parameter("mission_timeout_s", 300.0)
         self.declare_parameter("max_dips", 0)
         self.declare_parameter("detector_silence_s", 0.0)  # 0 disables the guard
@@ -265,6 +266,7 @@ class EngineNode(OffboardController):
             detector_silence_s=float(p("detector_silence_s").value),
             fence_radius_m=float(p("fence_radius_m").value),
             fence_polygon_ne=polygon,
+            fence_margin_m=float(p("field_polygon_margin_m").value),
             mission_timeout_s=float(p("mission_timeout_s").value),
         )
 
