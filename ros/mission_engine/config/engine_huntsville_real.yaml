@@ -35,6 +35,11 @@
       34.6250926, -86.8092602,
     ]
     require_field_polygon: true
+    # Raw GPS is sampled once while stationary when /start_mission arrives.
+    # It georeferences the polygon only; PX4 local navigation remains optical
+    # flow + dToF and no subsequent GPS fix moves the field frame.
+    launch_gps_max_age_s: 2.0
+    launch_gps_max_eph_m: 2.5
     # Keep the vehicle center and every commanded lane at least this far from
     # the surveyed boundary.
     field_polygon_margin_m: 3.0

@@ -40,7 +40,7 @@ from rclpy.parameter import Parameter
 from std_msgs.msg import Bool
 from vision_msgs.msg import Detection2DArray
 
-from px4_msgs.msg import DistanceSensor, VehicleAttitude, VehicleLocalPosition
+from px4_msgs.msg import DistanceSensor, SensorGps, VehicleAttitude, VehicleLocalPosition
 from px4_offboard.controller import ACTIVE, OffboardController
 from px4_offboard.gate_qos import MISSION_GATE_QOS
 
@@ -100,6 +100,8 @@ class EngineNode(OffboardController):
         self.declare_parameter("field_polygon_gps", Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter("require_field_polygon", False)
         self.declare_parameter("field_polygon_margin_m", 0.0)
+        self.declare_parameter("launch_gps_max_age_s", 2.0)
+        self.declare_parameter("launch_gps_max_eph_m", 2.5)
         self.declare_parameter("mission_timeout_s", 300.0)
         self.declare_parameter("max_dips", 0)
         self.declare_parameter("detector_silence_s", 0.0)  # 0 disables the guard
@@ -200,6 +202,9 @@ class EngineNode(OffboardController):
         self._dumped = False
         self._land_requested = False
         self._last_phase = ""
+        self._raw_gps = None
+        self._raw_gps_received_us = 0
+        self._launch_gps_reference = None
 
         self.create_subscription(
             Detection2DArray, self.detections_topic, self._detections_cb, 10
@@ -211,6 +216,12 @@ class EngineNode(OffboardController):
             DistanceSensor,
             self._topic("out/distance_sensor"),
             self._dist_cb,
+            self.sensor_qos,
+        )
+        self.create_subscription(
+            SensorGps,
+            self._topic("out/vehicle_gps_position"),
+            self._gps_cb,
             self.sensor_qos,
         )
         self.create_subscription(
@@ -270,7 +281,7 @@ class EngineNode(OffboardController):
         )
 
     def _field_polygon_ne(self) -> tuple[tuple[float, float], ...]:
-        """Resolve surveyed WGS84 corners into the current PX4 NED frame."""
+        """Resolve WGS84 corners once against the stationary launch fix."""
         raw = list(self.get_parameter("field_polygon_gps").value or [])
         if not raw:
             if bool(self.get_parameter("require_field_polygon").value):
@@ -282,21 +293,62 @@ class EngineNode(OffboardController):
             raise ValueError(
                 "field_polygon_gps must contain exactly four finite lat/lon pairs"
             )
-        if not self._global_xy_valid or not all(
-            math.isfinite(v) for v in (self.global_lat, self.global_lon)
-        ):
-            raise ValueError("field_polygon_gps requires a valid global position")
-        lon_scale = M_PER_DEG_LAT * math.cos(math.radians(self.global_lat))
+        if self._launch_gps_reference is None:
+            raise ValueError("field_polygon_gps requires a qualified raw GPS launch fix")
+        launch_lat, launch_lon, launch_n, launch_e = self._launch_gps_reference
+        lon_scale = M_PER_DEG_LAT * math.cos(math.radians(launch_lat))
         corners = []
         for i in range(0, len(raw), 2):
             lat, lon = float(raw[i]), float(raw[i + 1])
             corners.append((
-                float(self.x) + (lat - self.global_lat) * M_PER_DEG_LAT,
-                float(self.y) + (lon - self.global_lon) * lon_scale,
+                launch_n + (lat - launch_lat) * M_PER_DEG_LAT,
+                launch_e + (lon - launch_lon) * lon_scale,
             ))
         return tuple(corners)
 
     # ------------------------------------------------------------ inputs
+
+    def _gps_cb(self, msg: SensorGps) -> None:
+        self._raw_gps = msg
+        self._raw_gps_received_us = self._now_us()
+
+    def _qualified_launch_gps(self):
+        msg = self._raw_gps
+        if msg is None:
+            return None, "no raw GPS fix received"
+        age_s = (self._now_us() - self._raw_gps_received_us) * 1e-6
+        max_age = float(self.get_parameter("launch_gps_max_age_s").value)
+        if age_s > max_age:
+            return None, f"raw GPS fix is stale ({age_s:.1f}s > {max_age:.1f}s)"
+        if int(msg.fix_type) < int(SensorGps.FIX_TYPE_3D):
+            return None, f"raw GPS fix_type={int(msg.fix_type)}; need 3D or better"
+        eph = float(msg.eph)
+        max_eph = float(self.get_parameter("launch_gps_max_eph_m").value)
+        if not math.isfinite(eph) or eph > max_eph:
+            return None, f"raw GPS eph={eph:.1f}m exceeds {max_eph:.1f}m"
+        lat, lon = float(msg.latitude_deg), float(msg.longitude_deg)
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            return None, "raw GPS latitude/longitude is invalid"
+        return (lat, lon), None
+
+    def _start_cb(self, msg: Bool) -> None:
+        if msg.data and not self._start_ok and bool(
+            self.get_parameter("require_field_polygon").value
+        ):
+            fix, reason = self._qualified_launch_gps()
+            if fix is None:
+                self.get_logger().error(
+                    f"start_mission refused: {reason}; aircraft remains disarmed"
+                )
+                return
+            self._launch_gps_reference = (
+                fix[0], fix[1], float(self.x), float(self.y)
+            )
+            self.get_logger().info(
+                f"latched raw GPS launch reference: {fix[0]:.7f}, {fix[1]:.7f}; "
+                "GPS will not be used for navigation"
+            )
+        super()._start_cb(msg)
 
     def _att_cb(self, msg: VehicleAttitude) -> None:
         super()._att_cb(msg)
@@ -315,6 +367,11 @@ class EngineNode(OffboardController):
 
     def on_local_frame_reset(self, delta_xy, delta_z, delta_heading) -> None:
         dn, de = delta_xy
+        if self._launch_gps_reference is not None and self.engine is None:
+            lat, lon, launch_n, launch_e = self._launch_gps_reference
+            self._launch_gps_reference = (
+                lat, lon, launch_n + dn, launch_e + de
+            )
         self.anchor.apply_frame_reset(dn, de)
         self.poses.clear()
         if self.engine is not None:
@@ -376,7 +433,6 @@ class EngineNode(OffboardController):
             t=t,
             pos=(float(self.x), float(self.y), float(self.z - self._launch_z)),
             q=self.q,
-            ll=(self.global_lat, self.global_lon) if self._global_xy_valid else None,
             agl=self._agl_now(),
         )
         try:
