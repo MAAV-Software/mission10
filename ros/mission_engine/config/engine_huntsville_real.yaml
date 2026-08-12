@@ -1,0 +1,60 @@
+# Huntsville competition survey. This profile deliberately refuses
+# /begin_survey until field_polygon_gps contains four surveyed WGS84 corners
+# and PX4 reports a valid global position.
+/**:
+  ros__parameters:
+    wait_for_start: true
+    force_arm: false
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20
+    takeoff_altitude_m: 4.0
+    takeoff_acceptance_m: 0.35
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    launch_stability_s: 3.0
+
+    mission_pattern: serpentine
+    lane_spacing_m: 3.0
+    survey_alt_m: 4.0
+    lane_speed_mps: 2.0
+    goto_max_heading_rate_deg_s: 30.0
+    reach_tolerance_m: 0.35
+    land_settle_s: 3.0
+    land_speed_tolerance_mps: 0.20
+
+    # Paste four [latitude, longitude] pairs in perimeter order. Either
+    # clockwise or counter-clockwise is accepted. Corner 1 -> corner 2 sets
+    # the lane direction; parallel lanes are clipped to the quadrilateral.
+    # Surveyed Huntsville field: front-left -> back-left -> back-right ->
+    # front-right. The first edge runs along the field's long axis.
+    field_polygon_gps: [
+      34.6251972, -86.8090608,
+      34.6244630, -86.8085689,
+      34.6243656, -86.8088116,
+      34.6250926, -86.8092602,
+    ]
+    require_field_polygon: true
+
+    # The polygon is authoritative when configured. Retain a disabled radial
+    # fence so it cannot reject valid corners of a long field.
+    fence_radius_m: 0.0
+    mission_timeout_s: 300.0
+    max_dips: 4
+    detector_silence_s: 5.0
+
+    detections_topic: /detections/down
+    camera_fx_px: 1298.69385194
+    camera_width_px: 1640
+    camera_height_px: 1232
+    camera_roll_deg: 0.0
+    camera_tilt_deg: 0.0
+
+    anchor_tag_ids: [6, 7]
+    anchor_aborts: true
+    anchor_corrects: false
+    anchor_gate_m: 1.5
+    anchor_persist_s: 1.0
+    anchor_max_radial_m: 3.0
+
+    drone_id: drone4
+    dump_dir: /mnt/recordings

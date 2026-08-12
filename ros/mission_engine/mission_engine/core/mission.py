@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .geometry import Lane, Vec3, serpentine
+from .geometry import Lane, Vec3, distance_to_polygon, point_in_polygon, polygon_serpentine, serpentine
 from .minelog import CONFIRMED, DIPPED, Cluster, MineLog
 
 # phases
@@ -77,6 +77,9 @@ class MissionConfig:
     # while the airframe is elsewhere — the tag anchor owns that class
     # (core/anchor.py).
     fence_radius_m: float = 0.0
+    # NED vertices in perimeter order. When present this is both the survey
+    # geometry and the horizontal command/estimate fence.
+    fence_polygon_ne: Tuple[Tuple[float, float], ...] = ()
     # Wall clock from takeoff; 0 disables. A survey that cannot finish must
     # come home rather than hold its setpoint indefinitely.
     mission_timeout_s: float = 0.0
@@ -100,6 +103,8 @@ class MissionConfig:
             raise ValueError("landing settle time and speed tolerance must be positive")
         if self.fence_radius_m < 0.0 or self.mission_timeout_s < 0.0:
             raise ValueError("fence_radius_m and mission_timeout_s must not be negative")
+        if self.fence_polygon_ne and len(self.fence_polygon_ne) < 3:
+            raise ValueError("fence_polygon_ne needs at least three vertices")
 
 
 @dataclass
@@ -122,12 +127,13 @@ class MissionEngine:
     ) -> None:
         self.cfg = cfg
         self.log = log if log is not None else MineLog()
-        self.lanes: List[Lane] = serpentine(
-            cfg.lanes_origin,
-            cfg.lane_length,
-            cfg.n_lanes,
-            cfg.lane_spacing,
-            math.radians(cfg.lane_heading_deg),
+        self.lanes: List[Lane] = (
+            polygon_serpentine(cfg.fence_polygon_ne, cfg.lane_spacing)
+            if cfg.fence_polygon_ne and cfg.pattern == "serpentine"
+            else serpentine(
+                cfg.lanes_origin, cfg.lane_length, cfg.n_lanes,
+                cfg.lane_spacing, math.radians(cfg.lane_heading_deg),
+            )
         )
         self.phase = PREFLIGHT
         self.abort_reason: Optional[str] = None
@@ -235,9 +241,9 @@ class MissionEngine:
             elapsed = t - self.t_takeoff
             if elapsed > self.cfg.mission_timeout_s:
                 self._abort(f"mission timeout at {elapsed:.0f} s")
-        r = self._fence_radius(pos[0], pos[1])
-        if r is not None:
-            self._abort(f"estimate {r:.1f} m outside the {self.cfg.fence_radius_m:.0f} m fence")
+        violation = self._fence_violation(pos[0], pos[1])
+        if violation is not None:
+            self._abort(f"estimate {violation}")
 
     def _fence_radius(self, n: float, e: float) -> Optional[float]:
         """Distance beyond the fence, or None while inside it."""
@@ -245,6 +251,18 @@ class MissionEngine:
             return None
         r = math.hypot(n - self._home_ne[0], e - self._home_ne[1])
         return r if r > self.cfg.fence_radius_m else None
+
+    def _fence_violation(self, n: float, e: float) -> Optional[str]:
+        polygon = self.cfg.fence_polygon_ne
+        if polygon:
+            if not point_in_polygon((n, e), polygon):
+                distance = distance_to_polygon((n, e), polygon)
+                return f"{distance:.1f} m outside the field polygon"
+            return None
+        radius = self._fence_radius(n, e)
+        if radius is not None:
+            return f"{radius:.1f} m outside the {self.cfg.fence_radius_m:.0f} m radius fence"
+        return None
 
     def _target(self, target: Vec3) -> Setpoint:
         """Return the end of the current leg; PX4 smooths the trajectory."""
@@ -269,11 +287,9 @@ class MissionEngine:
     ) -> Optional[Setpoint]:
         sp = self._tick(t, pos, vel, horizontal_valid, survey_ready)
         if sp is not None and self.phase in (TAKEOFF, LANE, VERIFY_DIP):
-            r = self._fence_radius(sp.pos[0], sp.pos[1])
-            if r is not None:
-                self._abort(
-                    f"command {r:.1f} m outside the {self.cfg.fence_radius_m:.0f} m fence"
-                )
+            violation = self._fence_violation(sp.pos[0], sp.pos[1])
+            if violation is not None:
+                self._abort(f"command {violation}")
                 return self._tick(t, pos, vel, horizontal_valid, survey_ready)
         return sp
 

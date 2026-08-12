@@ -166,6 +166,8 @@ class OffboardController(Node):
         self._goto_max_heading_rate = None
         self._global_xy_valid = False
         self._global_alt_valid = False
+        self.global_lat = math.nan
+        self.global_lon = math.nan
         self._pending_origin = None
         self._origin_send_us = 0
         self._origin_start_us = 0
@@ -397,6 +399,9 @@ class OffboardController(Node):
         # confirmation only needs XY, but AUTO.RTL requires both.
         self._global_xy_valid = bool(msg.lat_lon_valid)
         self._global_alt_valid = bool(getattr(msg, "alt_valid", False))
+        if self._global_xy_valid and math.isfinite(msg.lat) and math.isfinite(msg.lon):
+            self.global_lat = float(msg.lat)
+            self.global_lon = float(msg.lon)
 
     def _ack_cb(self, msg: VehicleCommandAck):
         if msg.result != VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED:

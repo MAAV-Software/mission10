@@ -22,7 +22,7 @@ set -euo pipefail
 set +u; source /opt/ros/jazzy/setup.bash; set -u
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SRC:-$(cd -- "$HERE/.." && pwd)}"
-PARAMS="${PARAMS:-$HERE/config/engine_mair_real.yaml}"
+PARAMS="${PARAMS:-$HERE/config/engine_huntsville_real.yaml}"
 [ -f "$PARAMS" ] || { echo "no params file at $PARAMS" >&2; exit 1; }
 export PYTHONPATH="${PYTHONPATH:-}:$HERE:$SRC/px4_offboard:$SRC/flight_lib"
 exec python3 "$HERE/mission_engine/rim/engine_node.py" \

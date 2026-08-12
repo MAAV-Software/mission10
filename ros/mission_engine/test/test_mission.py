@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from mission_engine.core.config import CameraModel
 from mission_engine.core.dumpproto import build_payload, decode_frame, encode_frame
-from mission_engine.core.geometry import quat_from_yaw
+from mission_engine.core.geometry import point_in_polygon, polygon_serpentine, quat_from_yaw
 from mission_engine.core.ingest import PoseHistory, PoseSnapshot, make_observation
 from mission_engine.core.minelog import DIPPED, MineLog
 from mission_engine.core.mission import (
@@ -163,6 +163,46 @@ class TestEnvelope(unittest.TestCase):
         eng, _, _ = run_mission(cfg=cfg)
         self.assertEqual(eng.phase, DONE)
         self.assertIsNone(eng.abort_reason)
+
+    def test_polygon_catches_command_before_estimate(self):
+        polygon = ((-2.0, -2.0), (18.0, 3.0), (16.0, 11.0), (-4.0, 6.0))
+        cfg = replace(CFG, fence_polygon_ne=polygon, fence_radius_m=0.0)
+        eng = MissionEngine(cfg)
+        self.assertGreater(len(eng.lanes), 1)
+        for lane in eng.lanes:
+            self.assertTrue(point_in_polygon(lane.start, polygon))
+            self.assertTrue(point_in_polygon(lane.point_at(lane.length), polygon))
+
+    def test_polygon_rejects_dip_target_outside_field(self):
+        polygon = ((-1.0, -1.0), (20.0, 4.0), (18.0, 14.0), (-3.0, 9.0))
+        cfg = replace(CFG, fence_polygon_ne=polygon, fence_radius_m=0.0)
+        eng = MissionEngine(cfg)
+        eng.start()
+        eng.tick(0.0, (0.0, 0.0, 0.0))
+        eng.tick(2.0, (0.0, 0.0, 0.0))
+        eng.tick(3.0, (100.0, 100.0, -6.0))
+        self.assertEqual(eng.phase, ABORT)
+        self.assertIn("field polygon", eng.abort_reason)
+
+
+class TestPolygonGeometry(unittest.TestCase):
+    def test_non_cardinal_quadrilateral_produces_clipped_lanes(self):
+        polygon = ((0.0, 0.0), (12.0, 5.0), (9.0, 13.0), (-3.0, 8.0))
+        lanes = polygon_serpentine(polygon, 2.0)
+        self.assertGreaterEqual(len(lanes), 4)
+        headings = {round(math.degrees(lane.heading) % 180.0, 6) for lane in lanes}
+        self.assertEqual(len(headings), 1)
+        self.assertNotIn(0.0, headings)
+        for lane in lanes:
+            self.assertTrue(point_in_polygon(lane.start, polygon))
+            self.assertTrue(point_in_polygon(lane.point_at(lane.length), polygon))
+
+    def test_polygon_fence_takes_precedence_over_legacy_radius(self):
+        polygon = ((-2.0, -2.0), (20.0, -2.0), (20.0, 2.0), (-2.0, 2.0))
+        cfg = replace(CFG, fence_polygon_ne=polygon, fence_radius_m=1.0)
+        eng = MissionEngine(cfg)
+        eng._home_ne = (0.0, 0.0)
+        self.assertIsNone(eng._fence_violation(10.0, 0.0))
 
 
 class TestRotatedLanes(unittest.TestCase):

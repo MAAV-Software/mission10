@@ -36,6 +36,17 @@
 
     # guards the core applies to the estimate and the command
     fence_radius_m: 2.0
+    # Competition field: replace with the four surveyed WGS84 corners in
+    # perimeter order (clockwise or counter-clockwise). The first edge sets
+    # the serpentine lane direction. When populated, this polygon generates
+    # the lanes and fences both position estimates and commanded setpoints.
+    # Keep the launch point inside the polygon.
+    # field_polygon_gps: [
+    #   42.0000000, -83.0000000,
+    #   42.0000000, -82.9990000,
+    #   42.0010000, -82.9990000,
+    #   42.0010000, -83.0000000,
+    # ]
     mission_timeout_s: 0.0
     max_dips: 0
     detector_silence_s: 0.0     # 0 disables the guard

@@ -36,6 +36,7 @@ from pathlib import Path
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool
 from vision_msgs.msg import Detection2DArray
 
@@ -51,6 +52,7 @@ from mission_engine.core.anchor import (
 )
 from mission_engine.core.config import CameraModel
 from mission_engine.core.dumpproto import build_payload, encode_frame
+from mission_engine.core.geometry import point_in_polygon
 from mission_engine.core.ingest import PoseHistory, PoseSnapshot, make_observation
 from mission_engine.core.mission import (
     ABORT,
@@ -66,6 +68,7 @@ TAG_PREFIX = "tag36h11:"
 CRASH_DISARM_RANGE_M = 0.10
 CRASH_DISARM_HOLD_S = 0.10
 CRASH_DISARM_RETRY_US = 100_000
+M_PER_DEG_LAT = 111_320.0
 
 
 class EngineNode(OffboardController):
@@ -93,6 +96,10 @@ class EngineNode(OffboardController):
         self.declare_parameter("land_speed_tolerance_mps", 0.20)
         # envelope
         self.declare_parameter("fence_radius_m", 12.0)
+        # Four WGS84 corners as [lat0, lon0, ..., lat3, lon3], following the
+        # perimeter. Corner 0 -> corner 1 selects the survey-lane direction.
+        self.declare_parameter("field_polygon_gps", Parameter.Type.DOUBLE_ARRAY)
+        self.declare_parameter("require_field_polygon", False)
         self.declare_parameter("mission_timeout_s", 300.0)
         self.declare_parameter("max_dips", 0)
         self.declare_parameter("detector_silence_s", 0.0)  # 0 disables the guard
@@ -236,6 +243,7 @@ class EngineNode(OffboardController):
         p = self.get_parameter
         offset = [float(v) for v in p("lanes_offset_ne").value]
         anchor = self._anchor_ne
+        polygon = self._field_polygon_ne()
         return MissionConfig(
             pattern=str(p("mission_pattern").value),
             lanes_origin=(anchor[0] + offset[0], anchor[1] + offset[1]),
@@ -256,8 +264,36 @@ class EngineNode(OffboardController):
             max_dips=int(p("max_dips").value),
             detector_silence_s=float(p("detector_silence_s").value),
             fence_radius_m=float(p("fence_radius_m").value),
+            fence_polygon_ne=polygon,
             mission_timeout_s=float(p("mission_timeout_s").value),
         )
+
+    def _field_polygon_ne(self) -> tuple[tuple[float, float], ...]:
+        """Resolve surveyed WGS84 corners into the current PX4 NED frame."""
+        raw = list(self.get_parameter("field_polygon_gps").value or [])
+        if not raw:
+            if bool(self.get_parameter("require_field_polygon").value):
+                raise ValueError(
+                    "field_polygon_gps is required; enter the four surveyed corners"
+                )
+            return ()
+        if len(raw) != 8 or not all(math.isfinite(float(v)) for v in raw):
+            raise ValueError(
+                "field_polygon_gps must contain exactly four finite lat/lon pairs"
+            )
+        if not self._global_xy_valid or not all(
+            math.isfinite(v) for v in (self.global_lat, self.global_lon)
+        ):
+            raise ValueError("field_polygon_gps requires a valid global position")
+        lon_scale = M_PER_DEG_LAT * math.cos(math.radians(self.global_lat))
+        corners = []
+        for i in range(0, len(raw), 2):
+            lat, lon = float(raw[i]), float(raw[i + 1])
+            corners.append((
+                float(self.x) + (lat - self.global_lat) * M_PER_DEG_LAT,
+                float(self.y) + (lon - self.global_lon) * lon_scale,
+            ))
+        return tuple(corners)
 
     # ------------------------------------------------------------ inputs
 
@@ -339,6 +375,7 @@ class EngineNode(OffboardController):
             t=t,
             pos=(float(self.x), float(self.y), float(self.z - self._launch_z)),
             q=self.q,
+            ll=(self.global_lat, self.global_lon) if self._global_xy_valid else None,
             agl=self._agl_now(),
         )
         try:
@@ -421,12 +458,16 @@ class EngineNode(OffboardController):
         if self.state != ACTIVE:
             self.get_logger().warn("begin_survey before the climb finished; ignored.")
             return
-        self._begun = True
         self._anchor_ne = (float(self.x), float(self.y))
-        self.engine = MissionEngine(
-            self._mission_config(),
-            initial_yaw=self._launch_yaw,
-        )
+        try:
+            cfg = self._mission_config()
+            if cfg.fence_polygon_ne and not point_in_polygon(self._anchor_ne, cfg.fence_polygon_ne):
+                raise ValueError("launch anchor is outside field_polygon_gps")
+            self.engine = MissionEngine(cfg, initial_yaw=self._launch_yaw)
+        except ValueError as exc:
+            self.get_logger().error(f"begin_survey refused: {exc}")
+            return
+        self._begun = True
         self.engine.start()
         self.enable_goto_setpoints(
             max_horizontal_speed=self.engine.cfg.lane_speed,
