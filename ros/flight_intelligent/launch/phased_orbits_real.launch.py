@@ -83,6 +83,7 @@ def _setup(context, *args, **kwargs):
     peers = [
         value for peer_index, value in enumerate(namespaces) if peer_index != index
     ]
+    peer_ids = [peer_index for peer_index in range(len(vehicles)) if peer_index != index]
     mission_config = LaunchConfiguration("mission_config").perform(context).strip()
     if not mission_config:
         mission_config = os.path.join(
@@ -112,7 +113,6 @@ def _setup(context, *args, **kwargs):
                 "spawn_n_m": 0.0,
                 "shared_slot_e_m": pose[0],
                 "shared_slot_n_m": pose[1],
-                "staging_enabled": False,
                 "wait_for_start": True,
             },
         ],
@@ -122,7 +122,7 @@ def _setup(context, *args, **kwargs):
         executable="relative_localization",
         name=f"relative_localization_{index}",
         output="screen",
-        parameters=[common],
+        parameters=[common, {"peer_ids": peer_ids}],
     )
     agent = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration("start_agent")),

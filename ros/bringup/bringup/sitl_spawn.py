@@ -75,13 +75,22 @@ def _randomize_spawns(fleet: dict, seed: int) -> dict:
 
 
 def _rough_line_spawns(fleet: dict, seed: int) -> dict:
-    """Generate an ordered launch line with deliberately uneven spacing."""
+    """Jitter each nominal line slot inside a seeded placement disk.
+
+    The nominal poses remain ``staging_pose`` so the mission knows the common
+    line direction.  Only the physical Gazebo spawn moves.  This models coarse
+    human placement in two dimensions; unlike the old along-line-only model it
+    leaves a cross-track error that scalar UWB range cannot remove.
+    """
     out = copy.deepcopy(fleet)
     cfg = out.get("rough_line_spawn", {})
-    min_gap = float(cfg.get("min_gap_m", 3.4))
-    max_gap = float(cfg.get("max_gap_m", 5.0))
-    if min_gap <= 0.0 or max_gap < min_gap:
-        raise ValueError("rough_line_spawn needs 0 < min_gap_m <= max_gap_m")
+    radius = float(cfg.get("placement_radius_m", 0.75))
+    separation = float(cfg.get("min_separation_m", 2.0))
+    attempts = int(cfg.get("max_attempts_per_vehicle", 10_000))
+    if radius <= 0.0 or separation <= 0.0 or attempts <= 0:
+        raise ValueError(
+            "rough_line_spawn needs positive placement radius, separation, and attempts"
+        )
 
     poses = [
         _pose_values(vehicle.get("staging_pose", vehicle.get("pose", "0,0,0,0,0,0")))
@@ -89,41 +98,36 @@ def _rough_line_spawns(fleet: dict, seed: int) -> dict:
     ]
     if len(poses) < 2:
         raise ValueError("rough_line_spawn needs at least two vehicles")
-    axis_e = poses[-1][0] - poses[0][0]
-    axis_n = poses[-1][1] - poses[0][1]
-    norm = math.hypot(axis_e, axis_n)
+    norm = math.hypot(
+        poses[-1][0] - poses[0][0], poses[-1][1] - poses[0][1]
+    )
     if norm <= 1e-6:
         raise ValueError("rough_line_spawn needs distinct launch positions")
-    axis_e /= norm
-    axis_n /= norm
 
     rng = random.Random(int(seed))
-    gaps = [rng.uniform(min_gap, max_gap) for _ in poses[1:]]
-    midpoint_e = 0.5 * (poses[0][0] + poses[-1][0])
-    midpoint_n = 0.5 * (poses[0][1] + poses[-1][1])
-    distance = -0.5 * sum(gaps)
-    launch_positions = []
-    for index in range(len(poses)):
-        launch_positions.append((
-            midpoint_e + distance * axis_e,
-            midpoint_n + distance * axis_n,
-        ))
-        if index < len(gaps):
-            distance += gaps[index]
-
-    for vehicle, fixed, (east, north) in zip(out["vehicles"], poses, launch_positions):
+    accepted: list[tuple[float, float]] = []
+    for index, (vehicle, fixed) in enumerate(zip(out["vehicles"], poses)):
         pose = fixed.copy()
-        pose[0] = east
-        pose[1] = north
-        vehicle["pose"] = ",".join(f"{value:.6f}" for value in pose)
-
-    anchor = _pose_values(out["vehicles"][0]["pose"])
-    for vehicle, fixed in zip(out["vehicles"], poses):
-        along = (fixed[0] - poses[0][0]) * axis_e + (fixed[1] - poses[0][1]) * axis_n
-        stage = fixed.copy()
-        stage[0] = anchor[0] + along * axis_e
-        stage[1] = anchor[1] + along * axis_n
-        vehicle["staging_pose"] = ",".join(f"{value:.6f}" for value in stage)
+        vehicle["staging_pose"] = ",".join(f"{value:.6f}" for value in fixed)
+        for _ in range(attempts):
+            distance = radius * math.sqrt(rng.random())
+            angle = rng.uniform(-math.pi, math.pi)
+            east = fixed[0] + distance * math.cos(angle)
+            north = fixed[1] + distance * math.sin(angle)
+            if any(
+                math.hypot(east - peer_e, north - peer_n) < separation
+                for peer_e, peer_n in accepted
+            ):
+                continue
+            accepted.append((east, north))
+            pose[0], pose[1] = east, north
+            vehicle["pose"] = ",".join(f"{value:.6f}" for value in pose)
+            break
+        else:
+            raise RuntimeError(
+                f"could not place rough-line vehicle {index} after {attempts} attempts; "
+                "relax rough_line_spawn constraints"
+            )
 
     out["_rough_line_spawn"] = {"enabled": True, "seed": int(seed)}
     return out

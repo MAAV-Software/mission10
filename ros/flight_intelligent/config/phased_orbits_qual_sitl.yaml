@@ -1,0 +1,66 @@
+# Four-drone Mission 10 qualification profile for SITL.
+#
+# The aircraft spawn on the designated line. Each launch/hover point is also
+# that aircraft's circle center, so the generic center transit is a no-op. The
+# second gate starts the validated spiral insertion directly from the line.
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 10
+    wait_for_start: true
+    force_arm: true
+    takeoff_altitude_m: 6.0
+    takeoff_acceptance_m: 0.5
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+
+    drone_count: 4
+    orbit_center_e_m: 0.0
+    orbit_center_n_m: 0.0
+    orbit_radius_m: 4.6
+    orbit_speed_mps: 1.0
+    phase_step_deg: 90.0
+    phase0_deg: -180.0
+    # Optimized constant phases: about 3.83 m ideal steady-orbit floor at
+    # 4.6 m radius and 3 m center spacing.
+    orbit_phase_deg: [107.0, 11.21, 134.34, 38.55]
+    orbit_mod_amp: [0.0, 0.0, 0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0, 0.0, 0.0]
+
+    insertion_spin_deg: 235.0
+    to_center_time_s: 0.0
+    staging_enabled: false
+    staging_speed_mps: 2.0
+    staging_acceptance_m: 0.35
+    spiral_time_s: 10.0
+
+    # At 1 m/s, this seam/order/curl keeps the nominal peel floor at 3 m.
+    # The older 2 m/s timing falls below 2 m when reused at half speed.
+    peel_lead_in_s: 11.0
+    peel_stagger_s: 3.0
+    peel_duration_s: 8.0
+    peel_spin_deg: 45.0
+    peel_order: "1,2,3,0"
+
+    orbit_auto_start: false
+    yaw_mode: tangent
+    excite_enabled: false
+
+    orca_protected_radius_m: 1.25
+    orca_response_time_s: 0.6
+    orca_horizon_s: 5.0
+    orca_max_speed_mps: 3.0
+    phase_guard_enabled: true
+    phase_protected_separation_m: 3.0
+    phase_barrier_gamma: 1.0
+    phase_tracking_gain: 0.8
+    phase_error_deadband_deg: 3.0
+    phase_min_rate_scale: 0.4
+    phase_max_rate_scale: 1.5
+
+    # Gazebo already supplies GNSS. Re-sending SET_GPS_GLOBAL_ORIGIN after link
+    # can force large, repeated local-frame resets and destroy the choreography.
+    set_global_origin_on_link: false
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
+    origin_alt: 0.0

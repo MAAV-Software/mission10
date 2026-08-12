@@ -16,12 +16,29 @@ def _flat2(matrix):
     return [float(value) for value in np.asarray(matrix, float).reshape(-1)]
 
 
+def _peer_id_map(namespaces, configured_ids):
+    namespaces = [value for value in namespaces if value]
+    configured_ids = [int(value) for value in configured_ids]
+    if configured_ids == [-1]:
+        ids = [int(namespace.rsplit("_", 1)[-1]) for namespace in namespaces]
+    else:
+        if len(configured_ids) != len(namespaces):
+            raise ValueError("peer_ids must match peer_namespaces")
+        ids = configured_ids
+    if any(peer_id < 0 for peer_id in ids) or len(ids) != len(set(ids)):
+        raise ValueError("peer_ids must be unique nonnegative integers")
+    return dict(zip(ids, namespaces))
+
+
 class RelativeLocalization(Node):
     def __init__(self):
         super().__init__("relative_localization")
         self.declare_parameter("vehicle_namespace", "px4_0")
         self.declare_parameter("drone_index", 0)
         self.declare_parameter("peer_namespaces", ["px4_1"])
+        # Explicit IDs decouple temporary UWB/formation identity from hostname
+        # digits. [-1] retains namespace-suffix inference for existing launchers.
+        self.declare_parameter("peer_ids", [-1])
         self.declare_parameter("position_noise_std_m", 0.6)
         self.declare_parameter("range_noise_std_m", 0.1)
         self.declare_parameter("velocity_noise_std_mps", 0.3)
@@ -31,10 +48,8 @@ class RelativeLocalization(Node):
         self.peer_namespaces = [
             value for value in self.get_parameter("peer_namespaces").value if value
         ]
-        self.peer_ids = {
-            int(namespace.rsplit("_", 1)[-1]): namespace
-            for namespace in self.peer_namespaces
-        }
+        self.peer_ids = _peer_id_map(
+            self.peer_namespaces, self.get_parameter("peer_ids").value)
         self.states: dict[int, UwbState] = {}
         self.estimators = {
             peer_id: FusedRelativeTracker(

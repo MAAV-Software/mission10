@@ -1,0 +1,74 @@
+# Drone3 + drone1 real-airframe rehearsal of the qualification choreography.
+# Place drone3 north of drone1. Both aircraft face north. Drone3 holds while
+# drone1 uses UWB range to trim the adjacent gap to 3 m, then each aircraft
+# treats its corrected hover point as its own 4.6 m-radius orbit center.
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20
+    wait_for_start: true
+    force_arm: false
+    takeoff_altitude_m: 6.0
+    takeoff_acceptance_m: 0.5
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    launch_stability_s: 3.0
+
+    drone_count: 2
+    orbit_center_e_m: 0.0
+    orbit_center_n_m: 0.0
+    orbit_radius_m: 4.6
+    orbit_speed_mps: 1.0
+    # Opposed phases keep both the steady orbit and a +/-20 deg crooked-row
+    # insertion comfortably separated. The four-aircraft phase subset dipped
+    # below 2 m when the launch row retained 0.57 m cross-track error.
+    orbit_phase_deg: [-90.0, 90.0]
+    phase_step_deg: 90.0
+    phase0_deg: -180.0
+    orbit_mod_amp: [0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0]
+
+    insertion_spin_deg: 235.0
+    spiral_time_s: 10.0
+    to_center_time_s: 0.0
+    orbit_auto_start: false
+    yaw_mode: hold
+    excite_enabled: false
+
+    staging_enabled: true
+    line_trim_enabled: true
+    line_spacing_m: 3.0
+    line_trim_speed_mps: 0.5
+    line_trim_tolerance_m: 0.20
+    line_trim_settle_s: 1.0
+    # Formation order is north to south: drone1 moves on the south axis.
+    line_direction_e_m: 0.0
+    line_direction_n_m: -1.0
+
+    # Duo-specific seam: three seconds of lead, then drone1 peels before
+    # drone3. This retains a 3 m analytic floor through +/-20 deg row tilt.
+    peel_lead_in_s: 3.0
+    peel_stagger_s: 3.0
+    peel_duration_s: 8.0
+    peel_spin_deg: 45.0
+    peel_order: "1,0"
+
+    land_xy_acceptance_m: 0.35
+    land_vxy_acceptance_mps: 0.20
+    land_settle_time_s: 1.0
+
+    orca_protected_radius_m: 1.25
+    orca_response_time_s: 0.6
+    orca_horizon_s: 5.0
+    orca_max_speed_mps: 3.0
+    phase_guard_enabled: true
+    phase_protected_separation_m: 3.0
+    phase_barrier_gamma: 1.0
+    phase_tracking_gain: 0.8
+    phase_error_deadband_deg: 3.0
+    phase_min_rate_scale: 0.4
+    phase_max_rate_scale: 1.5
+    peer_state_timeout_s: 0.5
+
+    set_global_origin_on_link: false
+    anchor_frame_after_climb: true

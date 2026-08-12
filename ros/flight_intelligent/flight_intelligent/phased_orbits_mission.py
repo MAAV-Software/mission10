@@ -757,7 +757,7 @@ class PhasedOrbitsMission(OffboardController):
     def on_link_acquired(self):
         if not self.set_origin_on_link:
             self.get_logger().info(
-                "set_global_origin_on_link=false; relying on GPS for the EKF origin")
+                "set_global_origin_on_link=false; leaving the EKF origin unchanged")
             return
         lat, lon, alt = self.origin
         self.set_global_origin(lat, lon, alt)

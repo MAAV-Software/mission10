@@ -16,7 +16,7 @@
 #   scripts/sitl.sh up-random [seed] [mission_config.yaml]
 #                                               # seeded random M-Air spawns
 #   scripts/sitl.sh up-line [seed] [mission_config.yaml]
-#                                               # ordered, uneven ground line
+#                                               # seeded 2-D coarse ground line
 #   scripts/sitl.sh ready                       # one-shot readiness snapshot
 #   scripts/sitl.sh takeoff                     # fire /start_mission
 #   scripts/sitl.sh orbit                       # fire /begin_orbit

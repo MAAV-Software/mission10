@@ -1,0 +1,25 @@
+# SITL-only counterpart of fleet_qual_duo_drone3_drone1.yaml.
+world: mair
+model: x500
+autostart: 4023
+agent_port: 8888
+home_gps:
+  lat: 42.294438798326105
+  lon: -83.7104553367608
+  alt_m: 0.0
+rough_line_spawn:
+  seed: 0
+  placement_radius_m: 0.75
+  min_separation_m: 2.0
+  max_attempts_per_vehicle: 10000
+vehicles:
+  # SITL namespace suffixes are also simulated UWB IDs. px4_0 represents the
+  # real drone3 after its radio/gateway is remapped to formation ID 0.
+  - hostname: drone3-as-id0
+    namespace: px4_0
+    fleet_ip: 10.77.0.13
+    pose: "0.0,1.5,0,0,0,0"
+  - hostname: drone1
+    namespace: px4_1
+    fleet_ip: 10.77.0.11
+    pose: "0.0,-1.5,0,0,0,0"

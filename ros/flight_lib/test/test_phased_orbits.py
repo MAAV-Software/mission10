@@ -169,6 +169,103 @@ def test_peeloff_separation_beats_retrace():
     assert worst > 2.8  # ~3.0 m, vs 2.09 m for the reverse retrace
 
 
+def test_qualification_one_mps_peel_keeps_three_metres():
+    """Lock the qualification profile's world-frame peel separation budget."""
+    omega = 1.0 / R
+    phases = np.deg2rad([107.0, 11.21, 134.34, 38.55])
+    order = [1, 2, 3, 0]
+    peel = dict(
+        peel_order=order,
+        lead_in=11.0,
+        stagger=3.0,
+        peel_duration=8.0,
+        spin=np.deg2rad(45.0),
+    )
+    total = po.peeloff_duration(
+        N,
+        lead_in=peel["lead_in"],
+        stagger=peel["stagger"],
+        peel_duration=peel["peel_duration"],
+    )
+
+    worst = np.inf
+    for t in np.linspace(0.0, total, 28_001):
+        positions = []
+        for i in range(N):
+            # Each mission node produces a path relative to its own takeoff
+            # point. The SITL aircraft take off on a north-south 3 m line.
+            pos, _ = po.phased_orbit_peeloff(
+                t,
+                i,
+                N,
+                R,
+                omega,
+                spacing=0.0,
+                downrange=0.0,
+                phases=phases,
+                **peel,
+            )
+            pos[:2] += [0.0, -SPACING * i]
+            positions.append(pos)
+        worst = min(worst, po.min_pairwise_separation(np.array(positions)))
+
+    assert worst == pytest.approx(3.0, abs=2e-3)
+
+
+def test_qualification_duo_transitions_keep_two_metres():
+    """Lock tonight's drone3/drone1 zero-center transition geometry."""
+    n = 2
+    omega = 1.0 / R
+    phases = np.deg2rad([-90.0, 90.0])
+
+    insertion_worst = np.inf
+    line_angles = np.deg2rad(np.linspace(-110.0, -70.0, 9))
+    for line_angle in line_angles:
+        physical_offsets = np.array([
+            [0.0, 0.0, 0.0],
+            [SPACING * np.cos(line_angle), SPACING * np.sin(line_angle), 0.0],
+        ])
+        for s in np.linspace(0.0, 1.0, 2_001):
+            positions = np.array([
+                po.phased_orbit_insertion(
+                    s, i, n, R, spin=np.deg2rad(235.0), spacing=0.0,
+                    downrange=0.0, phases=phases,
+                )[0]
+                for i in range(n)
+            ]) + physical_offsets
+            insertion_worst = min(
+                insertion_worst, po.min_pairwise_separation(positions))
+
+    peel = dict(
+        peel_order=[1, 0], lead_in=3.0, stagger=3.0,
+        peel_duration=8.0, spin=np.deg2rad(45.0),
+    )
+    total = po.peeloff_duration(
+        n, lead_in=peel["lead_in"], stagger=peel["stagger"],
+        peel_duration=peel["peel_duration"],
+    )
+    peel_worst = np.inf
+    for line_angle in line_angles:
+        physical_offsets = np.array([
+            [0.0, 0.0, 0.0],
+            [SPACING * np.cos(line_angle), SPACING * np.sin(line_angle), 0.0],
+        ])
+        for t in np.linspace(0.0, total, 4_001):
+            positions = np.array([
+                po.phased_orbit_peeloff(
+                    t, i, n, R, omega, spacing=0.0, downrange=0.0,
+                    phases=phases, **peel,
+                )[0]
+                for i in range(n)
+            ]) + physical_offsets
+            peel_worst = min(peel_worst, po.min_pairwise_separation(positions))
+
+    assert insertion_worst == pytest.approx(3.0, abs=2e-3)
+    assert peel_worst == pytest.approx(3.0, abs=2e-3)
+    assert po.schedule_min_separation(
+        n, R, spacing=SPACING, phases=phases) == pytest.approx(6.2, abs=1e-3)
+
+
 def test_in_phase_lockstep_is_safe():
     assert po.schedule_min_separation(N, R, spacing=SPACING, phase_step=0.0) == pytest.approx(SPACING)
     for i in range(N):

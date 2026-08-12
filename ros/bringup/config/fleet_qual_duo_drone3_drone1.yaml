@@ -1,0 +1,17 @@
+# Real two-aircraft qualification-development fleet.
+#
+# Fleet order is also the mission/UWB identity for tonight:
+#   drone3 -> formation and UWB ID 0 (north anchor)
+#   drone1 -> formation and UWB ID 1 (south follower)
+# Drone3's radio/gateway must therefore be provisioned as address/vehicle 0.
+# No global coordinates belong in this real-flight file. The mission is
+# entirely launch-relative and does not set or inspect an EKF global origin.
+vehicles:
+  - hostname: drone3
+    namespace: px4_3
+    fleet_ip: 10.77.0.13
+    pose: "0.0,1.5,0,0,0,0"
+  - hostname: drone1
+    namespace: px4_1
+    fleet_ip: 10.77.0.11
+    pose: "0.0,-1.5,0,0,0,0"

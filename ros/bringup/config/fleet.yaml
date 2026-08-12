@@ -22,15 +22,14 @@ random_spawn:
   # world_truth_to_odom currently rejects unnamed transforms near the origin.
   origin_clearance_m: 1.0
   max_attempts_per_vehicle: 10000
-# Qualification development mode: preserve the ground-line order but perturb
-# each vehicle along that line. The mission removes this spacing error from UWB
-# range after takeoff, one follower at a time.
+# Qualification development mode: independently perturb each vehicle within a
+# disk around its intended ground-line slot. The mission removes adjacent-range
+# error after takeoff, one follower at a time; the cross-line error remains.
 rough_line_spawn:
   seed: 0
-  # Ground placement need not be measured, but keep enough rotor/prop-wash
-  # clearance that every follower only moves toward its predecessor.
-  min_gap_m: 3.4
-  max_gap_m: 5.0
+  placement_radius_m: 0.75
+  min_separation_m: 2.0
+  max_attempts_per_vehicle: 10000
 vehicles:
   # The cage is 24.384 m east-west by 36.576 m north-south, so the 3 m hover
   # line follows its long axis and is centered north-south. The clockwise
