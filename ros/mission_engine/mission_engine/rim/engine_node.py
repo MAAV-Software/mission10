@@ -52,7 +52,6 @@ from mission_engine.core.anchor import (
 )
 from mission_engine.core.config import CameraModel
 from mission_engine.core.dumpproto import build_payload, encode_frame
-from mission_engine.core.geometry import point_in_polygon
 from mission_engine.core.ingest import PoseHistory, PoseSnapshot, make_observation
 from mission_engine.core.mission import (
     ABORT,
@@ -463,8 +462,6 @@ class EngineNode(OffboardController):
         self._anchor_ne = (float(self.x), float(self.y))
         try:
             cfg = self._mission_config()
-            if cfg.fence_polygon_ne and not point_in_polygon(self._anchor_ne, cfg.fence_polygon_ne):
-                raise ValueError("launch anchor is outside field_polygon_gps")
             self.engine = MissionEngine(cfg, initial_yaw=self._launch_yaw)
         except ValueError as exc:
             self.get_logger().error(f"begin_survey refused: {exc}")

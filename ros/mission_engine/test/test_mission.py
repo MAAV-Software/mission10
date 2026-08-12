@@ -14,6 +14,8 @@ from mission_engine.core.mission import (
     ABORT,
     DONE,
     DUMP,
+    EGRESS,
+    LANE,
     MissionConfig,
     MissionEngine,
 )
@@ -177,12 +179,30 @@ class TestEnvelope(unittest.TestCase):
         polygon = ((-1.0, -1.0), (20.0, 4.0), (18.0, 14.0), (-3.0, 9.0))
         cfg = replace(CFG, fence_polygon_ne=polygon, fence_radius_m=0.0)
         eng = MissionEngine(cfg)
-        eng.start()
-        eng.tick(0.0, (0.0, 0.0, 0.0))
-        eng.tick(2.0, (0.0, 0.0, 0.0))
+        eng.phase = LANE
+        eng._estimate_fence_violation(0.0, 0.0)
         eng.tick(3.0, (100.0, 100.0, -6.0))
         self.assertEqual(eng.phase, ABORT)
         self.assertIn("field polygon", eng.abort_reason)
+
+    def test_polygon_allows_approach_from_launch_line_then_arms(self):
+        polygon = ((10.0, -5.0), (30.0, -5.0), (30.0, 5.0), (10.0, 5.0))
+        cfg = replace(CFG, fence_polygon_ne=polygon, max_dips=0)
+        eng = MissionEngine(cfg)
+        eng.phase = LANE
+        self.assertIsNone(eng._estimate_fence_violation(0.0, 0.0))
+        self.assertFalse(eng._polygon_fence_engaged)
+        self.assertIsNone(eng._estimate_fence_violation(15.0, 0.0))
+        self.assertTrue(eng._polygon_fence_engaged)
+        self.assertIn("field polygon", eng._estimate_fence_violation(0.0, 0.0))
+
+    def test_polygon_releases_for_egress_home(self):
+        polygon = ((10.0, -5.0), (30.0, -5.0), (30.0, 5.0), (10.0, 5.0))
+        eng = MissionEngine(replace(CFG, fence_polygon_ne=polygon))
+        eng.phase = LANE
+        eng._estimate_fence_violation(15.0, 0.0)
+        eng.phase = EGRESS
+        self.assertIsNone(eng._estimate_fence_violation(0.0, 0.0))
 
 
 class TestPolygonGeometry(unittest.TestCase):

@@ -1,6 +1,7 @@
 # Huntsville competition survey. This profile deliberately refuses
 # /begin_survey until field_polygon_gps contains four surveyed WGS84 corners
-# and PX4 reports a valid global position.
+# and PX4 reports a valid global position. Launch may be behind the field; the
+# polygon fence arms when the aircraft enters and releases for return home.
 /**:
   ros__parameters:
     wait_for_start: true

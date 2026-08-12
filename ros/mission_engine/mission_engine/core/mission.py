@@ -164,6 +164,9 @@ class MissionEngine:
         self._settle_t0: Optional[float] = None
         self._settle_next_phase = DUMP
         self._settle_requires_survey_ready = False
+        # A launch line may sit behind the field. The polygon fence arms on
+        # first entry and is released when survey phases end for the trip home.
+        self._polygon_fence_engaged = False
 
     # ------------------------------------------------------------ inputs
 
@@ -246,9 +249,21 @@ class MissionEngine:
             elapsed = t - self.t_takeoff
             if elapsed > self.cfg.mission_timeout_s:
                 self._abort(f"mission timeout at {elapsed:.0f} s")
-        violation = self._fence_violation(pos[0], pos[1])
+        violation = self._estimate_fence_violation(pos[0], pos[1])
         if violation is not None:
             self._abort(f"estimate {violation}")
+
+    def _estimate_fence_violation(self, n: float, e: float) -> Optional[str]:
+        if self.fence_polygon:
+            if self.phase not in (LANE, VERIFY_DIP):
+                return None
+            inside = point_in_polygon((n, e), self.fence_polygon)
+            if inside:
+                self._polygon_fence_engaged = True
+                return None
+            if not self._polygon_fence_engaged:
+                return None
+        return self._fence_violation(n, e)
 
     def _fence_radius(self, n: float, e: float) -> Optional[float]:
         """Distance beyond the fence, or None while inside it."""
@@ -291,7 +306,12 @@ class MissionEngine:
         survey_ready: bool = True,
     ) -> Optional[Setpoint]:
         sp = self._tick(t, pos, vel, horizontal_valid, survey_ready)
-        if sp is not None and self.phase in (TAKEOFF, LANE, VERIFY_DIP):
+        command_fence_active = (
+            self.phase in (LANE, VERIFY_DIP)
+            if self.fence_polygon
+            else self.phase in (TAKEOFF, LANE, VERIFY_DIP)
+        )
+        if sp is not None and command_fence_active:
             violation = self._fence_violation(sp.pos[0], sp.pos[1])
             if violation is not None:
                 self._abort(f"command {violation}")
