@@ -39,7 +39,7 @@ vehicles:
   # offset also leaves about 2.0 m from the orbit centerline to the east net.
   # Namespace order runs north-to-south because this is a rigid clockwise
   # rotation of the original choreography; its validated separation is unchanged.
-  - {hostname: drone0, namespace: px4_0, fleet_ip: 10.77.0.1, pose: "1.0,4.5,0,0,0,0"}
+  - {hostname: drone0, namespace: px4_0, fleet_ip: 10.77.0.10, pose: "1.0,4.5,0,0,0,0"}
   - {hostname: drone1, namespace: px4_1, fleet_ip: 10.77.0.11, pose: "1.0,1.5,0,0,0,0"}
   - {hostname: drone2, namespace: px4_2, fleet_ip: 10.77.0.12, pose: "1.0,-1.5,0,0,0,0"}
   - {hostname: drone3, namespace: px4_3, fleet_ip: 10.77.0.13, pose: "1.0,-4.5,0,0,0,0"}
