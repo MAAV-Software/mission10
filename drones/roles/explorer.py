@@ -20,7 +20,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from drones.roles.MissionNode import MissionNode
-from ros.sensing.sensing.mine_detector import get_hailo_bounding_boxes
+from ros.sensing.sensing.mine_detector import get_mine_bounding_boxes
 
 bounds_path = Path(__file__).parent.parent.parent / "constants/bounding_boxes.txt"
 aggregate_path = Path(__file__).parent.parent / "all_results.csv"
@@ -134,7 +134,12 @@ class ExploreDrone:
                 print("Waiting for mission to start")
                 self.coords_cv.wait()
 
-        get_hailo_bounding_boxes(self.timestamp_bounding_boxes, self.coords_lock, self.stop_event, self.mission_node)
+        get_mine_bounding_boxes(
+            self.timestamp_bounding_boxes,
+            self.coords_lock,
+            self.stop_event,
+            self.mission_node,
+        )
 
     def backup_camera_func(self):
 

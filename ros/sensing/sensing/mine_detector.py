@@ -1,4 +1,4 @@
-"""Hailo mine detection as an external CM2 pool consumer.
+"""Mine detection as an external CM2 pool consumer.
 
 This module is the rendezvous point between mission sensing and the mission
 runner's mine bookkeeping.  The sensing process owns the camera; this consumer
@@ -20,6 +20,8 @@ Two inference backends share one output convention, a list of
 
 - ``HailoYoloBackend``: the flight path.  Runs the compiled single-class
   YOLOv11m HEF on the Hailo-8 through HailoRT; NMS is embedded in the HEF.
+- ``NcnnYoloBackend``: the CPU path for an aircraft without a Hailo. Runs the
+  single-class YOLO26n INT8 model with host-side NMS.
 - ``OnnxYoloBackend``: bench fallback for machines without a Hailo.  Decodes
   the raw Ultralytics ONNX head and applies NMS here.
 
@@ -53,6 +55,11 @@ DEFAULT_HEF = (
     Path(__file__).resolve().parents[3]
     / "models/yolo/assets/yolov11m-probably.hef"
 )
+DEFAULT_NCNN_MODEL = Path(
+    "/home/maav/yolo26n-mine-pilot-aciq-int8_ncnn_model"
+)
+NCNN_CONFIDENCE = 0.88
+NCNN_NMS_IOU = 0.7
 
 
 def tile_origins(width: int, height: int, tile: int = TILE) -> list[tuple[int, int]]:
@@ -204,6 +211,63 @@ class HailoYoloBackend:
         self.vdevice.release()
 
 
+class NcnnYoloBackend:
+    """Single-class YOLO26n INT8 raw head through NCNN on one CPU thread."""
+
+    def __init__(
+        self,
+        model_dir=DEFAULT_NCNN_MODEL,
+        confidence: float = NCNN_CONFIDENCE,
+    ) -> None:
+        import ncnn
+
+        model_dir = Path(model_dir)
+        self.confidence = confidence
+        self.net = ncnn.Net()
+        self.net.opt.num_threads = 1
+        if self.net.load_param(str(model_dir / "model.ncnn.param")) != 0:
+            raise RuntimeError(f"cannot load NCNN parameters from {model_dir}")
+        if self.net.load_model(str(model_dir / "model.ncnn.bin")) != 0:
+            raise RuntimeError(f"cannot load NCNN weights from {model_dir}")
+
+    def infer(
+        self, tile_rgb: np.ndarray
+    ) -> list[tuple[float, float, float, float, float]]:
+        import ncnn
+
+        image = np.ascontiguousarray(
+            np.transpose(tile_rgb.astype(np.float32) / 255.0, (2, 0, 1))
+        )
+        extractor = self.net.create_extractor()
+        if extractor.input("in0", ncnn.Mat(image).clone()) != 0:
+            raise RuntimeError("NCNN rejected mine detector input")
+        status, output = extractor.extract("out0")
+        if status != 0:
+            raise RuntimeError(f"NCNN mine inference failed: {status}")
+        predictions = np.asarray(output)
+        if predictions.shape != (5, 8400):
+            raise RuntimeError(
+                f"unexpected NCNN mine output shape: {predictions.shape}"
+            )
+
+        boxes = []
+        for index in np.flatnonzero(predictions[4] >= self.confidence):
+            center_x, center_y, width, height, score = predictions[:, index]
+            x0 = max(0.0, float(center_x - width / 2))
+            y0 = max(0.0, float(center_y - height / 2))
+            x1 = min(float(TILE), float(center_x + width / 2))
+            y1 = min(float(TILE), float(center_y + height / 2))
+            boxes.append((x0, y0, x1 - x0, y1 - y0, float(score)))
+        return dedup_boxes(boxes, NCNN_NMS_IOU)
+
+
+def mine_backend():
+    """Select the accelerator when present and otherwise use the CPU model."""
+    if Path("/dev/hailo0").exists():
+        return HailoYoloBackend()
+    return NcnnYoloBackend()
+
+
 def detect_frame(
     backend,
     frame_rgb: np.ndarray,
@@ -312,6 +376,19 @@ def run_mine_detection(
         pool.close()
 
 
-def get_hailo_bounding_boxes(results: queue.Queue, timestamp_lock: threading.Lock, stop_event: threading.Event, mission_node, **kwargs) -> None:
+def get_mine_bounding_boxes(
+    results: queue.Queue,
+    timestamp_lock: threading.Lock,
+    stop_event: threading.Event,
+    mission_node,
+    **kwargs,
+) -> None:
     """Mission-runner entry point; blocks, so run it in a dedicated thread."""
-    run_mine_detection(results, timestamp_lock, HailoYoloBackend(), mission_node, stop=stop_event, **kwargs)
+    run_mine_detection(
+        results,
+        timestamp_lock,
+        mine_backend(),
+        mission_node,
+        stop=stop_event,
+        **kwargs,
+    )

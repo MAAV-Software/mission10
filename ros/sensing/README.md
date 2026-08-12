@@ -49,17 +49,16 @@ full-workspace build on an aircraft.
 
 `sensing/mine_detector.py` runs mine detection in the mission process, not in
 sensing. It attaches to the `cm2` pool read-only, copies the freshest frame as
-soon as the previous pass finishes (about 7-8 frames each second; set
-`period_s` for a slower fixed cadence), divides the frame into six overlapping
-640 px tiles, runs the single-class YOLOv11 detector on each tile, and removes
-duplicate boxes in overlap areas. The Hailo device and the HEF stay open from
-thread start to mission end.
+soon as the previous pass finishes, divides the frame into six overlapping
+640 px tiles, and removes duplicate boxes in overlap areas. It uses the
+YOLOv11m Hailo backend when `/dev/hailo0` exists. An aircraft without that
+device uses the one-thread YOLO26n INT8 NCNN backend.
 Each detected box goes onto a caller-owned queue as one item:
 
 ```python
 results = queue.Queue(maxsize=64)
 threading.Thread(
-    target=get_hailo_bounding_boxes, args=(results,), daemon=True
+    target=get_mine_bounding_boxes, args=(results,), daemon=True
 ).start()
 ```
 
@@ -67,11 +66,10 @@ Items are `(realtime_ns, x, y, w, h)` in full-frame pixels, with `(x, y)` at
 the top-left corner. `realtime_ns` is the frame's realtime stamp, shared by
 every box from that frame. A frame with no detections queues nothing. When a
 bounded queue is full, the detector removes the oldest item and continues.
-The flight backend is the compiled HEF
-through HailoRT
-(`MAAV_MINE_HEF` overrides the path). `OnnxYoloBackend` is the bench fallback
-for hosts without a Hailo. Camera loss does not stop the loop: it waits and
-reattaches when sensing returns.
+The Hailo backend uses the compiled HEF through HailoRT. The CPU backend uses
+`/home/maav/yolo26n-mine-pilot-aciq-int8_ncnn_model` with NCNN
+`1.0.20260526`, one thread, and confidence threshold 0.88. Camera loss does
+not stop the loop: it waits and reattaches when sensing returns.
 
 Run the process-boundary integration check after changing the pool or leases:
 
