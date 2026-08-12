@@ -1,0 +1,15 @@
+# Two-drone SITL rehearsal of the 2026-08-10 duo UWB circle flight card.
+# Pads 3 m apart on the north-south line, straddling the cage center, so the
+# shared 4 m circle stays clear of the M-Air net on every side.
+world: mair
+model: x500
+autostart: 4023
+agent_port: 8888
+home_gps:
+  lat: 42.294438798326105
+  lon: -83.7104553367608
+  alt_m: 0.0
+vehicles:
+  # Gazebo pose is east, north, up, roll, pitch, yaw.
+  - {hostname: drone0, namespace: px4_0, fleet_ip: 10.77.0.10, pose: "0.0,-1.5,0,0,0,-1.570796327"}
+  - {hostname: drone4, namespace: px4_1, fleet_ip: 10.77.0.11, pose: "0.0,1.5,0,0,0,-1.570796327"}

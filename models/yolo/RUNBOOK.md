@@ -632,6 +632,64 @@ Roboflow Workflow deployment has several non-obvious details:
   Point its verified TLS context to `/etc/ssl/certs/ca-certificates.crt` or use
   a client with its own current CA bundle. Never disable TLS verification.
 
+The current `inference-sdk` imports desktop OpenCV even though Workflow upload
+does not use it. A plain ephemeral `uv` environment on Nix can therefore fail
+on `libGL.so.1`, `libgthread-2.0.so.0`, `libstdc++.so.6`, or `libz.so.1`. Run
+the client from the repository-provided shell. From the `mission10` root, use
+`nix develop .#qwen -c uv run --with inference-sdk --with python-dotenv
+--with pillow python ...`. The shell supplies FFmpeg, libGL, GLib, the C++
+runtime, and zlib. Do not install those libraries one error at a time on a
+competition machine.
+
+The SDK returns Workflow outputs as a list. Older local audit wrappers stored a
+dictionary with an `outputs` member. Parsers must accept both shapes. Pass
+`excluded_fields=["label_visualization"]`; otherwise each JSON response can
+contain a full base64 JPEG even when only boxes are needed.
+
+Checkpoint each hosted response before the batch waits for other futures. A
+96-frame CM2 review completed 95 responses before one Roboflow request reached
+Cloudflare's 100-second origin limit and returned HTTP 524. The resumable batch
+then retried only the missing frame. The successful request latency was
+11.9--118.0 seconds, with a 33.7-second median.
+
+### 2026-08-09 four-bag CM2 preparation
+
+`tools/prepare_cm2_bag.py` binds every native 1640x1232 CM2 frame to dToF,
+local position, attitude, status, estimator flags, and optical-flow aid data.
+It hashes the raw MCAP and exports an indexed AV1 CRF 12 review video. Keep the
+CSV frame index and camera header timestamp together; the exact certification
+extractor verifies both before it writes a lossless PNG.
+
+The petal-qualification bag has one 4.598-second CM2 gap during landing. Frame
+1310 is at 1.88 m in nav state 14, and frame 1311 is at 0.79 m in nav state 18.
+PX4 state and range data continue across the gap. Treat it as a capture-stream
+fault and do not interpolate detector frames across it.
+
+FFmpeg 4.4 requires `-vsync 0` for the indexed decode used by the candidate
+runner. Verify the decoded count against the preparation manifest. Do not
+accept a candidate report whose frame count differs from the source manifest.
+
+The three development bags locked the appearance-fold1 checkpoint at 0.80.
+On the 29 certified competition-altitude frames, it records TP=9, FP=2, and
+FN=0. Threshold 0.85 records TP=7, FP=0, and FN=2; keep the 0.05 confidence
+margin. The labels, hashes, and decision are in
+`development-certification-v1/operating-point-v1.json`.
+
+Only after that lock, run the 855-frame survey bag. At 0.80, appearance emits
+157 detections in 151 of 474 operational frames and forms six two-or-more-frame
+tracks. Visual review identifies five unambiguous mine track records and one
+low-contrast plausible record. Production300 adds a definite two-frame grass
+track during ascent. Use appearance at 0.80 and require temporal plus projected
+ground-position association. The survey is a trajectory holdout from the same
+day and layout; it is not an independent site-domain test.
+
+Use `tools/render_cm2_candidate_video.py` to make shareable inspection videos
+from the retained candidate reports. It does not rerun YOLO. The renderer uses
+two-pass `libvpx-vp9`, writes the `vp09` MP4 tag and fast-start metadata, and
+checks the decoded output frame count. For a 20 MB delivery limit, target 18 MB
+and set the hard maximum to 20 MB so that container overhead cannot cross the
+limit.
+
 When inference sources are passed as an explicit Python list, Ultralytics
 8.4.115 can combine the entire list into one tensor even when `batch` is set.
 Production300's 1,196-image validation list then requested 29.2 GiB on a 20 GB

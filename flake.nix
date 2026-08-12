@@ -61,6 +61,25 @@
             ];
           };
         } // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # Hosted VLM review. inference-sdk imports the desktop OpenCV wheel,
+          # so its dynamic loader needs these libraries even for HTTP-only use.
+          qwen = pkgs.mkShell {
+            name = "mission10-qwen";
+            packages = [
+              pkgs.ffmpeg
+              pkgs.python3
+              pkgs.uv
+            ];
+            shellHook = ''
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
+                pkgs.glib
+                pkgs.libglvnd
+                pkgs.stdenv.cc.cc.lib
+                pkgs.zlib
+              ]}''${LD_LIBRARY_PATH:+:}''${LD_LIBRARY_PATH:-}"
+            '';
+          };
+
           # ROS rim + sim development (Linux only since ros.cachix.org)
           #
           # nix provides the ENVIRONMENT; colcon builds at the repo root,

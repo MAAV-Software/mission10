@@ -18,11 +18,11 @@ class GroundTruthToEv(Node):
         self.declare_parameter("publish", True)
         self.declare_parameter("position_variance", 0.05)
         self.declare_parameter("orientation_variance", 0.02)
-        # Fault injection: step the EV frame at runtime (`ros2 param set ... fault_offset_n 5.0`)
-        # to emulate a GPS-multipath frame jump. The step is silent (reset_counter
-        # untouched): announced resets get absorbed by EKF2's EV frame-offset handling,
-        # while an unannounced step fails the innovation gates until EKF2 hard-resets
-        # position onto the biased measurement — the real multipath signature.
+        # Fault injection: step the EV frame at runtime
+        # (`ros2 param set ... fault_offset_n 5.0`). The step is silent
+        # (reset_counter untouched): announced resets get absorbed by EKF2's EV
+        # frame-offset handling, while an unannounced step fails the innovation
+        # gates until EKF2 hard-resets position onto the biased measurement.
         self.declare_parameter("fault_offset_n", 0.0)
         self.declare_parameter("fault_offset_e", 0.0)
         # VIO emulation: degrade truth the way a visual estimator degrades.

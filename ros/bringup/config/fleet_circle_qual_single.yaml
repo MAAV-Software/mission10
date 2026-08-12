@@ -1,0 +1,14 @@
+# Single Drone4-style SITL vehicle for the qualification-circle rehearsal.
+world: mair
+model: x500
+autostart: 4023
+agent_port: 8888
+home_gps:
+  lat: 42.294438798326105
+  lon: -83.7104553367608
+  alt_m: 0.0
+vehicles:
+  # Put the launch on the cage north axis. The mission shifts its circle center
+  # another 1.5 m north to rehearse the second-northernmost formation slot.
+  # Gazebo pose is east, north, up, roll, pitch, yaw.
+  - {hostname: drone0, namespace: px4_0, fleet_ip: 10.77.0.10, pose: "0.0,4.5,0,0,0,-1.570796327"}

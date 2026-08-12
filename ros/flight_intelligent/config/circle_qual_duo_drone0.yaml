@@ -1,0 +1,52 @@
+# Drone0 half of the two-drone UWB qualification circle.
+# Launch pad: 1.5 m south of the shared circle center. Drone0 takes the
+# south point of the circle (phase -90); drone4 takes the north point.
+/**:
+  ros__parameters:
+    vehicle_namespace: px4_0
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20
+    wait_for_start: true
+    force_arm: false
+    takeoff_altitude_m: 4.0
+    takeoff_acceptance_m: 0.25
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    launch_stability_s: 3.0
+
+    # drone_index doubles as the UWB vehicle_id in published UwbState;
+    # it must equal the DW1000 air address (drone0 = 0).
+    drone_index: 0
+    drone_count: 2
+    peer_namespaces: [""]
+    staging_enabled: false
+    line_trim_enabled: false
+    phase_guard_enabled: false
+
+    orbit_center_e_m: 0.0
+    orbit_center_n_m: 1.5
+    orbit_radius_m: 4.0
+    orbit_speed_mps: 1.0
+    phase_step_deg: 0.0
+    phase0_deg: -90.0
+    orbit_mod_amp: [0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0]
+    insertion_spin_deg: 235.0
+    spiral_time_s: 16.5
+    peel_lead_in_s: 0.5
+    peel_stagger_s: 0.0
+    peel_duration_s: 6.5
+    peel_spin_deg: 90.0
+    peel_order: ""
+    orbit_auto_start: false
+    yaw_mode: hold
+
+    excite_enabled: false
+    pre_excite_hover_s: 0.0
+    to_center_time_s: 3.0
+    land_xy_acceptance_m: 0.35
+    land_vxy_acceptance_mps: 0.20
+    land_settle_time_s: 1.0
+
+    set_global_origin_on_link: false
+    anchor_frame_after_climb: true

@@ -171,6 +171,7 @@ def record_ov9281(
     width: int,
     height: int,
     record_fps: float,
+    forward_pool=None,
 ) -> None:
     period_ns = int(1e9 / record_fps) if record_fps > 0 else 0
     last_record_ns = 0
@@ -191,6 +192,21 @@ def record_ov9281(
             continue
         timestamp_ns, offset_ns = mapped
         stats.note(sensor_ns, exposure_us)
+        if forward_pool is not None:
+            # Full capture rate, ahead of the recording-rate gate: shadow
+            # depth wants every frame the bag deliberately skips.
+            slot = forward_pool.begin_write()
+            if slot is not None:
+                destination = np.ndarray(
+                    (height, width), dtype=np.uint8, buffer=slot.buffer
+                )
+                np.copyto(destination, yuv[:height, :width])
+                slot.commit(
+                    sensor_boottime_ns=sensor_ns,
+                    realtime_ns=timestamp_ns,
+                    exposure_us=exposure_us,
+                    analogue_gain=0.0,
+                )
         if period_ns and timestamp_ns - last_record_ns < period_ns:
             continue
         image = Image()

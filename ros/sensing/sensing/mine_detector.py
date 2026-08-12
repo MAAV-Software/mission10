@@ -7,13 +7,13 @@ read-only, copies the freshest frame at a fixed cadence, tiles it for the
 640 px detector, and puts one item per detected box on a caller-owned
 ``queue.Queue``:
 
-    (realtime_ns, x, y, w, h)   # top-left pixel coordinates in the full
+    (timestamp, x, y, w, h)     # top-left pixel coordinates in the full
                                 # 1640 x 1232 frame
 
-``realtime_ns`` is the frame's realtime stamp; every box from one frame
-carries the same stamp.  A frame with no detections queues nothing.  Use a
-bounded queue: when it is full the oldest item is dropped, so a stalled
-consumer costs boxes, never detection cadence.
+``timestamp`` is the mission node's ``latest_timestamp``, read once per frame
+under the caller's lock, so every box from one frame carries the same stamp.
+A frame with no detections queues nothing.  Use an unbounded queue: every box
+is a mine observation worth keeping, so nothing is ever dropped.
 
 Two inference backends share one output convention, a list of
 ``(x, y, w, h, score)`` tuples in tile pixels:
@@ -149,12 +149,11 @@ class HailoYoloBackend:
     """Single-class YOLOv11 HEF with embedded NMS, through HailoRT."""
 
     def __init__(self, hef_path=DEFAULT_HEF, confidence: float = DEFAULT_CONFIDENCE) -> None:
-        from hailo_platform import VDevice
+        from .hailo_device import shared_vdevice
 
         self.confidence = confidence
         self.tile = TILE
-        params = VDevice.create_params()
-        self.vdevice = VDevice(params)
+        self.vdevice = shared_vdevice()
         self.infer_model = self.vdevice.create_infer_model(str(hef_path))
         self.infer_model.set_batch_size(1)
         self.output_buffer = np.empty(
@@ -162,7 +161,6 @@ class HailoYoloBackend:
         )
         self.configured = self.infer_model.configure()
         self.configured.__enter__()
-        self.configured.activate()
 
     def infer(self, tile_rgb: np.ndarray) -> list[tuple[float, float, float, float, float]]:
         bindings = self.configured.create_bindings()
@@ -199,9 +197,7 @@ class HailoYoloBackend:
         return boxes
 
     def close(self) -> None:
-        self.configured.deactivate()
         self.configured.__exit__(None, None, None)
-        self.vdevice.release()
 
 
 def detect_frame(
@@ -240,18 +236,12 @@ def poll_once(
     if payload is None:
         return None
     frame_rgb = yuyv_to_rgb(payload, pool.width, pool.height)
-    for x, y, w, h, _score in detect_frame(backend, frame_rgb):
-        while True:
-            try:
-                with timestamp_lock:
-                    image_timestamp = mission_node.latest_timestamp
-                    results.put_nowait((image_timestamp, x, y, w, h))
-                break
-            except queue.Full:
-                try:
-                    results.get_nowait()
-                except queue.Empty:
-                    pass
+    boxes = detect_frame(backend, frame_rgb)
+    if boxes:
+        with timestamp_lock:
+            image_timestamp = mission_node.latest_timestamp
+        for x, y, w, h, _score in boxes:
+            results.put_nowait((image_timestamp, x, y, w, h))
     return metadata
 
 
@@ -272,7 +262,7 @@ def run_mine_detection(
     Never raises out of the loop: pool loss and backend faults are logged and
     retried so the mission thread that runs this cannot die mid-flight.
     """
-    stop = stop
+    stop = stop or threading.Event()
     pool = None
     last_sequence = 0
     last_progress = time.monotonic()
@@ -312,6 +302,23 @@ def run_mine_detection(
         pool.close()
 
 
-def get_hailo_bounding_boxes(results: queue.Queue, timestamp_lock: threading.Lock, stop_event: threading.Event, mission_node, **kwargs) -> None:
-    """Mission-runner entry point; blocks, so run it in a dedicated thread."""
-    run_mine_detection(results, timestamp_lock, HailoYoloBackend(), mission_node, stop=stop_event, **kwargs)
+def get_hailo_bounding_boxes(
+    results: queue.Queue,
+    timestamp_lock: threading.Lock,
+    stop_event: threading.Event,
+    mission_node,
+    *,
+    pool_name: str = "cm2",
+) -> None:
+    """Mission-runner entry point; blocks, so run it in a dedicated thread.
+
+    Runs until ``stop_event`` is set.
+    """
+    run_mine_detection(
+        results,
+        timestamp_lock,
+        HailoYoloBackend(),
+        mission_node,
+        stop=stop_event,
+        pool_name=pool_name,
+    )

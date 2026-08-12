@@ -1,0 +1,61 @@
+# SITL rehearsal of the two-drone UWB qualification circle (real cards:
+# circle_qual_duo_drone0/drone4.yaml). Same circle: 4 m AGL, 4 m radius,
+# 1 m/s, opposed phases, guards off exactly as the real flight flies them.
+# SITL centers are world-frame; the circle sits on the cage center with the
+# pads at north = -1.5 (drone0) and +1.5 (drone4 stand-in px4_1).
+/**:
+  ros__parameters:
+    setpoint_rate_hz: 20.0
+    prestream_cycles: 20
+    wait_for_start: true
+    force_arm: true            # SITL only; the real cards arm by hand
+    takeoff_altitude_m: 4.0
+    takeoff_acceptance_m: 0.25
+    takeoff_timeout_s: 40.0
+    status_stale_timeout_s: 5.0
+    launch_stability_s: 3.0
+
+    drone_count: 2
+    staging_enabled: false
+    line_trim_enabled: false
+    phase_guard_enabled: false
+
+    orbit_center_e_m: 0.0
+    orbit_center_n_m: 0.0
+    orbit_radius_m: 4.0
+    orbit_speed_mps: 1.0
+    phase_step_deg: 180.0
+    phase0_deg: -90.0
+    orbit_mod_amp: [0.0, 0.0]
+    orbit_mod_phase_deg: [0.0, 0.0]
+    insertion_spin_deg: 235.0
+    spiral_time_s: 16.5
+    peel_lead_in_s: 0.5
+    peel_stagger_s: 0.0
+    peel_duration_s: 6.5
+    peel_spin_deg: 90.0
+    peel_order: ""
+    orbit_auto_start: false
+    yaw_mode: hold
+
+    excite_enabled: false
+    pre_excite_hover_s: 0.0
+    to_center_time_s: 3.0
+    land_xy_acceptance_m: 0.35
+    land_vxy_acceptance_mps: 0.20
+    land_settle_time_s: 1.0
+
+    orca_protected_radius_m: 1.25
+    orca_response_time_s: 0.6
+    orca_horizon_s: 5.0
+    orca_max_speed_mps: 3.0
+    phase_protected_separation_m: 3.0
+    phase_barrier_gamma: 1.0
+    phase_tracking_gain: 0.8
+    phase_error_deadband_deg: 3.0
+    phase_min_rate_scale: 0.4
+    phase_max_rate_scale: 1.5
+
+    origin_lat: 42.294438798326105
+    origin_lon: -83.7104553367608
+    origin_alt: 0.0

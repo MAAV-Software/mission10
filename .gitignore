@@ -19,8 +19,8 @@ models/*/dataset/
 
 .DS_Store
 
-test*
-!uwb/protocol/testdata/
+# Scratch files at the repo root only; never hide real test suites.
+/test*
 *.jpg
 *.png
 ._*

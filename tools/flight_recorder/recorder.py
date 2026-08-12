@@ -136,6 +136,7 @@ def main() -> int:
     errors: list[str] = []
     threads: list[threading.Thread] = []
     pool = None
+    forward_pool = None
     camera = None
     node = None
     spin = None
@@ -292,6 +293,19 @@ def main() -> int:
             )
         )
         pool = SharedFramePool.attach(args.pool_name)
+        try:
+            # Mirror captured forward frames for the shadow depth monitor.
+            # The recorder stays a recorder if the pool cannot be created.
+            forward_pool = SharedFramePool.create(
+                "ov9281", args.width, args.height, bytes_per_pixel=1
+            )
+        except Exception as exc:
+            print(
+                f"recorder: no OV9281 shared pool ({exc}); "
+                "depth shadow consumers see nothing",
+                file=sys.stderr,
+                flush=True,
+            )
         camera.start()
         pool.set_recorder_heartbeat()
 
@@ -317,6 +331,7 @@ def main() -> int:
                         width=args.width,
                         height=args.height,
                         record_fps=args.ov_record_fps,
+                        forward_pool=forward_pool,
                     ),
                 ),
                 name="record-ov9281",
@@ -368,6 +383,11 @@ def main() -> int:
             rclpy.shutdown()
         if spin is not None:
             spin.join(timeout=1.0)
+        if forward_pool is not None:
+            try:
+                forward_pool.close()
+            except BufferError as exc:
+                errors.append(f"forward pool close: {exc}")
         if pool is not None:
             pool.close()
         bag.close()

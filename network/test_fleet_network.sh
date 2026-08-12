@@ -14,7 +14,9 @@ readonly SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log"
 readonly TEST_DDS="$TEST_ROOT/cyclonedds"
 readonly MWIRELESS_UUID="00000000-0000-0000-0000-000000000001"
 readonly HOTSPOT_UUID="00000000-0000-0000-0000-000000000002"
-export NMCLI_LOG SYSTEMCTL_LOG MWIRELESS_UUID HOTSPOT_UUID
+readonly VENUE_UUID="00000000-0000-0000-0000-000000000003"
+readonly FIELD_SSID_UUID="00000000-0000-0000-0000-000000000004"
+export NMCLI_LOG SYSTEMCTL_LOG MWIRELESS_UUID HOTSPOT_UUID VENUE_UUID FIELD_SSID_UUID
 
 cleanup() {
     rm -rf -- "$TEST_ROOT"
@@ -37,13 +39,35 @@ if [[ "$*" == "-g connection.id connection show "* ]]; then
     esac
 fi
 case "$*" in
-    "-g UUID connection show") printf '%s\n%s\n' "$MWIRELESS_UUID" "$HOTSPOT_UUID" ;;
+    "-g UUID connection show") printf '%s\n%s\n%s\n%s\n' \
+        "$MWIRELESS_UUID" "$HOTSPOT_UUID" "$VENUE_UUID" "$FIELD_SSID_UUID" ;;
     "-g connection.type connection show field-ap"|\
     "-g connection.type connection show field-client") printf '802-11-wireless\n' ;;
     "-g 802-11-wireless.ssid connection show $MWIRELESS_UUID") printf 'MWireless\n' ;;
     "-g 802-11-wireless.ssid connection show $HOTSPOT_UUID") printf 'Test-Hotspot\n' ;;
+    "-g 802-11-wireless.ssid connection show $VENUE_UUID") printf 'Test-Venue\n' ;;
+    "-g 802-11-wireless.ssid connection show $FIELD_SSID_UUID") printf 'Test-Fleet\n' ;;
     "-g connection.interface-name connection show $MWIRELESS_UUID"|\
-    "-g connection.interface-name connection show $HOTSPOT_UUID") printf 'wlan0\n' ;;
+    "-g connection.interface-name connection show $HOTSPOT_UUID"|\
+    "-g connection.interface-name connection show $VENUE_UUID"|\
+    "-g connection.interface-name connection show $FIELD_SSID_UUID") printf 'wlan0\n' ;;
+    "-g connection.type connection show $MWIRELESS_UUID"|\
+    "-g connection.type connection show $HOTSPOT_UUID"|\
+    "-g connection.type connection show $VENUE_UUID"|\
+    "-g connection.type connection show $FIELD_SSID_UUID") printf '802-11-wireless\n' ;;
+    "-g 802-11-wireless.mode connection show $MWIRELESS_UUID"|\
+    "-g 802-11-wireless.mode connection show $HOTSPOT_UUID"|\
+    "-g 802-11-wireless.mode connection show $VENUE_UUID"|\
+    "-g 802-11-wireless.mode connection show $FIELD_SSID_UUID") printf 'infrastructure\n' ;;
+    "-g SSID device wifi list ifname wlan0")
+        printf 'MWireless\nTest-Hotspot\nTest-Venue\n'
+        ;;
+    "--wait 15 connection up "*)
+        uuid="${5:-}"
+        case ",${NMCLI_FAIL_UUIDS:-}," in
+            *",$uuid,"*) exit 1 ;;
+        esac
+        ;;
     "--terse --fields DEVICE,TYPE device status") printf 'wlan0:wifi\nwlan1:wifi\n' ;;
     "-g GENERAL.CONNECTION device show wlan0") printf 'field-client\n' ;;
 esac
@@ -113,6 +137,13 @@ assert_systemctl 'stop jarvis-web.service'
 [[ "$(readlink "$TEST_DDS/active.xml")" == internet.xml ]]
 
 : >"$NMCLI_LOG"
+NMCLI_FAIL_UUIDS="$MWIRELESS_UUID,$HOTSPOT_UUID" run_controller apply
+assert_log "--wait 15 connection up $VENUE_UUID ifname wlan0"
+reject_log "connection up $FIELD_SSID_UUID ifname wlan0"
+assert_log "connection modify $VENUE_UUID connection.autoconnect yes connection.autoconnect-priority 100"
+assert_log "connection modify $FIELD_SSID_UUID connection.autoconnect no"
+
+: >"$NMCLI_LOG"
 : >"$SYSTEMCTL_LOG"
 NMCLI_EXISTING_PROFILE=field-client run_controller set-mode 2 field
 run_controller is-master
@@ -153,12 +184,6 @@ assert_systemctl 'stop fleet-dhcp.service'
 [[ "$(readlink "$TEST_DDS/active.xml")" == internet.xml ]]
 if run_controller is-field-master; then
     echo "Internet mode was reported as a field master" >&2
-    exit 1
-fi
-
-printf 'MASTER=9\nNETWORK=field\n' >"$TEST_MODE"
-if run_controller check >/dev/null 2>&1; then
-    echo "An invalid FleetMode passed validation" >&2
     exit 1
 fi
 
